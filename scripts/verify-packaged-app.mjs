@@ -1,0 +1,141 @@
+#!/usr/bin/env node
+// 校验打包后的 app.asar 内容是否包含当前源码的功能，用于每次出包后的自检。
+//
+// 用法：
+//   node scripts/verify-packaged-app.mjs                       # 默认检查 release/mac-arm64/ZSense.app
+//   node scripts/verify-packaged-app.mjs <app.asar 路径>        # 检查指定产物（zip / dmg 里解出来的也行）
+//
+// 注意：asar 里的中文是原样 UTF-8（不是 \uXXXX 转义），而且必须用 Buffer 搜索——
+// 用 grep -a -o 配多字节中文会漏匹配，曾据此误判过「安装包里没有新界面」。
+import fs from 'node:fs'
+import path from 'node:path'
+import process from 'node:process'
+
+const defaultAsar = path.join('release', 'mac-arm64', 'ZSense.app', 'Contents', 'Resources', 'app.asar')
+const asarPath = process.argv[2] ?? defaultAsar
+
+if (!fs.existsSync(asarPath)) {
+  console.error(`找不到打包产物：${asarPath}`)
+  process.exit(1)
+}
+
+const buffer = fs.readFileSync(asarPath)
+
+function countOccurrences(needle) {
+  const target = Buffer.from(needle, 'utf8')
+  let hits = 0
+  let index = buffer.indexOf(target)
+  while (index !== -1) {
+    hits += 1
+    index = buffer.indexOf(target, index + target.length)
+  }
+  return hits
+}
+
+function readAsarEntries() {
+  const headerSize = buffer.readUInt32LE(12)
+  const header = JSON.parse(buffer.subarray(16, 16 + headerSize).toString('utf8').replace(/\0+$/, ''))
+  const walk = (node, prefix, out) => {
+    for (const [name, entry] of Object.entries(node.files ?? {})) {
+      const full = prefix ? `${prefix}/${name}` : name
+      if (entry.files) walk(entry, full, out)
+      else out.push(full)
+    }
+    return out
+  }
+  return walk(header, '', [])
+}
+
+const packedFiles = readAsarEntries()
+
+const requiredRuntimePackages = [
+  '@larksuiteoapi/node-sdk', '@slack/socket-mode', '@slack/web-api', '@wecom/aibot-node-sdk',
+  'dingtalk-stream', 'discord.js', 'grammy', 'opencc-js', 'selfsigned', 'unpdf',
+]
+const rendererOnlyPackages = ['@univerjs/preset-sheets-core', '@univerjs/presets', 'react', 'react-dom', 'react-markdown']
+const packageEntry = (name) => `node_modules/${name}/package.json`
+const missingRuntimePackages = requiredRuntimePackages.filter((name) => !packedFiles.includes(packageEntry(name)))
+const duplicatedRendererPackages = rendererOnlyPackages.filter((name) => packedFiles.includes(packageEntry(name)))
+
+// 关键文件：新增能力对应的实现文件，缺一个就说明包是旧的
+const requiredFiles = [
+  'electron/services/web-bridge-service.mjs',
+  'electron/services/device-data-service.mjs',
+  'electron/web-bridge-client.js',
+  'electron/services/update-service.mjs',
+  'electron/services/zsense-agent-core.mjs',
+  'electron/services/agent-loop-runtime.mjs',
+  'electron/services/device-link-service.mjs',
+  'electron/services/scheduled-task-runner.mjs',
+  'electron/services/local-memory-service.mjs',
+  'dist/index.html',
+]
+
+// 关键文案与代码标记：界面文案用中文原文，主进程标记用不会被压缩改名的大写常量或 IPC 通道
+const requiredMarkers = [
+  ['定时任务界面', '定时任务'],
+  ['局域网访问界面', '局域网访问'],
+  ['设备互联界面', '设备互联'],
+  ['技能管理设置', '技能管理'],
+  ['本机地址文案', '本机地址'],
+  ['自签证书文案', '自签证书'],
+  ['局域网扫描按钮', '立即扫描局域网'],
+  ['Web 访问默认端口', 'DEFAULT_WEB_BRIDGE_PORT'],
+  ['Web 访问 IPC 通道', 'zsense:web-bridge'],
+  ['设备数据服务', 'device-data-service'],
+  ['并行执行规则', '并行执行规则'],
+  ['无进展保护', '连续 3 轮执行了相同工具并得到相同结果'],
+  ['Bot 快捷指令', 'Bot 指令'],
+  ['Bot 快捷指令分类', '/bot <Bot 名> <指令>'],
+  ['Bot 委派字段', 'delegateBotId'],
+  ['Bot 委派标记', '/bot 指令'],
+  ['钉钉表情已读', '/v1.0/robot/emotion/'],
+  ['钉钉表情名称', '🤔Thinking'],
+  ['设备数据工具', 'read_device_data'],
+]
+
+const missingFiles = requiredFiles.filter((file) => !packedFiles.includes(file))
+const missingMarkers = requiredMarkers.filter(([, marker]) => countOccurrences(marker) === 0)
+
+for (const file of requiredFiles) {
+  console.log(`${missingFiles.includes(file) ? '❌' : '✅'} 文件 ${file}`)
+}
+for (const [label, marker] of requiredMarkers) {
+  const hits = countOccurrences(marker)
+  console.log(`${hits === 0 ? '❌' : '✅'} ${label}（${marker}：${hits} 处）`)
+}
+
+for (const name of requiredRuntimePackages) console.log(`${missingRuntimePackages.includes(name) ? '❌' : '✅'} 运行时依赖 ${name}`)
+for (const name of rendererOnlyPackages) console.log(`${duplicatedRendererPackages.includes(name) ? '❌' : '✅'} 前端依赖未重复打包 ${name}`)
+
+let localeCheck = { checked: false, locales: [], missing: [], unexpected: [] }
+let localMemoryCheck = { checked: false, noDownloader: true }
+const macAppMarker = `${path.sep}Contents${path.sep}Resources${path.sep}app.asar`
+if (path.resolve(asarPath).endsWith(macAppMarker)) {
+  const appContents = path.dirname(path.dirname(path.resolve(asarPath)))
+  const uvPath = path.join(appContents, 'Resources', 'bundled-tools', 'uv')
+  localMemoryCheck = { checked: true, noDownloader: !fs.existsSync(uvPath) && !packedFiles.includes('node_modules/@vectorize-io/hindsight-client/package.json') }
+  console.log(`${localMemoryCheck.noDownloader ? '✅' : '❌'} 本地记忆无需额外下载器`)
+  const localeRoot = path.join(appContents, 'Frameworks', 'Electron Framework.framework', 'Versions', 'A', 'Resources')
+  const locales = fs.existsSync(localeRoot)
+    ? fs.readdirSync(localeRoot).filter((name) => name.endsWith('.lproj')).sort()
+    : []
+  const expected = ['en.lproj', 'zh_CN.lproj']
+  const missing = expected.filter((name) => !locales.includes(name))
+  const unexpected = locales.filter((name) => !expected.includes(name))
+  localeCheck = { checked: true, locales, missing, unexpected }
+  console.log(`${missing.length || unexpected.length ? '❌' : '✅'} Electron 语言资源 ${locales.join(', ') || '无'}`)
+}
+
+const sizeMb = Number((buffer.length / 1024 / 1024).toFixed(1))
+const oversized = sizeMb > 120
+console.log(`${oversized ? '❌' : '✅'} app.asar 体积 ${sizeMb} MB（上限 120 MB）`)
+const ok = missingFiles.length === 0
+  && missingMarkers.length === 0
+  && missingRuntimePackages.length === 0
+  && duplicatedRendererPackages.length === 0
+  && !oversized
+  && (!localMemoryCheck.checked || localMemoryCheck.noDownloader)
+  && (!localeCheck.checked || (!localeCheck.missing.length && !localeCheck.unexpected.length))
+console.log(JSON.stringify({ ok, asarPath, sizeMb, packedFileCount: packedFiles.length, missingFiles, missingMarkers: missingMarkers.map(([label]) => label), missingRuntimePackages, duplicatedRendererPackages, localeCheck, localMemoryCheck, oversized }))
+process.exit(ok ? 0 : 1)

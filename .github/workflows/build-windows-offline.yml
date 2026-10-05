@@ -1,0 +1,112 @@
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-x64:
+    name: Windows x64 with ZSense Agent Core
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      NPM_CONFIG_REGISTRY: ${{ vars.ZSENSE_NPM_REGISTRY || 'https://registry.npmjs.org' }}
+      ELECTRON_MIRROR: ${{ vars.ZSENSE_ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/' }}
+      ELECTRON_BUILDER_BINARIES_MIRROR: ${{ vars.ZSENSE_ELECTRON_BUILDER_MIRROR || 'https://npmmirror.com/mirrors/electron-builder-binaries/' }}
+
+    steps:
+      - name: Check out ZSense
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore official Windows offline tools cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/windows-offline-assets
+          key: zsense-windows-offline-v1-${{ hashFiles('scripts/windows-offline-assets.mjs') }}
+
+      - name: Prepare pinned Windows offline tools
+        shell: pwsh
+        env:
+          ZSENSE_WINDOWS_ASSET_CACHE: ${{ github.workspace }}\.cache\windows-offline-assets
+          ZSENSE_WINDOWS_TOOLS_MIRROR: ${{ vars.ZSENSE_WINDOWS_TOOLS_MIRROR }}
+        run: npm run tools:prepare:win
+
+      - name: Run application checks
+        run: |
+          npm run typecheck
+          npm run test:runtime
+          npm run test:windows-installer
+          npm run test:windows-tools
+          npm run test:office
+          npm run test:scheduled-display
+          npm run test:chat
+          npm run test:voice
+          npm run test:independence
+
+      - name: Build Windows installer
+        run: npm run desktop:build:win
+
+      - name: Verify packaged Agent Core
+        shell: pwsh
+        run: |
+          $resources = 'release\win-unpacked\resources'
+          if (-not (Test-Path "$resources\app.asar")) {
+            throw 'Windows 安装包中缺少 ZSense 应用核心。'
+          }
+          if (Test-Path "$resources\hermes-runtime") {
+            throw 'Windows 安装包不应包含外部 Agent Runtime。'
+          }
+          $required = @(
+            "$resources\bundled-tools\officecli.exe",
+            "$resources\bundled-tools\dws.exe",
+            "$resources\bundled-tools\kdocs-cli.exe",
+            "$resources\bundled-tools\stt\whisper-cli.exe",
+            "$resources\bundled-tools\stt\ggml-base.bin",
+            "$resources\bundled-tools\redist\VC_redist.x64.exe",
+            "$resources\bundled-tools\tts\moss\manifest.json"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path $file -PathType Leaf)) { throw "Windows 完整离线包缺少 $file" }
+          }
+          node scripts/verify-windows-offline-tools.mjs "$resources\bundled-tools" "$resources\bundled-tools\tts\moss"
+
+      - name: Publish installer to optional China object storage
+        shell: pwsh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.ZSENSE_OBJECT_STORAGE_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.ZSENSE_OBJECT_STORAGE_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.ZSENSE_OBJECT_STORAGE_REGION }}
+          ZSENSE_STORAGE_ENDPOINT: ${{ vars.ZSENSE_STORAGE_ENDPOINT }}
+          ZSENSE_STORAGE_BUCKET: ${{ vars.ZSENSE_STORAGE_BUCKET }}
+          ZSENSE_STORAGE_PREFIX: ${{ vars.ZSENSE_STORAGE_PREFIX }}
+        run: |
+          if (-not $env:AWS_ACCESS_KEY_ID -or -not $env:AWS_SECRET_ACCESS_KEY -or -not $env:ZSENSE_STORAGE_ENDPOINT -or -not $env:ZSENSE_STORAGE_BUCKET) {
+            Write-Host 'China object storage is not configured; skipping mirror publish.'
+            exit 0
+          }
+          if (-not $env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION = 'auto' }
+          $prefix = if ($env:ZSENSE_STORAGE_PREFIX) { $env:ZSENSE_STORAGE_PREFIX.Trim('/') } else { 'zsense' }
+          $releaseTarget = "s3://$env:ZSENSE_STORAGE_BUCKET/$prefix/releases"
+          $installer = Get-ChildItem 'release\ZSense-*-win-x64.exe' | Select-Object -First 1
+          aws s3 cp $installer.FullName "$releaseTarget/$($installer.Name)" --endpoint-url $env:ZSENSE_STORAGE_ENDPOINT --only-show-errors
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZSense-Windows-x64
+          path: |
+            release/ZSense-*-win-x64.exe
+            release/ZSense-*-win-x64.exe.blockmap
+          if-no-files-found: error
+          retention-days: 14

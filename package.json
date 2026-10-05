@@ -1,0 +1,231 @@
+{
+  "name": "zsense-studio",
+  "productName": "ZSense",
+  "description": "内置 ZSense Agent Core 的多 Bot 桌面工作台",
+  "author": "ZSense",
+  "private": true,
+  "version": "0.26.5",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "bench:efficiency": "node scripts/efficiency-bench.mjs",
+    "test": "node scripts/run-all-tests.mjs",
+    "test:serial": "node scripts/run-all-tests.mjs --serial",
+    "test:fast": "node scripts/run-all-tests.mjs --concurrency 6",
+    "test:device-link": "node scripts/device-link-smoke.mjs",
+    "test:android-companion": "node scripts/android-companion-desktop-smoke.mjs",
+    "android:preview": "node scripts/android-companion-preview.mjs",
+    "test:device-link-hub": "node scripts/device-link-hub-smoke.mjs",
+    "test:device-link-cloud-agent": "node scripts/device-link-cloud-agent-smoke.mjs",
+    "test:device-task-runner": "node scripts/device-task-runner-smoke.mjs",
+    "test:memory-intelligence": "node scripts/memory-intelligence-smoke.mjs",
+    "test:local-memory": "node scripts/local-memory-smoke.mjs",
+    "test:pdf-parser": "node scripts/pdf-parser-smoke.mjs",
+    "test:secrets-vault": "node scripts/secrets-vault-smoke.mjs",
+    "test:update-service": "node scripts/update-service-smoke.mjs",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --pretty false",
+    "desktop": "node scripts/electron-dev.mjs",
+    "desktop:dev": "node scripts/electron-dev.mjs",
+    "desktop:pack": "node scripts/desktop-build.mjs --dir",
+    "desktop:verify": "node scripts/desktop-build.mjs --dir && node scripts/verify-packaged-app.mjs",
+    "desktop:build": "node scripts/desktop-build.mjs",
+    "desktop:build:mac": "node scripts/desktop-build.mjs --mac",
+    "desktop:build:win": "node scripts/desktop-build.mjs --win --x64",
+    "packages:collect:android": "node scripts/collect-installers.mjs --output=android-companion/app/build/outputs/apk/release --platform=android",
+    "verify:packaged": "node scripts/verify-packaged-app.mjs",
+    "tools:prepare:win": "node scripts/prepare-windows-offline-tools.mjs",
+    "tools:verify:win": "node scripts/verify-windows-offline-tools.mjs",
+    "test:auth": "node scripts/auth-smoke.mjs",
+    "test:configuration-transfer": "node scripts/run-electron.mjs scripts/configuration-transfer-smoke.mjs",
+    "test:first-run": "node scripts/first-run-setup-smoke.mjs",
+    "test:bots": "node scripts/bot-management-smoke.mjs",
+    "test:runtime": "node scripts/runtime-lifecycle-smoke.mjs",
+    "test:windows-installer": "node scripts/windows-installer-smoke.mjs",
+    "test:windows-tools": "node scripts/windows-offline-tools-smoke.mjs",
+    "test:conversation": "node scripts/conversation-policy-smoke.mjs",
+    "test:memory-skills": "node scripts/memory-skill-sync-smoke.mjs",
+    "test:skill-management": "node scripts/skill-management-smoke.mjs",
+    "test:official-skill-updates": "node scripts/official-skill-update-smoke.mjs",
+    "test:browser": "node scripts/browser-workspace-smoke.mjs",
+    "test:pdf-viewer": "node scripts/pdf-viewer-smoke.mjs",
+    "test:chat": "node scripts/zsense-gateway-smoke.mjs",
+    "test:settings-native": "node scripts/settings-native-smoke.mjs",
+    "test:icon-tooltips": "node scripts/icon-tooltip-smoke.mjs",
+    "test:dialog-overlay": "node scripts/dialog-overlay-smoke.mjs",
+    "test:chat-attachment-paste": "node scripts/chat-attachment-paste-smoke.mjs",
+    "test:edit-context-menu": "node scripts/edit-context-menu-smoke.mjs",
+    "test:markdown-inline-image": "node scripts/markdown-inline-image-smoke.mjs",
+    "test:lark-auth-flow": "node scripts/lark-auth-flow-smoke.mjs",
+    "test:screenshot-annotation": "node scripts/screenshot-annotation-smoke.mjs",
+    "test:voice-wake": "node scripts/voice-wake-smoke.mjs",
+    "test:voice-conversation": "node scripts/voice-conversation-smoke.mjs",
+    "test:scheduled-display": "node scripts/scheduled-task-display-smoke.mjs",
+    "test:scheduled-task-tool": "node scripts/scheduled-task-tool-smoke.mjs",
+    "test:office": "node scripts/office-workspace-smoke.mjs",
+    "test:office-tasks": "node scripts/office-task-smoke.mjs",
+    "test:canvas": "node scripts/run-electron.mjs scripts/zsense-canvas-smoke.mjs",
+    "test:agent-core": "node scripts/zsense-agent-core-smoke.mjs",
+    "test:capabilities": "node scripts/agent-capabilities-smoke.mjs",
+    "test:subagents": "node scripts/subagent-service-smoke.mjs",
+    "test:mcp": "node scripts/mcp-service-smoke.mjs",
+    "test:computer-use": "node scripts/run-electron.mjs scripts/computer-use-smoke.mjs",
+    "test:autonomy": "node scripts/autonomy-runner-smoke.mjs",
+    "test:gateway": "node scripts/zsense-gateway-smoke.mjs",
+    "test:voice": "node scripts/zsense-voice-service-smoke.mjs",
+    "test:independence": "node scripts/zsense-independence-smoke.mjs",
+    "icon:generate": "node scripts/run-electron.mjs scripts/generate-icon.cjs",
+    "test:efficiency": "node scripts/efficiency-smoke.mjs",
+    "test:chat-cards": "node scripts/chat-cards-smoke.mjs",
+    "test:bot-slash": "node scripts/bot-slash-command-smoke.mjs",
+    "test:conversation-groups": "node scripts/conversation-groups-smoke.mjs",
+    "test:safe-console": "node scripts/safe-console-smoke.mjs",
+    "test:web-bridge": "node scripts/web-bridge-smoke.mjs"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.73.3",
+    "@slack/socket-mode": "^3.0.1",
+    "@slack/web-api": "^8.1.1",
+    "@wecom/aibot-node-sdk": "^1.0.7",
+    "dingtalk-stream": "^2.1.6-beta.1",
+    "discord.js": "^14.27.0",
+    "grammy": "^1.46.0",
+    "opencc-js": "^1.0.5",
+    "pdf-lib": "^1.17.1",
+    "selfsigned": "^2.4.1",
+    "unpdf": "^1.8.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@univerjs/preset-sheets-conditional-formatting": "^0.25.1",
+    "@univerjs/preset-sheets-core": "^0.25.1",
+    "@univerjs/preset-sheets-data-validation": "^0.25.1",
+    "@univerjs/preset-sheets-drawing": "^0.25.1",
+    "@univerjs/preset-sheets-filter": "^0.25.1",
+    "@univerjs/preset-sheets-find-replace": "^0.25.1",
+    "@univerjs/preset-sheets-hyper-link": "^0.25.1",
+    "@univerjs/preset-sheets-note": "^0.25.1",
+    "@univerjs/preset-sheets-sort": "^0.25.1",
+    "@univerjs/preset-sheets-table": "^0.25.1",
+    "@univerjs/presets": "^0.25.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3",
+    "fflate": "0.8.2",
+    "lucide-react": "^0.468.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "rxjs": "^7.8.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  },
+  "build": {
+    "appId": "ai.zsense.studio",
+    "productName": "ZSense",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "afterPack": "scripts/after-pack.mjs",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "build/icon-win.png",
+      "package.json"
+    ],
+    "icon": "build/icon.png",
+    "extraResources": [
+      {
+        "from": "bundled-skills",
+        "to": "bundled-skills",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "electronLanguages": [
+        "en",
+        "zh_CN"
+      ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "ZSense 使用麦克风识别你设置的唤醒词，并在你主动启动后进行语音对话。",
+        "NSLocalNetworkUsageDescription": "ZSense 使用本地网络发现并连接你主动配对的其他 ZSense 设备。"
+      },
+      "extraResources": [
+        {
+          "from": "bundled-tools/darwin-${arch}",
+          "to": "bundled-tools",
+          "filter": [
+            "**/*",
+            "!uv",
+            "!hindsight-uv.json",
+            "!licenses/LICENSE.uv-*"
+          ]
+        },
+        {
+          "from": "bundled-tools/shared/tts/moss",
+          "to": "bundled-tools/tts/moss",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "build/icon-win.png",
+      "electronLanguages": [
+        "en-US",
+        "zh-CN"
+      ],
+      "extraResources": [
+        {
+          "from": "bundled-tools/win32-${arch}",
+          "to": "bundled-tools",
+          "filter": [
+            "**/*",
+            "!uv.exe",
+            "!hindsight-uv.json",
+            "!licenses/LICENSE.uv-*"
+          ]
+        },
+        {
+          "from": "bundled-tools/shared/tts/moss",
+          "to": "bundled-tools/tts/moss",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "build/installer.nsh",
+      "installerLanguages": [
+        "zh_CN",
+        "en_US"
+      ]
+    }
+  }
+}

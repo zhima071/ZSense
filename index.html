@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: zsense-office: zsense-canvas:; media-src 'self' data: blob:; object-src 'self' zsense-canvas:; font-src 'self' data:; connect-src 'self' ws: http://127.0.0.1:4173 zsense-tts:; frame-src 'self' zsense-office: https: http:"
+    />
+    <meta
+      name="description"
+      content="ZSense — 多 Bot、独立记忆、技能、消息网关与自动化工作台"
+    />
+    <title>ZSense</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

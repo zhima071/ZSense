@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+release-*/
+安装包/当前/
+安装包/历史版本/
+.vite/
+runtime-bundles/*/hermes-runtime.tar.gz
+# 由 npm run tools:prepare:win / 打包流程生成的约 1.3 GB 外部工具，不进版本库
+bundled-tools/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.DS_Store
