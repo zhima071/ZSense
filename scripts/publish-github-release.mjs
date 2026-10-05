@@ -59,20 +59,23 @@ for (const entry of feedFiles) {
 }
 
 const checksums = fs.readFileSync(path.join(directory, 'SHA256SUMS'), 'utf8').trim().split(/\r?\n/)
+const checksumByName = new Map()
 for (const line of checksums) {
   const match = line.match(/^([a-f0-9]{64})  (ZSense-[^/]+)$/)
   if (!match) throw new Error('SHA256SUMS 格式错误')
   const file = path.join(directory, match[2])
   if (!fs.existsSync(file) || await digest(file, 'sha256') !== match[1]) throw new Error(`${match[2]} 的 SHA-256 校验失败`)
+  checksumByName.set(match[2], match[1])
 }
 
-const assetNames = fs.readdirSync(directory).filter((name) =>
-  name === 'SHA256SUMS' || name === 'latest-mac.yml' || name === 'latest.yml'
-  || /^ZSense-(?:\d+\.\d+\.\d+-(?:mac-(?:arm64|x64)\.(?:dmg|zip)|win-x64\.exe)(?:\.blockmap)?|\d+\.\d+\.\d+-android13-release\.apk)$/.test(name)
-).sort()
-if (assetNames.some((name) => name.includes('-mac-') && !name.includes(`ZSense-${version}-`))) throw new Error('当前目录混有其他版本的 macOS 包')
-if (assetNames.some((name) => name.includes('-win-') && !name.includes(`ZSense-${version}-`))) throw new Error('当前目录混有其他版本的 Windows 包')
-if (!assetNames.some((name) => name.endsWith('.apk'))) throw new Error('缺少 Android 安装包')
+const available = fs.readdirSync(directory)
+const macInstallers = available.filter((name) => name === `ZSense-${version}-mac-arm64.dmg` || name === `ZSense-${version}-mac-x64.dmg`)
+const winInstaller = `ZSense-${version}-win-x64.exe`
+const androidInstallers = available.filter((name) => /^ZSense-\d+\.\d+\.\d+-android13-release\.apk$/.test(name))
+if (macInstallers.length !== 1 || !available.includes(winInstaller) || androidInstallers.length !== 1) {
+  throw new Error('发布目录必须各有一份 macOS DMG、Windows EXE、Android APK')
+}
+const assetNames = [macInstallers[0], winInstaller, androidInstallers[0]]
 console.log(JSON.stringify({ verified: true, version, repo: repo || null, assets: assetNames, publish }, null, 2))
 
 if (publish) {
@@ -82,7 +85,8 @@ if (publish) {
   const existing = spawnSync('gh', ['release', 'view', tag, '-R', repo], { encoding: 'utf8', stdio: 'ignore' })
   if (existing.status === 0) throw new Error(`${repo} 已有 ${tag} Release；请递增版本号，不覆盖旧版本`)
   const assets = assetNames.map((name) => path.join(directory, name))
+  const notes = [`ZSense ${version} 安装包。`, '', 'SHA-256 校验值：', ...assetNames.map((name) => `- ${name}: ${checksumByName.get(name)}`)].join('\n')
   runGh(['release', 'create', tag, ...assets, '-R', repo, '--target', info.defaultBranchRef.name,
-    '--title', `ZSense ${version}`, '--notes', `ZSense ${version} 安装包。下载后请核对 SHA256SUMS。`])
+    '--title', `ZSense ${version}`, '--notes', notes])
   console.log(`发布完成：https://github.com/${repo}/releases/tag/${tag}`)
 }

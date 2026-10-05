@@ -927,11 +927,11 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
 
             <div className="panel settings-block">
               <div className="panel-header">
-                <div><h2>软件更新</h2><p>当前版本 {updateStatus?.currentVersion ? `v${updateStatus.currentVersion}` : '读取中…'}；配置更新源后可在应用内检查新版本</p></div>
+                <div><h2>软件更新</h2><p>当前版本 {updateStatus?.currentVersion ? `v${updateStatus.currentVersion}` : '读取中…'}；默认从 GitHub Releases 检查新版本</p></div>
                 <button className="button secondary" disabled={checkingUpdate} onClick={() => void checkForUpdates()}>{checkingUpdate ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}{checkingUpdate ? '检查中…' : '检查更新'}</button>
               </div>
               <div className="settings-form two-column">
-                <label className="full-field"><span>更新检查地址</span><input value={draft.updateFeedUrl} placeholder="例如 https://你的发布地址/zsense/latest-mac.yml" onChange={(event) => setDraft({ ...draft, updateFeedUrl: event.target.value })} /><small>指向 electron-builder 生成的 latest-mac.yml / latest.yml，或包含 version 字段的更新清单 JSON；留空表示暂不联网检查。</small></label>
+                <label className="full-field"><span>自定义更新地址（可选）</span><input value={draft.updateFeedUrl} placeholder="留空使用 ZSense 的 GitHub Releases" onChange={(event) => setDraft({ ...draft, updateFeedUrl: event.target.value })} /><small>留空时点击「检查更新」会读取公开的 GitHub Release；也可填写自己的 JSON 或 latest*.yml 更新清单地址。不会自动下载或安装。</small></label>
               </div>
               {updateResult && <div className={`runtime-message ${updateResult.ok ? (updateResult.updateAvailable ? 'warning' : 'success') : 'warning'}`}>
                 {updateResult.ok ? (updateResult.updateAvailable ? <Download size={17} /> : <FileCheck2 size={17} />) : <AlertTriangle size={17} />}

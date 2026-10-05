@@ -9,6 +9,7 @@ import { stageChatAttachments, stagePastedImageAttachments } from './services/ch
 import { readPdfDocument, readPdfDocumentChunk, savePdfDocument, transformPdfPages } from './services/pdf-document-service.mjs'
 import { fetchOfficialModelCatalog } from './services/model-catalog-service.mjs'
 import { createMemoryMaintenanceQueue, shouldExtractMemory } from './services/memory-intelligence.mjs'
+import { defaultUpdateFeedUrl } from './services/update-service.mjs'
 
 const channelIds = new Set(['web', 'telegram', 'discord', 'slack', 'wecom', 'weixin', 'dingtalk', 'feishu', 'webhook'])
 const externalChannelIds = new Set([...channelIds].filter((id) => id !== 'web'))
@@ -891,7 +892,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
   safeHandle(ipcMain, 'zsense:update:check', async (payload) => {
     if (!updateService) throw new Error('当前运行环境不支持检查更新。')
     const requested = optionalText(payload, '更新检查地址', 2_000)
-    const feedUrl = requested || String(database.loadSettings().updateFeedUrl || '')
+    const feedUrl = requested || String(database.loadSettings().updateFeedUrl || '') || defaultUpdateFeedUrl()
     return updateService.check(feedUrl)
   })
   safeHandle(ipcMain, 'zsense:update:open-download', async (payload) => {

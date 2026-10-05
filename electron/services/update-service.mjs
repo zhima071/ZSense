@@ -2,6 +2,11 @@ import process from 'node:process'
 
 const REQUEST_TIMEOUT_MS = 8_000
 const MAX_FEED_BYTES = 256 * 1024
+const GITHUB_RELEASE_API = 'https://api.github.com/repos/zhima071/ZSense/releases/latest'
+
+export function defaultUpdateFeedUrl() {
+  return GITHUB_RELEASE_API
+}
 
 export function normalizeVersion(value) {
   const matched = String(value || '').trim().match(/\d+(?:\.\d+){0,3}/)
@@ -53,15 +58,16 @@ function parseJsonFeed(text) {
   let value
   try { value = JSON.parse(text) } catch { return null }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const version = normalizeVersion(value.version || value.latestVersion || value.latest || '')
+  const version = normalizeVersion(value.version || value.latestVersion || value.latest || value.tag_name || '')
   if (!version) return null
-  const direct = value.downloadUrl || value.download || value.url || value.dmg || value.win || value.exe || ''
+  const direct = value.downloadUrl || value.download || value.dmg || value.win || value.exe || (value.tag_name ? '' : value.url) || ''
   const files = Array.isArray(value.files) ? value.files.map((item) => (typeof item === 'string' ? item : item?.url)).filter(Boolean) : []
+  const assets = Array.isArray(value.assets) ? value.assets.map((item) => item?.browser_download_url).filter(Boolean) : []
   return {
     version,
-    candidates: [direct, ...files].filter(Boolean),
-    notes: String(value.notes || value.releaseNotes || value.changelog || '').slice(0, 4_000),
-    publishedAt: String(value.publishedAt || value.releaseDate || '').slice(0, 60),
+    candidates: [direct, ...files, ...assets].filter(Boolean),
+    notes: String(value.notes || value.releaseNotes || value.changelog || value.body || '').slice(0, 4_000),
+    publishedAt: String(value.publishedAt || value.releaseDate || value.published_at || '').slice(0, 60),
   }
 }
 

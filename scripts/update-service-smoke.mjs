@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { UpdateService, compareVersions, normalizeVersion, parseUpdateFeed } from '../electron/services/update-service.mjs'
+import { UpdateService, compareVersions, defaultUpdateFeedUrl, normalizeVersion, parseUpdateFeed } from '../electron/services/update-service.mjs'
 
 // 版本比较与归一化。
 assert.equal(normalizeVersion('v0.24.0'), '0.24.0', '应该去掉版本号前缀')
@@ -41,6 +41,20 @@ assert.equal(jsonFeed.version, '0.26.0', '应该解析 JSON 清单版本号')
 assert.equal(jsonFeed.notes, '修复桌面通知', '应该解析发布说明')
 assert.equal(parseUpdateFeed('这不是更新清单'), null, '无法识别的清单应该返回 null')
 assert.equal(parseUpdateFeed(JSON.stringify({ channel: 'stable' })), null, '缺少版本字段的 JSON 应该被拒绝')
+
+const githubRelease = JSON.stringify({
+  tag_name: 'v0.26.5',
+  body: '正式发布',
+  published_at: '2026-10-05T06:30:00Z',
+  url: 'https://api.github.com/repos/zhima071/ZSense/releases/1',
+  assets: [
+    { browser_download_url: 'https://github.com/zhima071/ZSense/releases/download/v0.26.5/ZSense-0.26.5-mac-arm64.dmg' },
+    { browser_download_url: 'https://github.com/zhima071/ZSense/releases/download/v0.26.5/ZSense-0.26.5-win-x64.exe' },
+  ],
+})
+assert.equal(defaultUpdateFeedUrl(), 'https://api.github.com/repos/zhima071/ZSense/releases/latest')
+assert.equal(parseUpdateFeed(githubRelease, { feedUrl: defaultUpdateFeedUrl(), platform: 'darwin' }).downloadUrl, 'https://github.com/zhima071/ZSense/releases/download/v0.26.5/ZSense-0.26.5-mac-arm64.dmg')
+assert.equal(parseUpdateFeed(githubRelease, { feedUrl: defaultUpdateFeedUrl(), platform: 'win32' }).downloadUrl, 'https://github.com/zhima071/ZSense/releases/download/v0.26.5/ZSense-0.26.5-win-x64.exe')
 
 function feedResponse(body, { status = 200 } = {}) {
   return { ok: status >= 200 && status < 300, status, text: async () => body }

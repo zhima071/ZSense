@@ -177,7 +177,7 @@ Bot 对话、AI 对话、网关消息和定时任务都调用同一 Core，因�
 
 ### 软件更新
 
-`electron/services/update-service.mjs` 读取用户配置的更新地址，支持 electron-builder 生成的 `latest-mac.yml` / `latest.yml` 以及包含 `version` 字段的 JSON 清单，按平台选择 `.dmg` / `.zip` / `.exe` 产物，比较版本后只在界面提示并调用系统浏览器打开下载地址，不会自动下载或安装。
+`electron/services/update-service.mjs` 默认读取公开的 `zhima071/ZSense` GitHub Releases API，也允许用户覆盖更新地址。解析 Release 的版本与附件后，按平台选择 `.dmg` / `.exe`；自定义地址仍支持 `latest-mac.yml` / `latest.yml` 或 JSON 清单。检查更新只提示并调用系统浏览器打开下载地址，不会自动下载或安装。Release 只上传 macOS DMG、Windows EXE、Android APK 三种安装包。
 
 ## 数据迁移
 
