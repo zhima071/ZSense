@@ -21,10 +21,10 @@ function validateDisplayName(value) {
   return normalized
 }
 
-function validateLockPassword(value) {
+function validateLockPassword(value, label = '安全锁密码') {
   const password = String(value || '')
   if (password.length < 4 || password.length > 128) {
-    throw new Error('安全锁密码至少 4 位，最多 128 位。')
+    throw new Error(`${label}至少 4 位，最多 128 位。`)
   }
   return password
 }
@@ -107,7 +107,7 @@ export class AuthService {
    */
   verifyAppLock(password) {
     const settings = this.database.loadSettings()
-    if (!settings.appLockEnabled) return { ok: false, code: 'app-lock-disabled', error: '设备锁未开启，远程连接不可用。' }
+    if (!settings.appLockEnabled) return { ok: false, code: 'app-lock-disabled', error: '安全锁未启用。' }
     if (!settings.appLockPasswordConfigured) return { ok: false, code: 'app-lock-unconfigured', error: '设备锁还没有设置密码。' }
     const key = 'remote-unlock'
     const failure = this.failures.get(key)
@@ -209,7 +209,7 @@ export class AuthService {
 
   setAccountPassword(senderId, input) {
     const user = this.requireUser(senderId)
-    const password = validateLockPassword(input?.password)
+    const password = validateLockPassword(input?.password, '远程访问密码')
     const credentials = createCredentials(password)
     this.database.updateUserAccountPassword(user.id, credentials.passwordHash, credentials.passwordSalt, new Date().toISOString())
     return { configured: true }
@@ -217,7 +217,7 @@ export class AuthService {
 
   /**
    * 校验账号密码（不改变本机解锁状态）。
-   * 没设过账号密码时返回 ok（等于不拦），与本机安全锁关掉时的放行逻辑保持一致。
+   * 未设置密码必须拒绝：公网入口不能因为本机未启用安全锁而免密放行。
    */
   verifyAccountPassword(password) {
     const provided = String(password || '')
@@ -230,8 +230,15 @@ export class AuthService {
         return { ok: true, user: { username: user.username, displayName: user.displayName } }
       }
     }
-    if (!configured) return { ok: true, code: 'account-password-unconfigured', user: null }
-    return { ok: false, code: 'bad-password', error: '账号密码不正确。' }
+    if (!configured) return { ok: false, code: 'remote-password-unconfigured', error: '尚未设置远程访问密码；请在桌面端“设备互联”中设置，或从已配对设备连接。' }
+    return { ok: false, code: 'bad-password', error: '远程访问密码不正确。' }
+  }
+
+  /** 本机安全锁是可选的；公网网页登录仍须有独立凭据。 */
+  verifyRemotePassword(password) {
+    return this.database.loadSettings().appLockEnabled
+      ? this.verifyAppLock(password)
+      : this.verifyAccountPassword(password)
   }
 
   setLockPassword(senderId, input) {

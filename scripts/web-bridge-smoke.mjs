@@ -1,6 +1,6 @@
 // 局域网 Web 访问：真实起一个桥接服务，验证静态页面、访问口令登录、通道调用、事件推送与局域网限制。
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign, verify } from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdtempSync } from 'node:fs'
 import { WebBridgeService, isLanAddress } from '../electron/services/web-bridge-service.mjs'
+import { connectTrustedRemote, fastTrustDigest } from '../electron/services/remote-trust-connect.mjs'
 
 // 服务默认用自签证书，测试进程内跳过证书校验即可
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
@@ -76,6 +77,30 @@ try {
   assert.equal(await compressedAsset.text(), staticAsset, '压缩静态资源解码后内容不一致')
   assert.equal((await fetchJson(`${base}/bridge/manifest`)).status, 401, '未登录不得读取接口清单')
   assert.equal((await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: 'data.loadWorkspace', args: [] }) })).status, 401)
+
+  // 公网入口无需本机安全锁，但不得退化为局域网访问口令或匿名登录。
+  const remoteHost = { 'cf-worker': 'remote-test' }
+  service.remoteAccessAllowed = () => false
+  assert.equal((await fetchJson(`${base}/bridge/session`, { headers: remoteHost })).status, 403, '远程开关关闭时公网请求必须拒绝')
+  const hostOnlyStatus = await new Promise((resolve, reject) => {
+    https.get({ host: '127.0.0.1', port: status.port, path: '/bridge/session', rejectUnauthorized: false, headers: { Host: 'remote-test.zsense.space' } }, (response) => {
+      response.resume()
+      resolve(response.statusCode)
+    }).on('error', reject)
+  })
+  assert.equal(hostOnlyStatus, 403, '缺少代理头时也须按公网域名识别远程请求')
+  service.remoteAccessAllowed = () => true
+  service.remoteLoginVerifier = (password) => password === 'remote-5678'
+    ? { ok: true, user: { username: 'local.owner', displayName: '本机用户' } }
+    : { ok: false, code: 'bad-password', error: '远程访问密码不正确。' }
+  const remoteWrong = await fetchJson(`${base}/bridge/login`, { method: 'POST', headers: { ...remoteHost, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: status.accessCode }) })
+  assert.equal(remoteWrong.status, 403, '公网来源不能用局域网访问口令绕过独立验证')
+  const remoteLogin = await fetchJson(`${base}/bridge/login`, { method: 'POST', headers: { ...remoteHost, 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'remote-5678' }) })
+  assert.equal(remoteLogin.status, 200, '安全锁关闭时仍应允许正确的远程访问密码登录')
+  const remoteCookie = String(remoteLogin.headers.get('set-cookie') || '').split(';')[0]
+  assert.match(remoteCookie, /^zsense_web=/)
+  service.revokeRemoteSessions()
+  assert.equal((await fetchJson(`${base}/bridge/manifest`, { headers: { Cookie: remoteCookie } })).status, 401, '远程会话撤销后不得继续使用')
 
   // 2) 口令错误被拒
   const wrong = await fetchJson(`${base}/bridge/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: '000000' }) })
@@ -181,7 +206,80 @@ try {
   assert(/^https:\/\/127\.0\.0\.1:\d+$/.test(String(runningStatus.localUrl)), '应单独提供本机地址 localUrl')
 
   // 邮箱不再是免密凭据：只有完成首次配对的设备能用一次性挑战换票据。
+  const testIdentity = generateKeyPairSync('ed25519')
+  const signTestChallenge = (target, digest) => sign(null, Buffer.from(`${target}:${digest}`), testIdentity.privateKey).toString('base64url')
+  service.deviceTrustVerifier = (deviceId, nonce, signature) => deviceId === 'paired-device'
+    && (!nonce || verify(null, Buffer.from(`remote-device:${nonce}`), testIdentity.publicKey, Buffer.from(signature, 'base64url')))
+  let fastRequest
+  let fastCalls = 0
+  const fastConnection = await connectTrustedRemote({
+    origin: base,
+    ownId: 'paired-device',
+    targetId: 'remote-device',
+    signChallenge: signTestChallenge,
+    fetchImpl: (url, options) => {
+      fastCalls += 1
+      if (url.endsWith('/bridge/trust-challenge')) fastRequest = { url, options }
+      return fetch(url, options)
+    },
+  })
+  assert.equal(fastCalls, 1, '新版设备应一次请求换得入场票据')
+  assert.match(fastConnection.url, /\/bridge\/enter\?ticket=/)
+  assert.equal((await fetchJson(fastRequest.url, fastRequest.options)).status, 403, '快速入场签名不能重放')
+  const persistedFastNonces = JSON.parse(fs.readFileSync(path.join(rootPath, 'web-bridge', 'state.json'), 'utf8')).fastTrustNonces
+  assert.equal(persistedFastNonces.length, 1, '已使用随机数必须持久化以防应用重启后重放')
+  const replayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zsense-web-replay-'))
+  const replayPort = await new Promise((resolve) => {
+    const probe = net.createServer()
+    probe.listen(0, '127.0.0.1', () => { const port = probe.address().port; probe.close(() => resolve(port)) })
+  })
+  fs.mkdirSync(path.join(replayRoot, 'web-bridge'), { recursive: true })
+  fs.writeFileSync(path.join(replayRoot, 'web-bridge', 'state.json'), JSON.stringify({ port: replayPort, fastTrustNonces: persistedFastNonces }))
+  const replayService = new WebBridgeService({ rootPath: replayRoot, staticDirectory, preloadPath: path.join(projectRoot, 'electron', 'preload.cjs'), handlers })
+  replayService.deviceTrustVerifier = service.deviceTrustVerifier
+  try {
+    await replayService.setEnabled(true)
+    const replayStatus = await new Promise((resolve, reject) => {
+      const request = https.request({ host: '127.0.0.1', port: replayService.inspect().port, path: '/bridge/trust-challenge', method: 'POST', rejectUnauthorized: false, agent: false, headers: { ...fastRequest.options.headers, Connection: 'close' } }, (response) => {
+        response.resume()
+        response.on('end', () => resolve(response.statusCode))
+      })
+      request.on('error', reject)
+      request.end()
+    })
+    assert.equal(replayStatus, 403, '重启后的服务也不得接受已用签名')
+  } finally {
+    await replayService.setEnabled(false)
+    fs.rmSync(replayRoot, { recursive: true, force: true })
+  }
+  const fastHeaders = fastRequest.options.headers
+  assert.equal((await fetchJson(fastRequest.url, { method: 'POST', headers: { ...fastHeaders, 'x-zsense-nonce': 'B'.repeat(43) } })).status, 403, '签名不得被换成另一个随机数')
+  const staleTime = Date.now() - 180_000
+  const staleNonce = 'C'.repeat(43)
+  const stale = await fetchJson(`${base}/bridge/trust-challenge`, { method: 'POST', headers: {
+    'x-zsense-device': 'paired-device', 'x-zsense-nonce': staleNonce, 'x-zsense-issued-at': String(staleTime),
+    'x-zsense-signature': signTestChallenge('remote-device', fastTrustDigest('paired-device', staleTime, staleNonce)),
+  } })
+  assert.match(stale.payload?.data?.nonce || '', /^[A-Za-z0-9_-]{24,100}$/, '时钟偏差时只能回退到服务端挑战，不得直接放行')
+  const fastEntered = await fetch(fastConnection.url, { redirect: 'manual' })
+  const fastCookie = String(fastEntered.headers.get('set-cookie') || '').split(';')[0]
+  assert.match(fastCookie, /^zsense_web=/)
+
+  let legacyCalls = 0
+  const legacyConnection = await connectTrustedRemote({
+    origin: base, ownId: 'paired-device', targetId: 'remote-device',
+    signChallenge: signTestChallenge,
+    fetchImpl: (url, options) => {
+      legacyCalls += 1
+      if (url.endsWith('/bridge/trust-challenge')) return fetch(url, { ...options, headers: { 'x-zsense-device': options.headers['x-zsense-device'] } })
+      return fetch(url, options)
+    },
+  })
+  assert.equal(legacyCalls, 2, '旧版设备仍只需原有的两次请求')
+  assert.match(legacyConnection.url, /\/bridge\/enter\?ticket=/)
+
   service.deviceTrustVerifier = (deviceId, nonce, signature) => deviceId === 'paired-device' && (!nonce || signature === `signed:${nonce}`)
+
   const unknownChallenge = await fetchJson(`${base}/bridge/trust-challenge`, { method: 'POST', headers: { 'x-zsense-device': 'unknown' } })
   assert.equal(unknownChallenge.status, 403)
   const challenge = await fetchJson(`${base}/bridge/trust-challenge`, { method: 'POST', headers: { 'x-zsense-device': 'paired-device' } })
@@ -259,6 +357,7 @@ try {
   assert.deepEqual(cancelledPeers, ['paired-device'], '撤销设备时应主动取消该设备正在执行的 Agent 任务')
   const revokedAccess = await fetchJson(`${base}/bridge/manifest`, { headers: { Cookie: trustedCookie } })
   assert.equal(revokedAccess.status, 401, '撤销设备授权应使既有远程会话立即失效')
+  assert.equal((await fetchJson(`${base}/bridge/manifest`, { headers: { Cookie: fastCookie } })).status, 401, '撤销设备授权也必须清理快速入场会话')
   const identity = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' })
   let enrolled = null
   service.pairingCodeProvider = () => '654321'

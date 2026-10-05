@@ -33,8 +33,8 @@ try {
     rootPath: path.join(root, 'b'), secrets: new TestVault(), detectLocalHub: false,
     remoteTaskRunner: { run: async ({ prompt, peer }) => { executed += 1; return { output: `${peer.deviceId}: ${prompt}`, conversationId: 'agent-conversation' } } },
   })
-  deviceA.appLockProvider = () => true
-  deviceB.appLockProvider = () => true
+  deviceA.appLockProvider = () => false
+  deviceB.appLockProvider = () => false
   assert(deviceA.rememberRemotePeer('win00002', 'B', deviceB.identityPublicKey()))
   assert(deviceB.rememberRemotePeer('mac00001', 'A', deviceA.identityPublicKey()))
 

@@ -1054,7 +1054,7 @@ export interface WebBridgeStatus {
 }
 
 export interface DeviceLinkStatus {
-  /** 远程连接（公网）状态：与局域网直连相互独立，前置条件是已开启设备锁 */
+  /** 远程连接（公网）状态：与局域网直连、本机安全锁相互独立 */
   remote: {
     enabled: boolean
     running: boolean

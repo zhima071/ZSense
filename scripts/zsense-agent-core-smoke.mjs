@@ -44,6 +44,8 @@ let summaryEmptyFinalRounds = 0
 let loopFailureRequestCount = 0
 let larkRequestCount = 0
 let steeringRequestCount = 0
+let supplementRequestCount = 0
+let supplementFirstCompleted = false
 let transient429Requests = 0
 const server = http.createServer(async (request, response) => {
   let body = ''
@@ -73,6 +75,21 @@ const server = http.createServer(async (request, response) => {
     }
     response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '已按追加指令重新规划并完成。' } }] })}\n\n`)
     response.end('data: [DONE]\n\n')
+    return
+  }
+  if (request.url.includes('/supplement/')) {
+    supplementRequestCount += 1
+    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
+    if (supplementRequestCount === 1) {
+      response.flushHeaders()
+      const timer = setTimeout(() => {
+        supplementFirstCompleted = true
+        response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: '当前步骤已完成。' } }] })}\n\ndata: [DONE]\n\n`)
+      }, 120)
+      response.once('close', () => clearTimeout(timer))
+      return
+    }
+    response.end(`data: ${JSON.stringify({ choices: [{ delta: { content: '已结合补充内容完成。' } }] })}\n\ndata: [DONE]\n\n`)
     return
   }
   if (request.url.includes('/lark-run/')) {
@@ -404,7 +421,8 @@ try {
     onEvent: (event) => steeringEvents.push(event),
   })
   while (steeringRequestCount < 1) await new Promise((resolve) => setTimeout(resolve, 5))
-  const steeringAccepted = core.steerChat('zsense-core-steering-test', '改为直接给出结论。')
+  // UI 的“调整本轮”不再靠关键词猜测；普通措辞也必须按显式意图中断可中断阶段。
+  const steeringAccepted = core.steerChat('zsense-core-steering-test', '请直接给出结论。', { intent: 'adjust' })
   assert.equal(steeringAccepted.accepted, true)
   assert.equal(steeringAccepted.intent, 'adjust')
   const steeringResult = await steeringPromise
@@ -413,7 +431,26 @@ try {
   assert(steeringEvents.some((event) => event.type === 'steering' && event.phase === 'queued' && event.intent === 'adjust'))
   assert(steeringEvents.some((event) => event.type === 'steering' && event.phase === 'applied'))
   assert(steeringEvents.some((event) => event.type === 'agent-step' && event.outcome === 'steered'))
-  assert(requests.filter((item) => item.url.includes('/steering/')).at(-1).body.messages.some((item) => item.role === 'user' && String(item.content).includes('改为直接给出结论')))
+  assert(requests.filter((item) => item.url.includes('/steering/')).at(-1).body.messages.some((item) => item.role === 'user' && String(item.content).includes('请直接给出结论')))
+
+  const supplementPromise = core.chatStream({
+    requestId: 'zsense-core-supplement-test',
+    bot: { id: 'atlas', name: 'Atlas' },
+    message: '先完成当前步骤。',
+    model: 'test-model',
+    modelProvider: 'custom',
+    baseUrl: `${baseUrl}/supplement`,
+    workspacePath,
+    settings: { responseLanguage: 'zh-CN' },
+  })
+  while (supplementRequestCount < 1) await new Promise((resolve) => setTimeout(resolve, 5))
+  const supplementAccepted = core.steerChat('zsense-core-supplement-test', '再补充一段说明。')
+  assert.equal(supplementAccepted.intent, 'supplement')
+  const supplementResult = await supplementPromise
+  assert(supplementFirstCompleted, '普通补充不应中断当前模型步骤')
+  assert.equal(supplementRequestCount, 2)
+  assert.equal(supplementResult.output, '已结合补充内容完成。')
+  assert(requests.filter((item) => item.url.includes('/supplement/')).at(-1).body.messages.some((item) => item.role === 'user' && String(item.content).includes('再补充一段说明')))
 
   const limitEvents = []
   const limitResult = await core.chatStream({

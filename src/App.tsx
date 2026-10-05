@@ -222,6 +222,7 @@ function getStoredSettings(): AppSettings {
 type Notice = { tone: 'success' | 'error'; message: string } | null
 type VoiceTarget = { kind: 'native'; newConversation?: boolean } | { kind: 'bot'; botId: string }
 type VoiceOperation = { generation: number; target: VoiceTarget | null; requestId: string }
+const STARTUP_ANIMATION_MS = 2_500 // CSS 入场动画 2.4 秒，额外留 100ms 给最后一帧
 
 export default function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(() => isDesktopApp ? null : browserAuthStatus)
@@ -256,6 +257,7 @@ export default function App() {
   const [nativeVoiceRequest, setNativeVoiceRequest] = useState<VoiceChatRequest>()
   const [botVoiceRequest, setBotVoiceRequest] = useState<VoiceChatRequest>()
   const [loading, setLoading] = useState(isDesktopApp)
+  const [startupAnimationFinished, setStartupAnimationFinished] = useState(() => !isDesktopApp || window.matchMedia('(prefers-reduced-motion: reduce)').matches)
   const [notice, setNotice] = useState<Notice>(null)
   const [activeView, setActiveView] = useState<ViewId>('overview')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('runtime')
@@ -290,6 +292,12 @@ export default function App() {
   const voiceSpeechStreamRef = useRef<{ requestId: string; stream: LocalSpeechStream } | null>(null)
   const voiceOperationRef = useRef<VoiceOperation>({ generation: 0, target: null, requestId: '' })
   const voiceStartRef = useRef<(target?: VoiceTarget) => void>(() => undefined)
+
+  useEffect(() => {
+    if (startupAnimationFinished) return undefined
+    const timer = window.setTimeout(() => setStartupAnimationFinished(true), STARTUP_ANIMATION_MS)
+    return () => window.clearTimeout(timer)
+  }, [startupAnimationFinished])
 
   const applySnapshot = useCallback((snapshot: WorkspaceSnapshot) => {
     setBots(snapshot.bots)
@@ -1714,8 +1722,10 @@ export default function App() {
   // 四态明确：加载中 / 已锁 / 出错 / 就绪。任何一态都不会再出现「界面在、数据是空的」这种假象。
   const waitingFirstStatus = isDesktopApp && !authStatus && !bootError
   const loadingWorkspace = isDesktopApp && Boolean(authStatus?.authenticated) && !authStatus?.locked && !bootstrapped && !bootError
-  if (loading || waitingFirstStatus || loadingWorkspace) {
-    return <div className="app-loading"><img className="loading-logo" src={brandLogo} alt="ZSense" /><LoaderCircle className="spin" size={22} /><strong>正在打开安全工作区…</strong><small>检查应用锁并加载本地数据</small></div>
+  const appStillStarting = loading || waitingFirstStatus || loadingWorkspace
+  if (!startupAnimationFinished || appStillStarting) {
+    const startupStage = bootError ? '启动失败，正在准备错误提示…' : !appStillStarting ? '准备就绪，即将进入工作空间…' : !authStatus ? '正在检查本地安全状态…' : authStatus.locked ? '正在打开安全锁…' : '正在恢复本地工作区…'
+    return <div className={`zsense-startup${startupAnimationFinished ? ' zsense-startup--waiting' : ''}`} role="status" aria-live="polite" aria-busy="true"><div className="zsense-startup-inner"><div className="zsense-startup-symbol" aria-hidden="true"><span className="zsense-startup-halo" /><span className="zsense-startup-orbit" /><span className="zsense-startup-orbit zsense-startup-orbit-secondary" /><span className="zsense-startup-logo"><img src={brandLogo} alt="" width={88} height={88} /></span></div><strong className="zsense-startup-name">ZSense</strong><span className="zsense-startup-tagline">你的智能工作空间</span><div className="zsense-startup-progress" aria-hidden="true" /><span className="zsense-startup-stage">{startupStage}</span></div></div>
   }
 
   if (isDesktopApp && bootError) {

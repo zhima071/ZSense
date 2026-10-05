@@ -125,7 +125,8 @@ export class AgentRunCursorStore {
     if (!this.filePath) return
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
     const temporary = `${this.filePath}.tmp-${process.pid}-${randomUUID()}`
-    fs.writeFileSync(temporary, JSON.stringify(this.cursors.slice(-100), null, 2), 'utf8')
+    // 游标在每个阶段与追加时都会重写；不保存空白缩进可减少主进程同步序列化和磁盘写入。
+    fs.writeFileSync(temporary, JSON.stringify(this.cursors.slice(-100)), 'utf8')
     fs.renameSync(temporary, this.filePath)
   }
 

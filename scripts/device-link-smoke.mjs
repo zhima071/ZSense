@@ -121,6 +121,9 @@ try {
   const forgedKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' })
   assert.equal(serviceA.rememberRemotePeer('win00002', '冒名设备', forgedKey), false, '已绑定的设备公钥不得静默替换')
   const nonce = 'A'.repeat(32)
+  assert.equal(serviceB.verifyRemoteChallenge(serviceA.inspect().remote.deviceId, nonce, serviceA.signRemoteChallenge(serviceB.inspect().remote.deviceId, nonce)), false, '远程连接关闭时不得接受设备挑战')
+  // 本测试只验证签名门禁；直接置测试实例状态，避免连接真实公网交换中心。
+  serviceB.state.remote.enabled = true
   assert.equal(serviceB.verifyRemoteChallenge(serviceA.inspect().remote.deviceId, nonce, serviceA.signRemoteChallenge(serviceB.inspect().remote.deviceId, nonce)), true)
   assert.equal(serviceB.verifyRemoteChallenge(serviceA.inspect().remote.deviceId, nonce, 'invalid'), false)
   // 未签名的发现公告即使冒充已配对设备，也不能把带凭证的请求重定向过去。

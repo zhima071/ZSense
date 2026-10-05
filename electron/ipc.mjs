@@ -10,6 +10,7 @@ import { readPdfDocument, readPdfDocumentChunk, savePdfDocument, transformPdfPag
 import { fetchOfficialModelCatalog } from './services/model-catalog-service.mjs'
 import { createMemoryMaintenanceQueue, shouldExtractMemory } from './services/memory-intelligence.mjs'
 import { defaultUpdateFeedUrl } from './services/update-service.mjs'
+import { connectTrustedRemote } from './services/remote-trust-connect.mjs'
 
 const channelIds = new Set(['web', 'telegram', 'discord', 'slack', 'wecom', 'weixin', 'dingtalk', 'feishu', 'webhook'])
 const externalChannelIds = new Set([...channelIds].filter((id) => id !== 'web'))
@@ -612,6 +613,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
   publicHandle(ipcMain, 'zsense:auth:unlock', (payload, event) => auth.unlock(event.sender.id, object(payload, '解锁信息')))
   publicHandle(ipcMain, 'zsense:auth:set-lock-password', (payload, event) => {
     const status = auth.setLockPassword(event.sender.id, object(payload, '安全锁密码'))
+    webBridgeService?.revokeRemoteSessions()
     onWorkspaceChanged(database.loadWorkspace())
     return status
   })
@@ -620,7 +622,11 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
   // 因此交换中心不会变成任人可用的发信口。
   const hubBaseUrl = () => String(deviceLinkService?.hubUrl?.() || 'https://hub.zsense.space').replace(/\/+$/, '')
   publicHandle(ipcMain, 'zsense:auth:account-password:status', () => ({ configured: auth.accountPasswordConfigured() }))
-  publicHandle(ipcMain, 'zsense:auth:account-password:set', (payload, event) => auth.setAccountPassword(event.sender.id, object(payload, '账号密码')))
+  publicHandle(ipcMain, 'zsense:auth:account-password:set', (payload, event) => {
+    const result = auth.setAccountPassword(event.sender.id, object(payload, '远程访问密码'))
+    webBridgeService?.revokeRemoteSessions()
+    return result
+  })
   publicHandle(ipcMain, 'zsense:auth:email:status', () => auth.emailStatus())
   publicHandle(ipcMain, 'zsense:auth:email:set', () => { throw new Error('绑定邮箱必须完成验证码验证。') })
   // 绑定邮箱：先给这个邮箱发验证码（交换中心只允许发给它自己的收件邮箱），验证通过才允许写入绑定
@@ -674,6 +680,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const result = await response.json().catch(() => null)
     if (!response.ok || result?.ok === false) throw new Error(result?.error || '验证码不正确或已过期。')
     const status = auth.resetLockPassword(event.sender.id, { email, password: value.password })
+    webBridgeService?.revokeRemoteSessions()
     onWorkspaceChanged(database.loadWorkspace())
     return status
   })
@@ -728,7 +735,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     if (!webBridgeService) throw new Error('局域网 Web 访问服务不可用。')
     return webBridgeService.revokeSession(text(payload, '会话标记', 40))
   })
-  // 远程连接：设备锁是前置条件（服务层会拒绝，这里再注入设备锁状态并做即时校验）
+  // 本机安全锁状态只供界面展示；远程连接有独立的设备密钥与网页认证。
   deviceLinkService.ownerNameProvider = () => {
     try { return database.listUsers()?.[0]?.displayName || '' } catch { return '' }
   }
@@ -742,7 +749,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     webBridgeService.deviceTrustVerifier = (id, nonce, signature) => deviceLinkService.verifyRemoteChallenge(id, nonce, signature)
     webBridgeService.remoteAgentTaskProvider = ({ deviceId, prompt, timeoutMs }) => deviceLinkService.runTaskFromCloudPeer(deviceId, prompt, timeoutMs)
     webBridgeService.remoteAgentTaskCanceler = (deviceId) => deviceId ? deviceLinkService.cancelRemoteTaskFromPeer(deviceId) : deviceLinkService.cancelAllRemoteTasks()
-    webBridgeService.remoteAccessAllowed = () => Boolean(deviceLinkService.inspect().remote.enabled && deviceLinkService.appLockEnabled())
+    webBridgeService.remoteAccessAllowed = () => Boolean(deviceLinkService.inspect().remote.enabled)
     deviceLinkService.onPeerRevoked = (deviceId) => webBridgeService.revokeTrustedDevice(deviceId)
     deviceLinkService.onRemoteDisabled = () => webBridgeService.revokeRemoteSessions()
     webBridgeService.pairingCodeProvider = () => deviceLinkService.currentPairingCode?.() || ''
@@ -754,10 +761,13 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
       return true
     }
   }
-  // Web 入口与本机安全锁使用同一个校验器；旧账号密码接口已移除。
+  // 局域网沿用安全锁/访问口令；公网网页登录在安全锁关闭时必须验证远程访问密码。
   if (webBridgeService) {
     webBridgeService.remoteUnlockVerifier = (password) => {
       try { return auth.verifyAppLock(password) } catch (error) { return { ok: false, code: 'error', error: error instanceof Error ? error.message : String(error) } }
+    }
+    webBridgeService.remoteLoginVerifier = (password) => {
+      try { return auth.verifyRemotePassword(password) } catch (error) { return { ok: false, code: 'error', error: error instanceof Error ? error.message : String(error) } }
     }
     deviceLinkService.webBridgeInfoProvider = () => {
       const bridge = webBridgeService.inspect()
@@ -771,7 +781,6 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
   safeHandle(ipcMain, 'zsense:device-link:set-remote-upstream', (payload) => deviceLinkService.setRemoteUpstreamMode(payload === 'local' ? 'local' : 'auto'))
   safeHandle(ipcMain, 'zsense:device-link:set-remote-hostname', (payload) => deviceLinkService.setRemoteHostname(text(payload, '远程域名', 120)))
   safeHandle(ipcMain, 'zsense:device-link:set-remote-token', (payload) => deviceLinkService.setRemoteToken(text(payload, '隧道令牌', 2_000)))
-  safeHandle(ipcMain, 'zsense:device-link:recheck-lock', () => ({ released: deviceLinkService.enforceRemoteLockGate?.() === true }))
   // 对方返回的不是我们的 JSON，多半是云端通道错误页（隧道断了），
   // 这种情况必须和「对方拒绝」分开提示，否则用户会以为是对方没点接受。
   const remoteChannelError = (response, body) => {
@@ -824,32 +833,18 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const origin = `https://${deviceId}.zsense.space`
     const ownId = String(deviceLinkService.inspect()?.remote?.deviceId || '')
     if (!/^[a-z0-9][a-z0-9-]{1,58}$/.test(ownId)) throw new Error('本机还没有完成交换中心设备号注册，请确认能访问 hub.zsense.space 后重试。')
-    let nonce
     try {
-      const challengeResponse = await fetch(`${origin}/bridge/trust-challenge`, { method: 'POST', headers: { 'x-zsense-device': ownId } })
-      const challenge = await challengeResponse.json()
-      if (!challengeResponse.ok || !challenge?.ok) throw new Error(challenge?.error || '对方拒绝了设备密钥验证。')
-      nonce = String(challenge.data?.nonce || '')
-    } catch (error) { throw new Error(error instanceof Error ? error.message : '无法连接对方设备。') }
-    const signature = deviceLinkService.signRemoteChallenge(deviceId, nonce)
-    let response
-    try {
-      response = await fetch(`${origin}/bridge/trust-ticket`, {
-        method: 'POST',
-        headers: { 'x-zsense-device': ownId, 'x-zsense-nonce': nonce, 'x-zsense-signature': signature },
+      return await connectTrustedRemote({
+        origin,
+        ownId,
+        targetId: deviceId,
+        signChallenge: (target, nonce) => deviceLinkService.signRemoteChallenge(target, nonce),
       })
-    } catch {
-      throw new Error('连不上对方设备，请确认它在线并且已打开设备互联。')
+    } catch (error) {
+      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new Error('连接对方设备超时，请确认它在线且网络通畅。')
+      if (error instanceof TypeError) throw new Error('连不上对方设备，请确认它在线并且已打开设备互联。')
+      throw error
     }
-    const body = await response.text().catch(() => '')
-    let result = null
-    try { result = body ? JSON.parse(body) : null } catch { result = null }
-    if (!response.ok || result?.ok === false) {
-      if (result?.error) throw new Error(result.error)
-      throw new Error(remoteChannelError(response, body))
-    }
-    const path = result?.data?.entryPath || ''
-    return { url: path ? `${origin}${path}` : origin, deviceId }
   })
   safeHandle(ipcMain, 'zsense:device-link:status', () => {
     // 界面刷新状态时后台探一次公网可达性（不阻塞返回），这样「启动中」能及时变成「已连接」
@@ -1592,10 +1587,10 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
   })
   safeHandle(ipcMain, 'zsense:settings:update', async (payload) => {
     const nextSettings = validateSettings(payload)
+    const wasLocked = Boolean(database.getSetting('appLockEnabled'))
     const workspace = database.updateSettings(nextSettings)
-    // Closing the security lock is a hard remote-access boundary. Do not wait
-    // for the periodic watchdog before clearing sessions and notifying the hub.
-    deviceLinkService.enforceRemoteLockGate?.()
+    // 关闭安全锁不再关闭远程通道，但旧安全锁密码登录的网页会话必须失效。
+    if (wasLocked && !workspace.settings.appLockEnabled) webBridgeService?.revokeRemoteSessions()
     onRunWhileLockedChanged(workspace.settings.runWhileLocked)
     await gatewayService.reconcile()
     return workspace
@@ -2013,7 +2008,8 @@ function withScheduledTaskOwner(task, payload) {
         persistedSteeringIds.add(cleaned.steeringId)
         steeringMessages.push(cleaned.content)
         database.addMessage(conversationId, 'user', safeText(cleaned.content), { createdAt: cleaned.receivedAt, attachments: cleaned.attachments || [] })
-        onWorkspaceChanged(database.loadWorkspace())
+        // 运行中的对话由 steering 事件和 chat-run-store 即时更新；完整工作区会在本轮结束时发布。
+        // 这里重载所有历史消息会阻塞主进程，并让追加输入出现明显卡顿。
       }
       if (cleaned.type === 'tool') {
         if (workItem) officeTaskService.recordTool(workItem.id, cleaned)
@@ -2189,7 +2185,7 @@ function withScheduledTaskOwner(task, payload) {
     return agentCore.steerChat(
       text(value.requestId, '流式请求 ID', 180),
       text(value.message, '追加指令内容', 8_000),
-      { attachments },
+      { attachments, intent: 'adjust' },
     )
   })
   safeHandle(ipcMain, 'zsense:chat:clarify', (payload) => {

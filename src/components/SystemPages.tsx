@@ -583,17 +583,6 @@ type RuntimeAction = 'doctor' | null
 
 export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, onSave, onPickWorkspace, onRefreshRuntime, onRuntimeChanged, currentUser, onCurrentUserChanged, section, onSectionChange, modelPanel, skillsPanel, memoryPanel, activityPanel }: SettingsPageProps) {
 
-  // 未开启安全锁时，把用户引导到本页的安全锁卡片上并高亮
-  const focusSecurityLock = () => {
-    window.setTimeout(() => {
-      const card = document.querySelector('.user-security-card.lock-card')
-      if (!card) return
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      card.classList.add('lock-card-highlight')
-      window.setTimeout(() => card.classList.remove('lock-card-highlight'), 2_600)
-    }, 120)
-  }
-
   const [draft, setDraft] = useState(settings)
   const [memoryEngineStatus, setMemoryEngineStatus] = useState<{ ready: boolean; error: string }>()
   const [saving, setSaving] = useState(false)
@@ -848,7 +837,7 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
           {section === 'browser' && <BrowserSettingsPanel draft={draft} setDraft={setDraft} />}
           {section === 'memory' && <div className="settings-embedded-page">{memoryPanel}</div>}
           {section === 'activity' && <div className="settings-embedded-page">{activityPanel}</div>}
-          {section === 'devices' && <><DeviceLinkSettingsPanel onOpenSecurity={focusSecurityLock} /><AccountPanel currentUser={currentUser} settings={draft} onSaveSettings={onSave} /></>}
+          {section === 'devices' && <><DeviceLinkSettingsPanel /><AccountPanel currentUser={currentUser} settings={draft} onSaveSettings={onSave} /></>}
 
           {section === 'display' && <div className="panel settings-block display-settings-panel">
             <div className="panel-header"><div><h2>显示与通知</h2><p>控制对话内容的呈现方式、输入区高度以及系统反馈。</p></div></div>

@@ -4,7 +4,7 @@
   "description": "内置 ZSense Agent Core 的多 Bot 桌面工作台",
   "author": "ZSense",
   "private": true,
-  "version": "0.26.5",
+  "version": "0.26.6",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {

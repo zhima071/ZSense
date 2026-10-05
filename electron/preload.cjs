@@ -18,7 +18,6 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
     revokeRemoteIdentity: () => ipcRenderer.invoke('zsense:device-link:revoke-remote-identity'),
     setRemoteUpstream: (mode) => ipcRenderer.invoke('zsense:device-link:set-remote-upstream', mode),
     setRemoteToken: (token) => ipcRenderer.invoke('zsense:device-link:set-remote-token', token),
-    recheckRemoteLock: () => ipcRenderer.invoke('zsense:device-link:recheck-lock'),
     trustConnect: (deviceId) => invoke('zsense:device-link:trust-connect', { deviceId }),
     pairConnect: (deviceId, code) => invoke('zsense:device-link:pair-connect', { deviceId, code }),
     status: () => invoke('zsense:device-link:status'),

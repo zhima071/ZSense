@@ -227,16 +227,17 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
     }
     if (sending) {
       setError(undefined)
-      const markSteered = (current: TranscriptItem[]) => current.map((item) => item.streaming ? { ...item, status: '已收到追加指令，正在中断当前推理或等待工具进入安全边界…' } : item)
-      setMessages(markSteered)
-      updateChatRun(activeViewKeyRef.current, (run) => ({ ...run, messages: markSteered(run.messages) }))
       if (requestRef.current) {
+        setDraft('')
+        setAttachments([])
         try {
           await unwrapDesktop(window.zsenseDesktop!.chat.steer(requestRef.current, content, selectedAttachments, workspacePath))
-          setDraft('')
-          setAttachments([])
         }
-        catch (reason) { setError(`追加指令失败：${errorMessage(reason)}`) }
+        catch (reason) {
+          setDraft((current) => current ? `${contentOverride ?? draft}\n${current}` : (contentOverride ?? draft))
+          setAttachments((current) => current.length ? [...selectedAttachments, ...current] : selectedAttachments)
+          setError(`调整本轮失败：${errorMessage(reason)}`)
+        }
       }
       return
     }
@@ -283,7 +284,7 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
         if (streamEvent.type === 'reasoning') return display.streamingResponse ? { ...item, reasoning: streamEvent.replace ? streamEvent.delta : `${item.reasoning || ''}${streamEvent.delta}`, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), status: streamEvent.summary ? '已生成推理摘要' : '正在推理…' } : { ...item, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), status: 'ZSense 正在推理…' }
         if (streamEvent.type === 'status') return { ...item, status: streamEvent.message || item.status }
         if (streamEvent.type === 'agent-state') return { ...item, status: streamEvent.phase === 'tools' ? '正在执行工具…' : streamEvent.phase === 'steering' ? '已接收追加指令，正在重新规划…' : item.status }
-        if (streamEvent.type === 'steering') return { ...item, status: streamEvent.phase === 'queued' ? '已接收追加指令…' : '追加指令已应用，正在继续处理…' }
+        if (streamEvent.type === 'steering') return { ...item, status: streamEvent.phase === 'queued' ? (streamEvent.intent === 'adjust' ? '已接收调整，正在重新规划…' : '已接收补充，当前步骤结束后应用…') : '调整已应用，正在继续处理…' }
         if (streamEvent.type === 'clarify') return { ...item, clarification: streamEvent.clarification, clarificationExpired: false, status: '正在等待你的选择…' }
         if (streamEvent.type === 'clarify-expired' && item.clarification?.requestId === streamEvent.clarificationRequestId) return { ...item, clarificationExpired: true, status: '选择已超时，ZSense 正在继续处理…' }
         if (streamEvent.type === 'tool') {
@@ -633,7 +634,7 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
         <form ref={composerContainerRef} className="chat-composer bot-composer unified-composer" onSubmit={submitComposer}>
           <ChatComposerResizeHandle composerRef={composerContainerRef} transcriptRef={scrollRef} resetKey={`${bot.id}:${conversationId || conversation?.id || 'new'}`} />
           <SlashCommandMenu commands={visibleSlashCommands} selectedIndex={slashCommandIndex} onSelect={executeSlashCommand} prefix={activeSlashGroup?.command || ''} hint={activeSlashGroup?.argument?.hint} />
-          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPasteAttachments} aria-label={`给 ${bot.name} 输入消息`} placeholder={!runtime.runnable ? 'ZSense Agent Core 尚未就绪' : sending ? '继续输入要求，发送后会打断当前回复并接着处理…' : workspacePath ? `给 ${bot.name} 发送消息…（Enter 发送，Shift + Enter 换行，可直接粘贴图片）` : '请先选择会话工作区'} rows={4} disabled={!runtime.runnable} />
+          <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPasteAttachments} aria-label={`给 ${bot.name} 输入消息`} placeholder={!runtime.runnable ? 'ZSense Agent Core 尚未就绪' : sending ? '输入调整要求，Enter 提交到当前轮…' : workspacePath ? `给 ${bot.name} 发送消息…（Enter 发送，Shift + Enter 换行，可直接粘贴图片）` : '请先选择会话工作区'} rows={4} disabled={!runtime.runnable} />
           <ChatComposerToolbar
             layout="composer"
             attachments={attachments}
@@ -658,7 +659,7 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
                         onError={(message) => setError(message)}
             onOpenAttachment={openOfficeArtifact}
           />
-          <div className="chat-composer-footer"><small>{sending ? '追加后会中断当前模型推理；写入工具会在安全边界完成后重新规划' : '输入 / 使用快捷指令 · Enter 发送 · Shift + Enter 换行'}</small><span className="chat-send-actions">{sending && <button className="chat-send stop" type="button" onClick={() => void cancel()} aria-label="停止当前轮次"><Square size={14} /></button>}<button className={`chat-send ${sending ? 'steer' : ''}`} type="submit" disabled={(!draft.trim() && !attachments.length) || !runtime.runnable || !workspacePath} aria-label={sending ? '追加指令到当前轮次' : '发送消息'}><ArrowUp size={18} /></button></span></div>
+          <div className="chat-composer-footer"><small>{sending ? '调整要求将作用于当前轮次' : '输入 / 使用快捷指令 · Enter 发送 · Shift + Enter 换行'}</small><span className="chat-send-actions">{sending && <button className="chat-send stop" type="button" onClick={() => void cancel()} aria-label="停止当前轮次"><Square size={14} /></button>}<button className={`chat-send ${sending ? 'steer' : ''}`} type="submit" disabled={(!draft.trim() && !attachments.length) || !runtime.runnable || !workspacePath} aria-label={sending ? '调整本轮' : '发送消息'} title={sending ? '调整本轮' : '发送消息'}><ArrowUp size={18} /></button></span></div>
         </form>
       </section>
       {officeArtifactPath && <OfficeArtifactPane filePath={officeArtifactPath} workspacePath={workspacePath} onClose={() => setOfficeArtifactPath('')} onAskAI={askAIAboutOfficeSelection} onAnnotatedScreenshot={handleAnnotatedScreenshot} />}

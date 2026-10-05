@@ -51,7 +51,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: pathText, args }),
     })
-    if (response.status === 401) { showLogin('登录已过期，请重新输入安全锁密码。'); throw new Error('需要先输入安全锁密码。') }
+    if (response.status === 401) { showLogin('登录已过期，请重新输入访问密码。'); throw new Error('需要先验证访问密码。') }
     return response.json()
   }
 
@@ -114,6 +114,10 @@
   // 未登录时的访问口令输入层（独立于应用本身，避免应用在半可用状态下启动）
   let loginLayer = null
   function showLogin(hint) {
+    const cloudPage = /(?:^|\.)zsense\.space$/i.test(window.location.hostname)
+    const defaultHint = cloudPage
+      ? '已开启安全锁时使用安全锁密码；未开启时使用桌面端设置的远程访问密码。已配对设备可通过设备密钥进入。'
+      : '已开启安全锁时输入安全锁密码；未开启时输入桌面端显示的局域网访问口令。'
     if (loginLayer) {
       const message = loginLayer.querySelector('[data-role="hint"]')
       if (hint && message) message.textContent = hint
@@ -123,9 +127,9 @@
     loginLayer.setAttribute('data-zsense-web-login', '1')
     loginLayer.innerHTML = `
       <div class="zsense-web-login-card">
-        <strong>ZSense 局域网访问</strong>
-        <p data-role="hint">${hint || '已开启安全锁时输入安全锁密码；未开启时输入桌面端设备互联面板显示的访问口令。'}</p>
-        <input type="password" placeholder="安全锁密码" aria-label="安全锁密码" />
+        <strong>ZSense ${cloudPage ? '远程访问' : '局域网访问'}</strong>
+        <p data-role="hint">${hint || defaultHint}</p>
+        <input type="password" placeholder="${cloudPage ? '安全锁或远程访问密码' : '安全锁密码或访问口令'}" aria-label="访问密码" />
         <button type="button">进入 ZSense</button>
       </div>`
     const style = document.createElement('style')
@@ -144,7 +148,7 @@
     const button = loginLayer.querySelector('button')
     const submit = async () => {
       const password = (input.value || '').trim()
-      if (!password) { loginLayer.querySelector('[data-role="hint"]').textContent = '请输入安全锁密码，或桌面端显示的访问口令。'; return }
+      if (!password) { loginLayer.querySelector('[data-role="hint"]').textContent = cloudPage ? '请输入安全锁密码或远程访问密码。' : '请输入安全锁密码或桌面端显示的访问口令。'; return }
       button.disabled = true
       try {
         const response = await fetch('/bridge/login', {
@@ -155,7 +159,7 @@
         })
         const payload = await response.json().catch(() => null)
         if (payload?.ok) { window.location.reload(); return }
-        loginLayer.querySelector('[data-role="hint"]').textContent = payload?.error || '安全锁密码不正确，请重试。'
+        loginLayer.querySelector('[data-role="hint"]').textContent = payload?.error || '访问密码不正确，请重试。'
       } catch {
         loginLayer.querySelector('[data-role="hint"]').textContent = '无法连接 ZSense，请确认桌面端仍在运行。'
       } finally {

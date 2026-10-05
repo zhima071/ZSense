@@ -18,6 +18,7 @@ import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
 import { constants as zlibConstants, createBrotliCompress, createGzip } from 'node:zlib'
+import { fastTrustDigest } from './remote-trust-connect.mjs'
 
 export const DEFAULT_WEB_BRIDGE_PORT = 39073
 const SESSION_TTL_MS = 12 * 60 * 60_000
@@ -26,6 +27,7 @@ const TRUST_WINDOW_MS = 120_000
 const TRUST_TICKET_TTL_MS = 90_000
 const MAX_DEVICE_CHALLENGES = 256
 const MAX_DEVICE_CHALLENGES_PER_PEER = 8
+const MAX_FAST_TRUST_NONCES = 256
 const REMOTE_AGENT_JOB_TTL_MS = 15 * 60_000
 const MAX_REMOTE_AGENT_JOBS = 32
 const MAX_REMOTE_AGENT_RESULT_CHARS = 500_000
@@ -242,7 +244,12 @@ export class WebBridgeService {
       accessCode: cleanText(stored.accessCode, 12),
       // Remote sessions never survive an app restart: a crash or lost tunnel is an offline boundary.
       sessions: Array.isArray(stored.sessions) ? stored.sessions.filter((session) => session?.token && session.remote !== true && Date.parse(session.expiresAt) > Date.now()) : [],
+      // 快速入场的随机数必须跨重启保留到时间窗结束，否则重启会重新接受同一份签名。
+      fastTrustNonces: Array.isArray(stored.fastTrustNonces) ? stored.fastTrustNonces.filter((entry) =>
+        entry && typeof entry.key === 'string' && typeof entry.deviceId === 'string' && Number(entry.expiresAt) > Date.now()
+      ).slice(-MAX_FAST_TRUST_NONCES) : [],
     }
+    this.fastTrustNonces = new Map(this.state.fastTrustNonces.map((entry) => [entry.key, { deviceId: entry.deviceId, expiresAt: entry.expiresAt }]))
     if (!this.state.accessCode) this.state.accessCode = this.#createAccessCode()
     this.#persist()
   }
@@ -258,7 +265,8 @@ export class WebBridgeService {
     try {
       fs.mkdirSync(path.dirname(this.statePath), { recursive: true })
       fs.writeFileSync(this.statePath, `${JSON.stringify(this.state, null, 2)}\n`, { mode: 0o600 })
-    } catch { /* 状态写盘失败不影响运行 */ }
+      return true
+    } catch { return false }
   }
 
   #createAccessCode() {
@@ -347,7 +355,7 @@ export class WebBridgeService {
       httpPort: this.httpPort || 0,
       protocol: this.useHttps ? 'https' : 'http',
       accessCode: this.state.enabled ? this.state.accessCode : '',
-      remoteUnlockAvailable: typeof this.remoteUnlockVerifier === 'function',
+      remoteUnlockAvailable: typeof this.remoteLoginVerifier === 'function',
       remoteSessions: this.state.sessions.filter((session) => session.remote).map((session) => ({ user: session.remoteUser?.displayName || '未知', at: session.createdAt, from: session.remoteAddress })).slice(0, 10),
 
       // 局域网地址优先：手机/其它设备要用的是它们；127.0.0.1 单独作为本机地址返回，
@@ -401,6 +409,8 @@ export class WebBridgeService {
     this.state.sessions = this.state.sessions.filter((session) => !revoked.has(session.token))
     for (const client of this.clients) if (revoked.has(client.token)) this.#closeClient(client)
     if (this.deviceChallenges) for (const [nonce, challenge] of this.deviceChallenges) if (challenge.deviceId === id) this.deviceChallenges.delete(nonce)
+    if (this.fastTrustNonces) for (const [nonce, entry] of this.fastTrustNonces) if (entry.deviceId === id) this.fastTrustNonces.delete(nonce)
+    this.state.fastTrustNonces = [...this.fastTrustNonces].map(([key, entry]) => ({ key, ...entry }))
     for (const [taskId, task] of this.remoteAgentJobs) if (task.deviceId === id) { task.cancelled = true; this.remoteAgentJobs.delete(taskId) }
     this.trustTickets = (this.trustTickets || []).filter((ticket) => ticket.deviceId !== id)
     this.#persist()
@@ -413,6 +423,8 @@ export class WebBridgeService {
     this.state.sessions = this.state.sessions.filter((session) => !revoked.has(session.token))
     for (const client of this.clients) if (revoked.has(client.token)) this.#closeClient(client)
     this.deviceChallenges?.clear()
+    this.fastTrustNonces?.clear()
+    this.state.fastTrustNonces = []
     for (const task of this.remoteAgentJobs.values()) task.cancelled = true
     this.remoteAgentJobs.clear()
     this.trustTickets = []
@@ -513,6 +525,14 @@ export class WebBridgeService {
     if (!challenge || challenge.deviceId !== deviceId) return false
     this.deviceChallenges.delete(nonce) // 单次尝试即消耗，包括签名错误的尝试。
     return challenge.expiresAt >= Date.now()
+  }
+
+  #issueTrustTicket(deviceId) {
+    this.trustTickets = (this.trustTickets || []).filter((item) => item.expiresAt > Date.now())
+    const ticket = crypto.randomBytes(24).toString('base64url')
+    this.trustTickets.push({ ticket, deviceId, expiresAt: Date.now() + TRUST_TICKET_TTL_MS })
+    this.trustTickets = this.trustTickets.slice(-20)
+    return { ok: true, data: { ticket, expiresInSeconds: Math.round(TRUST_TICKET_TTL_MS / 1000), entryPath: `/bridge/enter?ticket=${encodeURIComponent(ticket)}` } }
   }
 
   #consumeSignedDeviceRequest(request, route, body) {
@@ -621,7 +641,7 @@ export class WebBridgeService {
     if (!address) return jsonResponse(response, 403, { ok: false, error: '只允许局域网设备访问。' })
     const fromTunnel = Boolean(request.headers['cf-ray'] || request.headers['cf-connecting-ip'] || request.headers['cf-worker'] || /(?:^|\.)zsense\.space(?::\d+)?$/i.test(String(request.headers.host || '')))
     if (fromTunnel && typeof this.remoteAccessAllowed === 'function' && !this.remoteAccessAllowed()) {
-      return jsonResponse(response, 403, { ok: false, error: '远程连接已关闭或安全锁未启用。' })
+      return jsonResponse(response, 403, { ok: false, error: '远程连接已关闭。' })
     }
     const url = new URL(request.url || '/', 'http://localhost')
     const pathname = url.pathname
@@ -635,18 +655,18 @@ export class WebBridgeService {
         const attempts = (this.loginAttempts.get(key) || []).filter((at) => Date.now() - at < LOGIN_WINDOW_MS)
         if (attempts.length >= LOGIN_MAX_ATTEMPTS) return jsonResponse(response, 429, { ok: false, error: '尝试次数过多，请稍后再试。' })
         const body = await this.#readBody(request)
-        // 公网来源（经 Cloudflare 隧道）必须用设备锁密码解锁；局域网仍是访问口令
-        const isRemote = Boolean(request.headers['cf-ray'] || request.headers['cf-connecting-ip'] || request.headers['cf-worker'])
+        // 公网网页登录独立验密；不能把缺少代理头的公网请求误判成局域网口令登录。
+        const isRemote = fromTunnel
         let remoteUnlockUser = null
         if (isRemote) {
-          const verify = typeof this.remoteUnlockVerifier === 'function' ? this.remoteUnlockVerifier : null
-          if (!verify) return jsonResponse(response, 503, { ok: false, error: '本机暂时无法校验设备锁，请稍后重试。' })
+          const verify = typeof this.remoteLoginVerifier === 'function' ? this.remoteLoginVerifier : null
+          if (!verify) return jsonResponse(response, 503, { ok: false, error: '本机暂时无法校验远程访问密码，请稍后重试。' })
           const result = verify(cleanText(body.password, 128)) || {}
           remoteUnlockUser = result.ok && result.user ? result.user : null
           if (!result.ok) {
             attempts.push(Date.now())
             this.loginAttempts.set(key, attempts)
-            return jsonResponse(response, 403, { ok: false, remote: true, code: result.code || 'bad-password', error: result.error || '设备锁密码不正确。' })
+            return jsonResponse(response, 403, { ok: false, remote: true, code: result.code || 'bad-password', error: result.error || '远程访问密码不正确。' })
           }
         } else {
           // 局域网访问：有安全锁就用安全锁密码；没有安全锁则退回本机访问口令，绝不无条件放行
@@ -676,7 +696,7 @@ export class WebBridgeService {
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString(),
           remoteAddress: address,
-          remote: Boolean(request.headers['cf-ray'] || request.headers['cf-connecting-ip']),
+          remote: isRemote,
           remoteUser: remoteUnlockUser ? { username: remoteUnlockUser.username, displayName: remoteUnlockUser.displayName } : null,
           userAgent: cleanText(request.headers['user-agent'], 200),
           lastSeenAt: new Date().toISOString(),
@@ -696,7 +716,34 @@ export class WebBridgeService {
       // 邮箱只帮助发现设备；真正的免密登录必须证明首次配对时保存的设备私钥。
       if (pathname === '/bridge/trust-challenge' && request.method === 'POST') {
         const deviceId = cleanText(request.headers['x-zsense-device'], 60)
-        if (!deviceId || !this.#deviceTrustAllowed(deviceId, '', '')) return jsonResponse(response, 403, { ok: false, error: '设备尚未完成密钥配对，请先配对或使用安全锁密码。' })
+        if (!deviceId || !this.#deviceTrustAllowed(deviceId, '', '')) return jsonResponse(response, 403, { ok: false, error: '设备尚未完成密钥配对，请先配对或使用远程访问密码。' })
+        // 新版发起端随原挑战请求提交短时签名：通过后直接发票据，只用一次公网往返。
+        // 旧版发起端不带这些头，仍收到服务端随机挑战并走原有第二次请求。
+        if (request.headers['x-zsense-issued-at'] !== undefined || request.headers['x-zsense-signature'] !== undefined) {
+          const fastNonce = cleanText(request.headers['x-zsense-nonce'], 100)
+          const issuedAtText = String(request.headers['x-zsense-issued-at'] || '')
+          const signature = cleanText(request.headers['x-zsense-signature'], 200)
+          const issuedAt = Number(issuedAtText)
+          if (!/^[A-Za-z0-9_-]{32,100}$/.test(fastNonce) || !/^\d{13}$/.test(issuedAtText) || !signature) return jsonResponse(response, 403, { ok: false, error: '设备签名格式无效。' })
+          if (Math.abs(Date.now() - issuedAt) <= TRUST_WINDOW_MS) {
+            if (!this.#deviceTrustAllowed(deviceId, fastTrustDigest(deviceId, issuedAt, fastNonce), signature)) {
+              return jsonResponse(response, 403, { ok: false, error: '设备密钥验证失败，请重新连接或重新配对。' })
+            }
+            for (const [key, entry] of this.fastTrustNonces) if (entry.expiresAt <= Date.now()) this.fastTrustNonces.delete(key)
+            const replayKey = `${deviceId}:${fastNonce}`
+            if (this.fastTrustNonces.has(replayKey)) return jsonResponse(response, 403, { ok: false, error: '设备签名已使用，请重新连接。' })
+            if (this.fastTrustNonces.size >= MAX_FAST_TRUST_NONCES) return jsonResponse(response, 429, { ok: false, error: '短时设备请求过多，请稍后再试。' })
+            this.fastTrustNonces.set(replayKey, { deviceId, expiresAt: Date.now() + TRUST_WINDOW_MS })
+            this.state.fastTrustNonces = [...this.fastTrustNonces].map(([key, entry]) => ({ key, ...entry }))
+            if (!this.#persist()) {
+              this.fastTrustNonces.delete(replayKey)
+              this.state.fastTrustNonces = [...this.fastTrustNonces].map(([key, entry]) => ({ key, ...entry }))
+              return jsonResponse(response, 503, { ok: false, error: '本机暂时无法保存设备签名状态，请稍后重试。' })
+            }
+            return jsonResponse(response, 200, this.#issueTrustTicket(deviceId))
+          }
+          // 两台设备时钟不一致时回退到服务端挑战，仍须再做一次有效 Ed25519 签名。
+        }
         this.deviceChallenges ||= new Map()
         for (const [nonce, entry] of this.deviceChallenges) if (entry.expiresAt < Date.now()) this.deviceChallenges.delete(nonce)
         if (this.deviceChallenges.size >= MAX_DEVICE_CHALLENGES || [...this.deviceChallenges.values()].filter((entry) => entry.deviceId === deviceId).length >= MAX_DEVICE_CHALLENGES_PER_PEER) {
@@ -713,11 +760,7 @@ export class WebBridgeService {
         if (!this.#consumeDeviceChallenge(deviceId, nonce) || !this.#deviceTrustAllowed(deviceId, nonce, signature)) {
           return jsonResponse(response, 403, { ok: false, error: '设备密钥验证失败，请重新连接或重新配对。' })
         }
-        this.trustTickets = (this.trustTickets || []).filter((item) => item.expiresAt > Date.now())
-        const ticket = crypto.randomBytes(24).toString('base64url')
-        this.trustTickets.push({ ticket, deviceId, expiresAt: Date.now() + TRUST_TICKET_TTL_MS })
-        this.trustTickets = this.trustTickets.slice(-20)
-        return jsonResponse(response, 200, { ok: true, data: { ticket, expiresInSeconds: Math.round(TRUST_TICKET_TTL_MS / 1000), entryPath: `/bridge/enter?ticket=${encodeURIComponent(ticket)}` } })
+        return jsonResponse(response, 200, this.#issueTrustTicket(deviceId))
       }
       if (pathname === '/bridge/agent-task' && request.method === 'POST') {
         const body = await this.#readBody(request)

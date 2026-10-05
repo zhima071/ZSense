@@ -21,7 +21,7 @@ function platformIcon(platform: string) {
   return platform === 'darwin' || platform === 'win32' ? MonitorSmartphone : Laptop2
 }
 
-export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: () => void } = {}) {
+export function DeviceLinkSettingsPanel() {
   const [status, setStatus] = useState<DeviceLinkStatus>()
   const [deviceCopied, setDeviceCopied] = useState(false)
   const [action, setAction] = useState<DeviceAction>(null)
@@ -29,7 +29,7 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
   const [notice, setNotice] = useState('')
   const [connectionTarget, setConnectionTarget] = useState('')
   const [connectionCode, setConnectionCode] = useState('')
-  // 远程连接（公网）：与局域网直连相互独立，前置条件是已开启设备锁
+  // 远程连接（公网）：与本机安全锁独立，设备密钥和网页密码分别保护入口。
   const remote = status?.remote ?? {
     enabled: false, running: false, hostname: 'app.zsense.space', url: '',
     mode: 'named' as const, tunnelName: 'zsense', tokenConfigured: false,
@@ -47,8 +47,8 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
       window.open(result.url || safeUrl, '_blank', 'noopener')
       setNotice(`已免密进入 ${peer.name || peer.deviceId}。`)
     } catch (reason) {
-      // 密钥验证失败时仍可打开目标地址，用对方安全锁密码进入。
-      setNotice(`${errorMessage(reason)} 已改为直接打开，可用对方安全锁密码进入。`)
+      // 密钥验证失败时仍可打开登录页，但不会免密放行。
+      setNotice(`${errorMessage(reason)} 已改为直接打开登录页，请使用对方的访问密码。`)
       window.open(safeUrl, '_blank', 'noopener')
     }
   }
@@ -224,19 +224,14 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
   return <div className="device-link-settings">
     <section className="panel settings-block device-link-panel">
       <div className="panel-header device-link-header">
-        <div><h2>设备互联</h2><p className="device-link-summary">从同一入口连接附近设备或云端设备；连接后会标明实际通道。远程访问须先开启安全锁。</p></div>
+        <div><h2>设备互联</h2><p className="device-link-summary">从同一入口连接附近设备或云端设备；连接后会标明实际通道。远程连接不依赖本机安全锁，仍需设备密钥或访问密码验证。</p></div>
         <div className="device-link-header-actions">
           <span className={`status-label ${status.running ? 'online' : status.enabled ? 'paused' : 'offline'}`}><i />{status.running ? onlineCount || cloudCount ? `${onlineCount} 台局域网 · ${cloudCount} 台云端在线` : '正在发现' : status.enabled ? '启动失败' : '已关闭'}</span>
           <button type="button" className={`switch ${status.enabled ? 'on' : ''}`} role="switch" aria-checked={status.enabled} aria-label={`${status.enabled ? '关闭' : '启用'}设备互联`} disabled={action === 'toggle'} onClick={() => void run('toggle', async () => {
             await unwrapDesktop(window.zsenseDesktop!.deviceLink.setEnabled(!status.enabled))
             if (!status.enabled) {
               try { await window.zsenseDesktop!.webBridge.setEnabled(true) } catch { /* 浏览器访问开启失败不影响设备互联 */ }
-              if (remote.deviceLockEnabled) {
-                try { await unwrapDesktop(window.zsenseDesktop!.deviceLink.setRemoteEnabled(true)) } catch { /* 远程开启失败不阻塞其它能力 */ }
-              } else {
-                setNotice('局域网与浏览器访问已开启；开启「安全锁」后远程连接会自动可用。')
-                onOpenSecurity?.()
-              }
+              try { await unwrapDesktop(window.zsenseDesktop!.deviceLink.setRemoteEnabled(true)) } catch (reason) { setError(`局域网已开启，但远程连接失败：${errorMessage(reason)}`) }
             } else {
               try { await unwrapDesktop(window.zsenseDesktop!.deviceLink.setRemoteEnabled(false)) } catch { /* 忽略 */ }
               try { await unwrapDesktop(window.zsenseDesktop!.webBridge.setEnabled(false)) } catch { /* 忽略 */ }
@@ -341,7 +336,7 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
               </div>
               <div className="device-link-peer-access">
                 {peer.source === 'remote' ? <>
-                  <span className="device-link-peer-access-label device-link-peer-access-note">云端设备已验证公钥；任务执行仍需接收方单独授权。</span>
+                  <span className="device-link-peer-access-label device-link-peer-access-note">公钥已验证 · 任务需接收方授权</span>
                   <div className="device-link-peer-access-controls">
                     <div className="device-link-peer-permission">
                       <span>允许在本机执行任务</span>
@@ -408,7 +403,7 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
       <div className="panel-header device-link-header">
         <div><strong>远程连接</strong></div>
         <div className="device-link-header-actions">
-          <span className={`status-label ${remote.enabled ? (remote.running ? 'online' : 'paused') : 'offline'}`}><i />{remote.enabled ? (remote.running ? '已连接' : '启动中') : remote.deviceLockEnabled ? '随开关开启' : '需先开启安全锁'}</span>
+          <span className={`status-label ${remote.enabled ? (remote.running ? 'online' : 'paused') : 'offline'}`}><i />{remote.enabled ? (remote.running ? '已连接' : '启动中') : '未连接'}</span>
         </div>
       </div>
 

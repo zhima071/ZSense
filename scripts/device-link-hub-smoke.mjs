@@ -117,7 +117,7 @@ const waitFor = async (predicate, message, timeoutMs = 8_000) => {
 }
 
 const service = new DeviceLinkService({ rootPath: root, secrets: new TestVault(), hostname: 'Hub Client', discoveryPort: 39871, discoveryAddress: '239.255.90.98', spawnProcess, detectLocalHub: false })
-service.appLockProvider = () => true
+service.appLockProvider = () => false
 service.localBridgePort = 39073
 let revokedRemoteSessions = 0
 service.onRemoteDisabled = () => { revokedRemoteSessions += 1 }
@@ -128,7 +128,7 @@ try {
   fs.mkdirSync(pendingTunnelState, { recursive: true })
   fs.writeFileSync(path.join(pendingTunnelState, 'state.json'), JSON.stringify({ remote: { enabled: true, hubUrl: `http://127.0.0.1:${hubPort}`, upstreamMode: 'auto' } }))
   const pendingTunnel = new DeviceLinkService({ rootPath: pendingTunnelRoot, secrets: new TestVault(), hostname: 'Pending Tunnel', detectLocalHub: false })
-  pendingTunnel.appLockProvider = () => true
+  pendingTunnel.appLockProvider = () => false
   try {
     const identity = await pendingTunnel.refreshRemoteIdentity({ requireRegistration: true })
     assert.equal(identity.remote.deviceId, assignedDeviceId, 'identity registration must succeed before the outbound tunnel is ready')
@@ -146,6 +146,7 @@ try {
   } finally { await legacyClient.shutdown() }
 
   await service.setRemoteEnabled(true)
+  assert.equal(service.inspect().remote.deviceLockEnabled, false, '未开启安全锁时也应允许远程连接')
   await waitFor(() => mutations.some((entry) => entry.action === 'register' && entry.upstream === 'https://client-1.trycloudflare.com'), 'first signed registration did not reach hub')
   assert.equal(service.inspect().remote.deviceId, assignedDeviceId, 'client must persist the id allocated by the hub')
   assert.equal(service.inspect().remote.publicUrl, `https://${assignedDeviceId}.zsense.space`, 'public device URL must be derived from the hub root domain')

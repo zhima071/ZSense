@@ -1551,19 +1551,21 @@ export class ZSenseAgentCore {
     return { cancelled: true }
   }
 
-  steerChat(requestId, message, { source = 'user', attachments = [] } = {}) {
+  steerChat(requestId, message, { source = 'user', attachments = [], intent } = {}) {
     const active = this.activeChats.get(requestId)
-    if (!active) throw new Error('当前没有可追加指令的运行中轮次。')
+    if (!active || active.machine?.terminal()) throw new Error('当前没有可追加指令的运行中轮次。')
     const instruction = text(message).trim()
     if (!instruction) throw new Error('追加指令不能为空。')
     if (instruction.length > 8_000) throw new Error('单次追加指令不能超过 8,000 个字符。')
-    const intent = steeringIntent(instruction)
-    const item = { id: `steering-${randomUUID()}`, content: instruction, receivedAt: new Date().toISOString(), source: source === 'agent' ? 'agent' : 'user', intent, attachments: Array.isArray(attachments) ? attachments.slice(0, 8) : [] }
+    const resolvedIntent = intent === 'adjust' ? 'adjust' : steeringIntent(instruction)
+    const item = { id: `steering-${randomUUID()}`, content: instruction, receivedAt: new Date().toISOString(), source: source === 'agent' ? 'agent' : 'user', intent: resolvedIntent, attachments: Array.isArray(attachments) ? attachments.slice(0, 8) : [] }
     active.pendingSteering.push(item)
     active.emit?.({ type: 'steering', phase: 'queued', steeringId: item.id, content: item.content, receivedAt: item.receivedAt, source: item.source, intent: item.intent, attachments: item.attachments, pendingCount: active.pendingSteering.length })
     active.persistCursor?.()
     const interruptiblePhase = ['model', 'finalizing'].includes(active.machine?.phase) || (active.machine?.phase === 'tools' && active.toolsInterruptible)
-    if (item.intent !== 'next' && interruptiblePhase && active.phaseController && !active.phaseController.signal.aborted) {
+    // 普通补充和后续任务在当前模型/工具步骤结束后接入，避免每条追加都取消请求并重启推理。
+    // 明确修正当前方向时才立即打断可安全中断的阶段。
+    if (item.intent === 'adjust' && interruptiblePhase && active.phaseController && !active.phaseController.signal.aborted) {
       active.phaseController.abort(new SteeringInterrupt())
     }
     return { accepted: true, pendingCount: active.pendingSteering.length, steeringId: item.id, intent: item.intent }

@@ -8049,6 +8049,23 @@ button.chat-message-attachment:focus-visible { outline: 2px solid var(--primary)
 .device-link-grid [class*="empty"] { justify-items: start; text-align: left; padding: 6px 0 2px; }
 .device-link-grid [class*="empty"] small { max-width: 620px; line-height: 1.7; }
 
+/* 受信任设备始终双列；单台设备也只占左列。 */
+.device-link-list-card[data-lan-block="trusted"] .device-link-device-list { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 10px; padding-top: 8px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer { align-content: start; border: 1px solid var(--border); border-radius: 11px; overflow: hidden; background: var(--surface); }
+.device-link-list-card[data-lan-block="trusted"] .device-link-device-row.trusted { padding: 10px 12px 8px; grid-template-columns: 30px minmax(0, 1fr); gap: 5px 9px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-platform-icon { width: 30px; height: 30px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-indicators { margin-top: 3px; gap: 4px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-details { margin-top: 4px; gap: 1px 8px; line-height: 1.4; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-actions { gap: 5px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-actions .button { min-height: 28px; padding: 3px 8px; font-size: 10px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-access { padding: 8px 12px 10px; gap: 6px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-access-controls,
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-permissions,
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-access-actions { gap: 5px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-permission { min-height: 28px; padding: 3px 7px; gap: 6px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-peer-access .button { min-height: 28px; padding: 3px 8px; font-size: 10px; }
+.device-link-list-card[data-lan-block="trusted"] .device-link-empty { grid-column: 1 / -1; }
+
 /* 首启引导（合并流程）：四步卡片 */
 .onboarding-card { width: min(520px, 100%); text-align: left; }
 .onboarding-card > img { margin: 0 auto; }
@@ -8083,10 +8100,11 @@ button.chat-message-attachment:focus-visible { outline: 2px solid var(--primary)
 .device-link-connect-inputs input:last-child { flex: 0 0 116px; letter-spacing: .12em; }
 .device-link-connect-hint { display: block; max-width: 760px; margin-top: 8px; color: var(--muted); font-size: 10px; line-height: 1.7; }
 
-/* 局域网连接与远程连接并排一行 */
-.device-link-pair-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+/* 设备列表占满内容区；云端高级操作放在其下方。 */
+.device-link-pair-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; min-width: 0; }
+.device-link-pair-row > .device-link-grid,
+.device-link-pair-row > .device-link-cloud-details { min-width: 0; width: 100%; }
 .device-link-pair-row:empty { display: none; }
-@media (max-width: 1180px) { .device-link-pair-row { grid-template-columns: minmax(0, 1fr); } }
 /* 受信任设备：标注局域网 / 远程 */
 .device-link-peer-via { padding: 2px 7px; border-radius: 999px; font-size: 9px; font-style: normal; font-weight: 650; }
 .device-link-peer-via.lan { background: #eef2f7; color: #475569; }

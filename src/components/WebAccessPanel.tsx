@@ -57,7 +57,7 @@ export function WebAccessPanel({ embedded = false }: { embedded?: boolean } = {}
     {enabled && status && (
       <div className="web-access-grid">
         <div className="web-access-field">
-          <small>局域网访问地址（用安全锁密码进入）</small>
+          <small>局域网访问地址（安全锁密码或访问口令）</small>
           <div className="web-access-value">
             <code>{lanUrl}</code>
             <button type="button" className="icon-button compact" aria-label="复制访问地址" onClick={() => void copy(lanUrl, '地址已复制')}><Copy size={14} /></button>

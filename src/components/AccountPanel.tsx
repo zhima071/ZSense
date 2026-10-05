@@ -11,8 +11,7 @@ interface AccountPanelProps {
 
 /**
  * 账号与安全：本机只有一个账号（初始用户名），不再有新建身份 / 角色 / 启用停用那一套。
- * 这里只做两件事：绑定邮箱（仅用于重置安全锁密码），以及设置安全锁密码。
- * 安全锁没有独立开关：设了密码就是启用，清除就是关闭。
+ * 绑定邮箱、安全锁和独立的远程网页访问密码都在此配置。
  */
 export function AccountPanel({ currentUser, settings, onSaveSettings }: AccountPanelProps) {
   const [email, setEmail] = useState('')
@@ -47,18 +46,18 @@ export function AccountPanel({ currentUser, settings, onSaveSettings }: AccountP
   }, [])
   useEffect(() => { void load() }, [load])
 
-  // 账号密码：给「其它验证」用（浏览器访问 / 远程连接登录），与安全锁密码分开
+  // 安全锁关闭时的公网网页登录凭据，与本机应用解锁相互独立。
   const saveAccountPassword = async (event: FormEvent) => {
     event.preventDefault()
     setError(''); setMessage('')
-    if (accountPassword.length < 4) { setError('账号密码至少需要 4 位。'); return }
-    if (accountPassword !== accountPasswordConfirm) { setError('两次输入的账号密码不一致。'); return }
+    if (accountPassword.length < 4) { setError('远程访问密码至少需要 4 位。'); return }
+    if (accountPassword !== accountPasswordConfirm) { setError('两次输入的远程访问密码不一致。'); return }
     setBusy('account-password')
     try {
       await unwrapDesktop(window.zsenseDesktop!.auth.setAccountPassword(accountPassword))
       setAccountPasswordConfigured(true)
       setAccountPasswordOpen(false); setAccountPassword(''); setAccountPasswordConfirm('')
-      setMessage('账号密码已保存。浏览器访问与远程连接登录请使用它；安全锁密码仍只用于解锁应用。')
+      setMessage('远程访问密码已保存。安全锁关闭时可用它登录远程网页；已配对设备仍可通过密钥进入。')
     } catch (reason) { setError(errorMessage(reason)) } finally { setBusy('') }
   }
 
@@ -178,14 +177,14 @@ export function AccountPanel({ currentUser, settings, onSaveSettings }: AccountP
         </form>
 
         <div className="account-password-row">
-          <span className={`security-state ${accountPasswordConfigured ? 'active' : ''}`}><i />账号密码{accountPasswordConfigured ? '已设置' : '未设置'}</span>
-          <button type="button" className="button secondary small" onClick={() => { setError(''); setMessage(''); setAccountPasswordOpen((open) => !open) }}><KeyRound size={14} />{accountPasswordConfigured ? '修改账号密码' : '设置账号密码'}</button>
-          <small>只用于「其它验证」：浏览器访问与远程连接登录。安全锁密码只用于解锁应用，两者互不影响。</small>
+          <span className={`security-state ${accountPasswordConfigured ? 'active' : ''}`}><i />远程访问密码{accountPasswordConfigured ? '已设置' : '未设置'}</span>
+          <button type="button" className="button secondary small" onClick={() => { setError(''); setMessage(''); setAccountPasswordOpen((open) => !open) }}><KeyRound size={14} />{accountPasswordConfigured ? '修改远程访问密码' : '设置远程访问密码'}</button>
+          <small>安全锁关闭时，直接打开远程网页需使用此密码；未设置则仅已配对设备能通过密钥进入。</small>
         </div>
         {accountPasswordOpen && <form className="account-lock-form" onSubmit={saveAccountPassword}>
-          <input type="password" autoFocus value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder="账号密码（至少 4 位）" aria-label="账号密码" autoComplete="new-password" />
-          <input type="password" value={accountPasswordConfirm} onChange={(event) => setAccountPasswordConfirm(event.target.value)} placeholder="再输一次" aria-label="确认账号密码" autoComplete="new-password" />
-          <button type="submit" className="button primary small" disabled={busy === 'account-password'}>{busy === 'account-password' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}保存账号密码</button>
+          <input type="password" autoFocus value={accountPassword} onChange={(event) => setAccountPassword(event.target.value)} placeholder="远程访问密码（至少 4 位）" aria-label="远程访问密码" autoComplete="new-password" />
+          <input type="password" value={accountPasswordConfirm} onChange={(event) => setAccountPasswordConfirm(event.target.value)} placeholder="再输一次" aria-label="确认远程访问密码" autoComplete="new-password" />
+          <button type="submit" className="button primary small" disabled={busy === 'account-password'}>{busy === 'account-password' ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}保存远程访问密码</button>
         </form>}
         <footer>
           <span className={`security-state ${settings.appLockEnabled ? 'active' : ''}`}><i />安全锁{settings.appLockEnabled ? '已启用' : '未启用'}</span>

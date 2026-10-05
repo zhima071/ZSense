@@ -13,9 +13,40 @@
       content="ZSense — 多 Bot、独立记忆、技能、消息网关与自动化工作台"
     />
     <title>ZSense</title>
+    <style>
+      /* Paint immediately; React keeps this markup while the workspace initializes. */
+      .zsense-startup { position: relative; isolation: isolate; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; overflow: hidden; background: radial-gradient(circle at 50% 45%, #e7f1ff 0, #f8fbff 38%, #fff 76%); color: #0f172a; font-family: Inter, "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .zsense-startup::before { content: ""; position: absolute; inset: 0; z-index: -1; opacity: .55; background-image: linear-gradient(#dbeafe 1px, transparent 1px), linear-gradient(90deg, #dbeafe 1px, transparent 1px); background-size: 42px 42px; mask-image: radial-gradient(ellipse 58% 56% at center, #000 0, transparent 85%); }
+      .zsense-startup::after { content: ""; position: absolute; z-index: -1; width: min(74vw, 660px); aspect-ratio: 1; border-radius: 50%; background: radial-gradient(circle, #60a5fa25 0, #93c5fd12 32%, transparent 68%); animation: zsense-startup-breathe 2.4s ease-out both; }
+      .zsense-startup-inner { position: relative; display: flex; align-items: center; flex-direction: column; width: min(360px, calc(100vw - 48px)); text-align: center; }
+      .zsense-startup-symbol { position: relative; width: 188px; height: 188px; display: grid; place-items: center; }
+      .zsense-startup-halo { position: absolute; inset: 19px; border: 1px solid #93c5fd8c; border-radius: 50%; box-shadow: 0 0 28px #60a5fa35, inset 0 0 30px #bfdbfe52; }
+      .zsense-startup-orbit { position: absolute; inset: 1px; border: 1px dashed #93c5fd9c; border-radius: 50%; animation: zsense-startup-orbit 2.4s ease-in-out both; }
+      .zsense-startup-orbit::before, .zsense-startup-orbit::after { content: ""; position: absolute; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: #2563eb; box-shadow: 0 0 14px #3b82f6; }
+      .zsense-startup-orbit::before { left: -3.5px; } .zsense-startup-orbit::after { right: -3.5px; background: #38bdf8; }
+      .zsense-startup-orbit-secondary { inset: 12px; border-style: solid; border-color: transparent; border-top-color: #3b82f6; border-bottom-color: #7dd3fc; animation-direction: reverse; }
+      .zsense-startup-orbit-secondary::before, .zsense-startup-orbit-secondary::after { display: none; }
+      .zsense-startup-logo { position: relative; z-index: 1; width: 106px; height: 106px; padding: 8px; display: grid; place-items: center; border: 1px solid #ffffffdd; border-radius: 29px; background: #ffffffbd; box-shadow: 0 16px 42px #1d4ed82e, inset 0 1px #fff; animation: zsense-startup-float 2.4s ease-out both; }
+      .zsense-startup-logo img { display: block; width: 88px; height: 88px; border-radius: 22px; object-fit: contain; }
+      .zsense-startup-name { margin-top: 8px; font-size: 28px; font-weight: 760; line-height: 1.25; letter-spacing: -.055em; }
+      .zsense-startup-tagline { margin-top: 5px; color: #475569; font-size: 12px; line-height: 1.5; }
+      .zsense-startup-progress { position: relative; width: 192px; height: 4px; margin-top: 30px; overflow: hidden; border-radius: 100px; background: #dbeafe; box-shadow: 0 0 0 1px #bfdbfe80; }
+      .zsense-startup-progress::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(90deg, #60a5fa, #1d4ed8 65%, #67e8f9); box-shadow: 0 0 14px #3b82f6; transform-origin: left center; animation: zsense-startup-progress 2.4s cubic-bezier(.18, .72, .2, 1) both; }
+      .zsense-startup-stage { min-height: 18px; margin-top: 12px; color: #475569; font-size: 11px; line-height: 18px; }
+      @keyframes zsense-startup-orbit { to { transform: rotate(360deg); } }
+      @keyframes zsense-startup-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+      @keyframes zsense-startup-float { 0% { transform: translateY(8px) scale(.9); opacity: .65; } 40% { transform: translateY(-5px) scale(1.025); opacity: 1; } 100% { transform: translateY(0) scale(1); opacity: 1; } }
+      @keyframes zsense-startup-breathe { from { transform: scale(.78); opacity: .45; } to { transform: scale(1.14); opacity: .72; } }
+      @keyframes zsense-startup-wait { 50% { opacity: .46; } }
+      .zsense-startup--waiting .zsense-startup-progress::after { animation: zsense-startup-wait 1.5s ease-in-out infinite; }
+      .zsense-startup--waiting .zsense-startup-orbit-secondary { animation: zsense-startup-orbit 8s linear infinite reverse; }
+      .zsense-startup-prepaint::after, .zsense-startup-prepaint .zsense-startup-orbit, .zsense-startup-prepaint .zsense-startup-logo, .zsense-startup-prepaint .zsense-startup-progress::after { animation: none; }
+      .zsense-startup-prepaint .zsense-startup-progress::after { transform: scaleX(0); }
+      @media (prefers-reduced-motion: reduce) { .zsense-startup::after, .zsense-startup-orbit, .zsense-startup-logo, .zsense-startup-progress::after { animation: none; } .zsense-startup-progress::after { transform: scaleX(1); } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="zsense-startup zsense-startup-prepaint" role="status" aria-live="polite"><div class="zsense-startup-inner"><div class="zsense-startup-symbol" aria-hidden="true"><span class="zsense-startup-halo"></span><span class="zsense-startup-orbit"></span><span class="zsense-startup-orbit zsense-startup-orbit-secondary"></span><span class="zsense-startup-logo"><img src="/src/assets/zsense-brand.png" alt="" width="88" height="88" /></span></div><strong class="zsense-startup-name">ZSense</strong><span class="zsense-startup-tagline">你的智能工作空间</span><div class="zsense-startup-progress" aria-hidden="true"></div><span class="zsense-startup-stage">正在启动应用…</span></div></div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

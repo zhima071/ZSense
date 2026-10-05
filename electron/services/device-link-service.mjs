@@ -228,7 +228,7 @@ export class DeviceLinkService {
       deviceName: cleanText(stored.deviceName, 80) || this.hostname,
       httpPort: Math.floor(Number(stored.httpPort) || 0),
       enabled: Boolean(stored.enabled),
-      // 远程连接（公网）：与局域网直连完全独立，必须已开启设备锁才能启用
+      // 远程连接（公网）：与本机安全锁独立，入口仍由配对密钥或网页密码保护。
       remote: {
         enabled: Boolean(stored.remote?.enabled),
         hostname: cleanText(stored.remote?.hostname, 120) || 'app.zsense.space',
@@ -268,17 +268,11 @@ export class DeviceLinkService {
 
   async initialize() {
     if (this.state.enabled) await this.start()
-    if (this.state.remote?.enabled && this.appLockEnabled()) void this.#startRemoteAgent()
+    if (this.state.remote?.enabled) void this.#startRemoteAgent()
     if (this.state.remote?.accountBound) void this.refreshRemoteIdentity().then(() => this.syncAccountPeers()).catch(() => undefined)
     if (!this.accountPeerTimer) {
       this.accountPeerTimer = setInterval(() => void this.syncAccountPeers().catch(() => undefined), 30_000)
       this.accountPeerTimer.unref?.()
-    }
-    if (!this.remoteLockWatchdog) {
-      this.remoteLockWatchdog = setInterval(() => {
-        try { this.enforceRemoteLockGate() } catch { /* 守护失败不影响主流程 */ }
-      }, 20_000)
-      this.remoteLockWatchdog.unref?.()
     }
     return this.inspect()
   }
@@ -350,7 +344,6 @@ export class DeviceLinkService {
       try { await this.#setHubOffline() } catch { /* 退出时尽力通知，TTL 仍会兜底 */ }
     }
     await this.stop({ persist: false })
-    if (this.remoteLockWatchdog) { clearInterval(this.remoteLockWatchdog); this.remoteLockWatchdog = null }
     if (this.accountPeerTimer) { clearInterval(this.accountPeerTimer); this.accountPeerTimer = null }
   }
 
@@ -369,7 +362,7 @@ export class DeviceLinkService {
     const id = cleanText(remoteDeviceId, 60)
     const candidates = this.state.trustedPeers.filter((item) => item.remoteDeviceId === id && item.identityPublicKey && item.connected)
     const peer = candidates.find((item) => item.source === 'remote') || candidates[0]
-    if (!peer || !this.appLockEnabled()) return false
+    if (!peer || !this.state.remote?.enabled) return false
     if (!nonce && !signature) return true
     if (!/^[A-Za-z0-9_-]{24,100}$/.test(String(nonce || '')) || !/^[A-Za-z0-9_-]{64,200}$/.test(String(signature || ''))) return false
     try {
@@ -734,7 +727,7 @@ export class DeviceLinkService {
       if (result || !allowOffline) return result
     }
     const run = async () => {
-      const enabled = Boolean(this.state.remote?.enabled && this.appLockEnabled())
+      const enabled = Boolean(this.state.remote?.enabled)
       if (!enabled && !allowOffline) return false
       const upstream = enabled ? this.#currentUpstream() : ''
       // 邮箱绑定只需要已签名的设备身份，不应被尚未就绪的出站隧道阻断。
@@ -759,7 +752,7 @@ export class DeviceLinkService {
   }
 
   async #heartbeatHub() {
-    if (!this.state.remote?.enabled || !this.appLockEnabled() || !this.state.remote?.hubBound || !this.#currentUpstream()) return false
+    if (!this.state.remote?.enabled || !this.state.remote?.hubBound || !this.#currentUpstream()) return false
     try {
       await this.#hubMutation('heartbeat')
       this.remoteRegisteredAt = new Date().toISOString()
@@ -829,7 +822,7 @@ export class DeviceLinkService {
 
   /** 设备端自动化：本机模式直接注册；否则自动建立一条出站通道再注册（零手动） */
   async #startRemoteAgent() {
-    if (!this.state.remote?.enabled || !this.appLockEnabled()) return
+    if (!this.state.remote?.enabled) return
     if (this.detectLocalHub && this.state.remote?.upstreamMode !== 'local') {
       try {
         const response = await fetch('http://127.0.0.1:39080/__hub/devices')
@@ -894,7 +887,7 @@ export class DeviceLinkService {
   }
 
   #scheduleRemoteReconnect() {
-    if (this.shuttingDown || !this.state.remote?.enabled || !this.appLockEnabled() || this.state.remote?.upstreamMode === 'local' || cleanText(process.env.ZSENSE_DEVICE_UPSTREAM_URL, 500) || this.remoteReconnectTimer) return
+    if (this.shuttingDown || !this.state.remote?.enabled || this.state.remote?.upstreamMode === 'local' || cleanText(process.env.ZSENSE_DEVICE_UPSTREAM_URL, 500) || this.remoteReconnectTimer) return
     const delay = Math.max(1_000, Math.min(30_000, Number(this.remoteReconnectDelayMs) || 2_000))
     this.remoteReconnectDelayMs = Math.min(30_000, delay * 2)
     this.remoteReconnectTimer = setTimeout(() => {
@@ -911,14 +904,9 @@ export class DeviceLinkService {
     if (this.remoteReconnectTimer) { clearTimeout(this.remoteReconnectTimer); this.remoteReconnectTimer = null }
   }
 
-  /** 开启/关闭远程连接：前置条件是已开启设备锁 */
+  /** 开启/关闭远程连接；网页访问和设备通信分别验证凭据。 */
   async setRemoteEnabled(enabled) {
     const want = Boolean(enabled)
-    if (want && !this.appLockEnabled()) {
-      const error = new Error('远程连接需要先开启设备锁：请到「设置 → 安全」里设置锁屏密码并开启设备锁，再回来打开远程连接。')
-      error.code = 'app-lock-required'
-      throw error
-    }
     this.state.remote = { ...(this.state.remote || {}), enabled: want }
     this.#persist()
     if (want) {
@@ -963,23 +951,6 @@ export class DeviceLinkService {
       this.#emitChanged()
     }
     return reachable
-  }
-
-  /** 设备锁被关掉时自动断开远程连接（20 秒兜底一次） */
-  enforceRemoteLockGate() {
-    if (this.state.remote?.enabled && !this.appLockEnabled()) {
-      this.state.remote.enabled = false
-      void this.#setHubOffline()
-      this.#stopTunnel()
-      this.#stopRemoteAgent()
-      this.remoteReachable = false
-      try { this.onRemoteDisabled?.() } catch { /* 会话清理失败不影响关停 */ }
-      this.remoteLastError = '设备锁已关闭，远程连接已自动断开。'
-      this.#persist()
-      this.#emitChanged()
-      return true
-    }
-    return false
   }
 
   async setEnabled(enabled) {
@@ -1306,7 +1277,7 @@ export class DeviceLinkService {
     const target = validRemoteDeviceId(peer.remoteDeviceId || peer.deviceId)
     const ownId = validRemoteDeviceId(this.state.remote?.deviceId)
     if (!target || !ownId || !peer.identityPublicKey) throw new Error('云端设备身份尚未完成配对，请重新连接。')
-    if (!this.state.remote?.enabled || !this.appLockEnabled()) throw new Error('云端 Agent 通信需要本机开启设备互联与安全锁。')
+    if (!this.state.remote?.enabled) throw new Error('云端 Agent 通信需要本机开启远程连接。')
     const origin = `https://${target}.${this.#publicDeviceDomain()}`
     const fetchShort = async (url, options) => {
       const controller = new AbortController()
@@ -1370,7 +1341,7 @@ export class DeviceLinkService {
   runTaskFromCloudPeer(deviceId, prompt, timeoutMs) {
     const peer = this.state.trustedPeers.find((item) => item.deviceId === deviceId || item.remoteDeviceId === deviceId)
     if (!peer || !peer.cloudPaired || !peer.connected || !peer.identityPublicKey) throw new Error('云端设备尚未完成双向密钥配对。')
-    if (!this.state.remote?.enabled || !this.appLockEnabled()) throw new Error('本机云端连接或安全锁已关闭。')
+    if (!this.state.remote?.enabled) throw new Error('本机云端连接已关闭。')
     if (!peer.access.allowTasks) throw new Error('这台设备尚未获准在本机执行 Agent 任务。')
     if (!this.remoteTaskRunner) throw new Error('本机 Agent 任务执行器尚未就绪。')
     const message = cleanText(prompt, MAX_TASK_PROMPT_LENGTH)
