@@ -314,11 +314,25 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
             const checkingStatus = action === `status:${peer.deviceId}`
             const togglingAccess = action === `access:${peer.deviceId}`
             const access = peer.access || { allowStatus: false, allowFiles: false, allowTasks: false }
+            const activeConnection = peer.connectionMode === 'lan' || peer.connectionMode === 'cloud'
+            const connectionState = activeConnection ? '在线' : peer.connected ? '离线' : '已断开'
             const setAccess = (next: { allowStatus: boolean; allowFiles: boolean; allowTasks: boolean }) => void run(`access:${peer.deviceId}`, () => unwrapDesktop(window.zsenseDesktop!.deviceLink.setPeerAccess({ deviceId: peer.deviceId, access: next })), `${peer.name} 的远程权限已更新。`)
             return <div className="device-link-peer" key={peer.deviceId}>
-              <div className="device-link-device-row trusted" title={`${peer.platformLabel} · ${peer.address} · 最后连接 ${relativeTime(peer.lastSeenAt)}`}>
+              <div className="device-link-device-row trusted">
                 <span className={`device-link-platform-icon ${peer.online ? 'online' : ''}`}><Icon size={18} /></span>
-                <span className="device-link-device-meta"><strong>{peer.name}<i className={peer.connectionMode !== 'offline' ? 'online' : ''}>{peer.connectionMode === 'lan' || peer.connectionMode === 'cloud' ? '在线' : peer.connected ? '离线' : '已断开'}</i><em className={`device-link-peer-via ${peer.connectionMode === 'cloud' ? 'remote' : 'lan'}`}>{peer.connectionMode === 'lan' ? '局域网连接' : peer.connectionMode === 'cloud' ? '云端连接' : '未连接'}</em></strong></span>
+                <div className="device-link-device-meta trusted-meta">
+                  <strong className="device-link-peer-name">{peer.name}</strong>
+                  <div className="device-link-peer-indicators">
+                    <span className={`device-link-peer-state ${activeConnection ? 'online' : ''}`}>{connectionState}</span>
+                    <span className={`device-link-peer-via ${peer.connectionMode === 'cloud' ? 'remote' : 'lan'}`}>{peer.connectionMode === 'lan' ? '局域网连接' : peer.connectionMode === 'cloud' ? '云端连接' : '未连接'}</span>
+                  </div>
+                  <div className="device-link-peer-details">
+                    <span>{peer.platformLabel}</span>
+                    {peer.address && <span>{peer.address}{peer.port ? `:${peer.port}` : ''}</span>}
+                    {peer.remoteDeviceId && <span>设备号 {peer.remoteDeviceId}</span>}
+                    <span>最近活动 {relativeTime(peer.lastSeenAt)}</span>
+                  </div>
+                </div>
                 <div className="device-link-actions">
                   {peer.remoteDeviceId && peer.identityPublicKey && peer.connected && <button type="button" className="button secondary small" title="使用已配对的设备密钥免密打开远程页面" onClick={() => void connectSameEmailPeer({ deviceId: peer.remoteDeviceId!, name: peer.name, url: `https://${peer.remoteDeviceId}.zsense.space` })}>远程打开</button>}
                   {peer.connected ? <button type="button" className="button secondary small" disabled={action !== null} onClick={() => void run(`disconnect:${peer.deviceId}`, () => unwrapDesktop(window.zsenseDesktop!.deviceLink.disconnect(peer.deviceId)), `已断开 ${peer.name}，授权仍保留。`)}>{disconnecting ? <LoaderCircle className="spin" size={14} /> : <WifiOff size={14} />}断开</button> : <button type="button" className="button secondary small" disabled={action !== null} onClick={() => void run(`connect:${peer.deviceId}`, () => unwrapDesktop(window.zsenseDesktop!.deviceLink.connect(peer.deviceId)), `已重新连接 ${peer.name}。`)}>{connecting ? <LoaderCircle className="spin" size={14} /> : <Wifi size={14} />}重连</button>}
@@ -327,17 +341,20 @@ export function DeviceLinkSettingsPanel({ onOpenSecurity }: { onOpenSecurity?: (
               </div>
               <div className="device-link-peer-access">
                 {peer.source === 'remote' ? <>
-                  <span className="device-link-peer-access-label">云端设备已验证公钥；任务执行仍需接收方单独授权。</span>
-                  <button type="button" className={`switch ${access.allowTasks ? 'on' : ''}`} role="switch" aria-checked={access.allowTasks} aria-label={`${access.allowTasks ? '关闭' : '开启'}允许 ${peer.name} 通过云端在本机执行任务`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowTasks: !access.allowTasks })}><span /></button>
-                  <span className="device-link-peer-access-label">允许在本机执行任务</span>
-                  <button type="button" className="button primary small" disabled={!peer.connected || action !== null} onClick={() => { setTaskPeer(peer); setTaskPrompt(''); setTaskResult(undefined) }}><Play size={14} />发送 Agent 任务</button>
+                  <span className="device-link-peer-access-label device-link-peer-access-note">云端设备已验证公钥；任务执行仍需接收方单独授权。</span>
+                  <div className="device-link-peer-access-controls">
+                    <div className="device-link-peer-permission">
+                      <span>允许在本机执行任务</span>
+                      <button type="button" className={`switch ${access.allowTasks ? 'on' : ''}`} role="switch" aria-checked={access.allowTasks} aria-label={`${access.allowTasks ? '关闭' : '开启'}允许 ${peer.name} 通过云端在本机执行任务`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowTasks: !access.allowTasks })}><span /></button>
+                    </div>
+                    <button type="button" className="button primary small" disabled={!peer.connected || action !== null} onClick={() => { setTaskPeer(peer); setTaskPrompt(''); setTaskResult(undefined) }}><Play size={14} />发送 Agent 任务</button>
+                  </div>
                 </> : <>
-                <button type="button" className={`switch ${access.allowStatus ? 'on' : ''}`} role="switch" aria-checked={access.allowStatus} aria-label={`${access.allowStatus ? '关闭' : '开启'}允许 ${peer.name} 读取本机状态与内容`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowStatus: !access.allowStatus })}><span /></button>
-                <span className="device-link-peer-access-label">读取状态 / Bot / 对话</span>
-                <button type="button" className={`switch ${access.allowFiles ? 'on' : ''}`} role="switch" aria-checked={access.allowFiles} aria-label={`${access.allowFiles ? '关闭' : '开启'}允许 ${peer.name} 读取本机文件`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowFiles: !access.allowFiles })}><span /></button>
-                <span className="device-link-peer-access-label" title="开启后对方可读取本机任意非凭据文件，请仅授权可信设备">读取本机文件</span>
-                <button type="button" className={`switch ${access.allowTasks ? 'on' : ''}`} role="switch" aria-checked={access.allowTasks} aria-label={`${access.allowTasks ? '关闭' : '开启'}允许 ${peer.name} 在本机执行任务`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowTasks: !access.allowTasks })}><span /></button>
-                <span className="device-link-peer-access-label">在本机执行远程任务</span>
+                <div className="device-link-peer-permissions">
+                  <div className="device-link-peer-permission"><span>读取状态 / Bot / 对话</span><button type="button" className={`switch ${access.allowStatus ? 'on' : ''}`} role="switch" aria-checked={access.allowStatus} aria-label={`${access.allowStatus ? '关闭' : '开启'}允许 ${peer.name} 读取本机状态与内容`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowStatus: !access.allowStatus })}><span /></button></div>
+                  <div className="device-link-peer-permission" title="开启后对方可读取本机任意非凭据文件，请仅授权可信设备"><span>读取本机文件</span><button type="button" className={`switch ${access.allowFiles ? 'on' : ''}`} role="switch" aria-checked={access.allowFiles} aria-label={`${access.allowFiles ? '关闭' : '开启'}允许 ${peer.name} 读取本机文件`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowFiles: !access.allowFiles })}><span /></button></div>
+                  <div className="device-link-peer-permission"><span>在本机执行远程任务</span><button type="button" className={`switch ${access.allowTasks ? 'on' : ''}`} role="switch" aria-checked={access.allowTasks} aria-label={`${access.allowTasks ? '关闭' : '开启'}允许 ${peer.name} 在本机执行任务`} disabled={togglingAccess} onClick={() => setAccess({ ...access, allowTasks: !access.allowTasks })}><span /></button></div>
+                </div>
                 <div className="device-link-peer-access-actions">
                   <button type="button" className="button secondary small" disabled={!peer.online || action !== null} onClick={() => void loadRemoteStatus(peer)}>{checkingStatus ? <LoaderCircle className="spin" size={14} /> : <MonitorSmartphone size={14} />}查看对方状态</button>
                   <button type="button" className="button primary small" disabled={peer.connectionMode === 'offline' || action !== null} onClick={() => { setTaskPeer(peer); setTaskPrompt(''); setTaskResult(undefined) }}><Play size={14} />发送任务到对方</button>

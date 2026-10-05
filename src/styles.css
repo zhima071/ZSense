@@ -7359,12 +7359,15 @@ button.chat-message-attachment:focus-visible { outline: 2px solid var(--primary)
 .device-link-list-card { overflow: hidden; }
 .device-link-count { min-width: 26px; height: 24px; padding: 0 8px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; background: var(--primary-soft); color: var(--primary-strong); font-size: 9px; font-weight: 700; }
 .device-link-device-list { display: grid; }
-.device-link-peer { display: grid; }
-.device-link-peer-access { padding: 8px 14px 12px 60px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border-top: 1px dashed var(--border); background: var(--surface-raised); }
+.device-link-peer { min-width: 0; display: grid; border-top: 1px solid var(--border); container-type: inline-size; }
+.device-link-peer-access { padding: 10px 16px 12px 64px; display: grid; gap: 8px; border-top: 1px dashed var(--border); background: var(--surface-raised); }
 .device-link-peer-access-title { color: var(--text-soft); font-size: 9px; font-weight: 600; }
 .device-link-peer-access-fixed { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 0 10px; border-radius: 8px; background: var(--green-soft); color: var(--green); font-size: 8px; line-height: 1.4; }
-.device-link-peer-access-label { color: var(--faint); font-size: 9px; }
-.device-link-peer-access-actions { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+.device-link-peer-access-label { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.device-link-peer-access-controls, .device-link-peer-permissions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.device-link-peer-permission { min-height: 34px; padding: 4px 9px; display: inline-flex; align-items: center; gap: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-soft); font-size: 10px; }
+.device-link-peer-permission .switch { flex: 0 0 auto; }
+.device-link-peer-access-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .device-link-overlay { position: fixed; inset: 0; z-index: 60; padding: 24px; display: flex; align-items: center; justify-content: center; background: rgba(15, 23, 42, .38); backdrop-filter: blur(3px); }
 .device-link-dialog { width: min(620px, 100%); max-height: 82vh; overflow: auto; }
 .device-link-status-grid { padding: 0 17px 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
@@ -7377,11 +7380,21 @@ button.chat-message-attachment:focus-visible { outline: 2px solid var(--primary)
 .device-link-task-output { max-height: 46vh; margin: 0 17px 17px; padding: 13px 15px; overflow: auto; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); color: var(--text-soft); font-size: 10px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 .device-link-device-row { min-height: 72px; padding: 11px 14px; border-top: 1px solid var(--border); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
 .device-link-device-row:hover { background: var(--surface-hover); }
+.device-link-device-row.trusted { min-height: 0; padding: 14px 16px 12px; border-top: 0; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 8px 12px; }
+.device-link-device-row.trusted .device-link-platform-icon { margin-top: 2px; }
+.device-link-device-row.trusted .device-link-actions { grid-column: 2; width: auto; padding: 0; flex-wrap: wrap; justify-self: start; }
+.device-link-device-row.trusted .device-link-actions .button { min-height: 32px; padding: 5px 10px; white-space: nowrap; }
 .device-link-platform-icon { width: 36px; height: 36px; border-radius: 9px; }
 .device-link-platform-icon.online { background: var(--green-soft); color: var(--green); }
 .device-link-device-meta { min-width: 0; }
 .device-link-device-meta strong, .device-link-device-meta small { display: block; }
 .device-link-device-meta strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.device-link-device-meta.trusted-meta .device-link-peer-name { overflow: visible; white-space: normal; overflow-wrap: anywhere; font-size: 12px; line-height: 1.4; }
+.device-link-peer-indicators { margin-top: 5px; display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.device-link-peer-state { padding: 2px 7px; border-radius: 999px; background: var(--surface-raised); color: var(--muted); font-size: 9px; font-weight: 650; }
+.device-link-peer-state.online { background: var(--green-soft); color: var(--green); }
+.device-link-peer-details { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 3px 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.device-link-peer-details span { overflow-wrap: anywhere; }
 .device-link-device-meta strong i { margin-left: 7px; padding: 2px 5px; border-radius: 5px; background: var(--surface-raised); color: var(--muted); font-size: 7px; font-style: normal; font-weight: 650; }
 .device-link-device-meta strong i.online { background: var(--green-soft); color: var(--green); }
 .device-link-device-meta small { margin-top: 4px; overflow: hidden; color: var(--faint); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
@@ -7452,6 +7465,11 @@ button.chat-message-attachment:focus-visible { outline: 2px solid var(--primary)
   .device-link-device-row { grid-template-columns: auto minmax(0, 1fr); }
   .device-link-pair-action, .device-link-actions { grid-column: 1 / -1; width: 100%; padding-left: 46px; }
   .device-link-pair-action input { min-width: 0; flex: 1; }
+}
+
+@container (max-width: 420px) {
+  .device-link-device-row.trusted .device-link-actions { grid-column: 1 / -1; }
+  .device-link-peer-access { padding: 10px 14px 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -8070,7 +8088,7 @@ button.chat-message-attachment:focus-visible { outline: 2px solid var(--primary)
 .device-link-pair-row:empty { display: none; }
 @media (max-width: 1180px) { .device-link-pair-row { grid-template-columns: minmax(0, 1fr); } }
 /* 受信任设备：标注局域网 / 远程 */
-.device-link-peer-via { margin-left: 7px; padding: 1px 7px; border-radius: 999px; font-size: 9px; font-style: normal; font-weight: 650; }
+.device-link-peer-via { padding: 2px 7px; border-radius: 999px; font-size: 9px; font-style: normal; font-weight: 650; }
 .device-link-peer-via.lan { background: #eef2f7; color: #475569; }
 .device-link-peer-via.remote { background: var(--primary-soft); color: var(--primary-strong); }
 .device-link-remote-url > code { padding: 7px 10px; border-radius: 9px; background: #f1f5f9; font-size: 12px; }
