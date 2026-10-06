@@ -159,6 +159,10 @@ try {
   await service.unpair('hub00002')
   await service.syncAccountPeers()
   assert.equal(service.inspect().trustedPeers.some((peer) => peer.remoteDeviceId === 'hub00002'), false, 'local revocation must not be undone by the next sync')
+  const heartbeatsBefore = mutations.filter((entry) => entry.action === 'heartbeat').length
+  const peerSyncsBefore = mutations.filter((entry) => entry.action === 'account-peers').length
+  await waitFor(() => mutations.filter((entry) => entry.action === 'heartbeat').length > heartbeatsBefore, '3-second public heartbeat did not reach the hub', 5_000)
+  assert.equal(mutations.filter((entry) => entry.action === 'account-peers').length, peerSyncsBefore, 'faster heartbeat must not multiply account peer syncs')
 
   children[0].emit('exit', 1)
   await waitFor(() => mutations.some((entry) => entry.action === 'offline'), 'tunnel loss did not immediately send a signed offline mutation')

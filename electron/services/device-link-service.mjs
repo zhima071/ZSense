@@ -36,7 +36,7 @@ const DEFAULT_TASK_TIMEOUT_MS = 5 * 60_000
 const MIN_TASK_TIMEOUT_MS = 10_000
 const MAX_TASK_TIMEOUT_MS = 10 * 60_000
 const HUB_PROTOCOL_VERSION = 2
-const HUB_HEARTBEAT_INTERVAL_MS = 25_000
+const HUB_HEARTBEAT_INTERVAL_MS = 3_000
 const HUB_REQUEST_TIMEOUT_MS = 8_000
 const HUB_LOCAL_UPSTREAM = 'local://web-bridge'
 
@@ -206,6 +206,7 @@ export class DeviceLinkService {
     this.httpServer = null
     this.advertisementTimer = null
     this.heartbeatTimer = null
+    this.hubHeartbeatPromise = null
     this.started = false
     this.starting = null
     this.lastError = ''
@@ -753,26 +754,30 @@ export class DeviceLinkService {
 
   async #heartbeatHub() {
     if (!this.state.remote?.enabled || !this.state.remote?.hubBound || !this.#currentUpstream()) return false
-    try {
-      await this.#hubMutation('heartbeat')
-      this.remoteRegisteredAt = new Date().toISOString()
-      this.remoteLastError = ''
-      if (this.state.remote?.accountBound) void this.syncAccountPeers().catch(() => undefined)
-      this.#emitChanged()
-      return true
-    } catch (error) {
-      if (error?.code === 'upstream-missing' || error?.code === 'unknown-device') {
-        // The hub has crossed an offline boundary (transport failure, TTL or
-        // restart). Revoke old browser sessions before any route is restored,
-        // otherwise a pre-offline Cookie could become valid again.
-        try { this.onRemoteDisabled?.() } catch { /* 会话清理失败不影响重新注册 */ }
-        return await this.#registerWithHub()
+    if (this.hubHeartbeatPromise) return await this.hubHeartbeatPromise
+    const run = async () => {
+      try {
+        await this.#hubMutation('heartbeat')
+        this.remoteRegisteredAt = new Date().toISOString()
+        this.remoteLastError = ''
+        this.#emitChanged()
+        return true
+      } catch (error) {
+        if (error?.code === 'upstream-missing' || error?.code === 'unknown-device') {
+          // The hub has crossed an offline boundary (transport failure, TTL or
+          // restart). Revoke old browser sessions before any route is restored,
+          // otherwise a pre-offline Cookie could become valid again.
+          try { this.onRemoteDisabled?.() } catch { /* 会话清理失败不影响重新注册 */ }
+          return await this.#registerWithHub()
+        }
+        // 单次网络抖动不代表设备已离线；Hub 的签名心跳 TTL 仍会兜底。
+        this.remoteLastError = `交换中心心跳失败：${error instanceof Error ? error.message : error}`
+        this.#emitChanged()
+        return false
       }
-      try { this.onRemoteDisabled?.() } catch { /* 会话清理失败不影响下一轮重连 */ }
-      this.remoteLastError = `交换中心心跳失败：${error instanceof Error ? error.message : error}`
-      this.#emitChanged()
-      return false
     }
+    this.hubHeartbeatPromise = run().finally(() => { this.hubHeartbeatPromise = null })
+    return await this.hubHeartbeatPromise
   }
 
   async #updateHubUpstream() {
