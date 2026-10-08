@@ -12,13 +12,23 @@ import { ZSenseDatabase } from '../electron/services/database.mjs'
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(scriptDirectory, '..')
-const toolPath = path.join(projectDirectory, 'bundled-tools', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'officecli.exe' : 'officecli')
-const kdocsToolPath = path.join(projectDirectory, 'bundled-tools', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'kdocs-cli.exe' : 'kdocs-cli')
-const larkToolPath = path.join(projectDirectory, 'bundled-tools', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'lark-cli.exe' : 'lark-cli')
-const browserSkillToolPath = path.join(projectDirectory, 'bundled-tools', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'bsk.exe' : 'bsk')
+const bundledToolRoot = path.join(projectDirectory, 'bundled-tools', `${process.platform}-${process.arch}`)
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zsense-office-smoke-'))
+const testToolRoot = path.join(temporaryRoot, 'bundled-tools')
+const binaryName = (name) => process.platform === 'win32' ? `${name}.exe` : name
+const toolPath = path.join(testToolRoot, binaryName('officecli'))
+const kdocsToolPath = path.join(testToolRoot, binaryName('kdocs-cli'))
+const larkToolPath = path.join(testToolRoot, binaryName('lark-cli'))
+const browserSkillToolPath = path.join(testToolRoot, binaryName('bsk'))
 
 try {
+  fs.mkdirSync(testToolRoot)
+  for (const name of ['officecli', 'kdocs-cli', 'lark-cli', 'bsk', 'dws']) {
+    const source = path.join(bundledToolRoot, binaryName(name))
+    const destination = path.join(testToolRoot, binaryName(name))
+    fs.copyFileSync(source, destination)
+    if (process.platform !== 'win32') fs.chmodSync(destination, 0o755)
+  }
   assert.equal(fs.statSync(toolPath).isFile(), true, 'officecli must be packaged as a real binary')
   assert.equal(fs.statSync(kdocsToolPath).isFile(), true, 'kdocs-cli must be packaged as a real binary')
   assert.match(execFileSync(kdocsToolPath, ['version'], { encoding: 'utf8' }).trim(), /^2\.5\.7(?:\b|$)/, 'bundled kdocs-cli version must match the kdocs skill')
