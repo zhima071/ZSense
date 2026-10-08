@@ -199,7 +199,13 @@ export function verifyWindowsOfflineBundle({ rootPath = windowsBundleRoot, mossR
   }
   const actualFiles = listFiles(rootPath).filter((file) => file !== 'manifest.json' && !file.startsWith('tts/'))
   const declaredFiles = Object.keys(manifestFiles).sort()
-  if (actualFiles.join('\n') !== declaredFiles.join('\n')) throw new Error('Windows 离线目录与清单不一致，存在缺失或未登记文件。')
+  if (actualFiles.join('\n') !== declaredFiles.join('\n')) {
+    const actualSet = new Set(actualFiles)
+    const declaredSet = new Set(declaredFiles)
+    const missing = declaredFiles.filter((file) => !actualSet.has(file))
+    const extra = actualFiles.filter((file) => !declaredSet.has(file))
+    throw new Error(`Windows 离线目录与清单不一致：缺失 ${missing.slice(0, 6).join('、') || '无'}；未登记 ${extra.slice(0, 6).join('、') || '无'}。`)
+  }
   for (const relativePath of declaredFiles) {
     const filePath = path.join(rootPath, relativePath)
     const stats = fs.statSync(filePath)
