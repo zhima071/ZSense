@@ -53,9 +53,13 @@ jobs:
           New-Item -ItemType Directory -Force $extracted | Out-Null
           $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
           if (-not (Test-Path $sevenZip -PathType Leaf)) { throw 'Windows 构建机缺少 7-Zip，无法解包上一版安装包。' }
-          & $sevenZip x -y "-o$extracted" $installer | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw '无法用 7-Zip 读取上一版安装包中的语音资源。' }
-          $tools = Join-Path $extracted 'resources/bundled-tools'
+          & $sevenZip x -y "-o$extracted" $installer '$PLUGINSDIR/app-64.7z' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '无法提取上一版安装包的内层归档。' }
+          $payload = Join-Path $previous 'payload'
+          New-Item -ItemType Directory -Force $payload | Out-Null
+          & $sevenZip x -y "-o$payload" (Join-Path $extracted '$PLUGINSDIR/app-64.7z') | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '无法读取上一版安装包中的语音资源。' }
+          $tools = Join-Path $payload 'resources/bundled-tools'
           New-Item -ItemType Directory -Force 'bundled-tools/shared/tts', 'bundled-tools/darwin-arm64/stt', 'bundled-tools/darwin-arm64/licenses' | Out-Null
           Copy-Item -Recurse -Force (Join-Path $tools 'tts/moss') 'bundled-tools/shared/tts/moss'
           Copy-Item -Force (Join-Path $tools 'stt/ggml-base.bin') 'bundled-tools/darwin-arm64/stt/ggml-base.bin'
