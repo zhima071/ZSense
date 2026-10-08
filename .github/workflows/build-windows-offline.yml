@@ -51,8 +51,10 @@ jobs:
           }
           $extracted = Join-Path $previous 'extracted'
           New-Item -ItemType Directory -Force $extracted | Out-Null
-          tar -xf $installer -C $extracted 'resources/bundled-tools/tts/moss/' 'resources/bundled-tools/stt/ggml-base.bin' 'resources/bundled-tools/stt/LICENSE.whisper.cpp' 'resources/bundled-tools/stt/LICENSE.openai-whisper' 'resources/bundled-tools/licenses/LICENSE.lark-cli'
-          if ($LASTEXITCODE -ne 0) { throw '无法读取上一版安装包中的语音资源。' }
+          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
+          if (-not (Test-Path $sevenZip -PathType Leaf)) { throw 'Windows 构建机缺少 7-Zip，无法解包上一版安装包。' }
+          & $sevenZip x -y "-o$extracted" $installer | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw '无法用 7-Zip 读取上一版安装包中的语音资源。' }
           $tools = Join-Path $extracted 'resources/bundled-tools'
           New-Item -ItemType Directory -Force 'bundled-tools/shared/tts', 'bundled-tools/darwin-arm64/stt', 'bundled-tools/darwin-arm64/licenses' | Out-Null
           Copy-Item -Recurse -Force (Join-Path $tools 'tts/moss') 'bundled-tools/shared/tts/moss'
