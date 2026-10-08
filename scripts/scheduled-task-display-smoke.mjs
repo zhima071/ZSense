@@ -35,9 +35,10 @@ const runner = new ScheduledTaskRunner({
 })
 
 try {
-  const daily = nextScheduledRun({ frequency: 'daily', timeOfDay: '09:00' }, new Date('2026-09-10T10:00:00+08:00'))
-  assert(new Date(daily) > new Date('2026-09-10T10:00:00+08:00'), '每天任务没有计算到未来时间')
-  const weekday = nextScheduledRun({ frequency: 'weekdays', timeOfDay: '09:00' }, new Date('2026-09-11T10:00:00+08:00'))
+  const thursdayMorning = new Date(2026, 8, 10, 10)
+  const daily = nextScheduledRun({ frequency: 'daily', timeOfDay: '09:00' }, thursdayMorning)
+  assert(new Date(daily) > thursdayMorning, '每天任务没有计算到未来时间')
+  const weekday = nextScheduledRun({ frequency: 'weekdays', timeOfDay: '09:00' }, new Date(2026, 8, 11, 10))
   assert.equal(new Date(weekday).getDay(), 1, '工作日任务没有跳过周末')
 
   database.updateModelConfiguration({ provider: 'custom', model: 'test-model', baseUrl: 'http://127.0.0.1:1/v1', apiKeyName: 'CUSTOM_API_KEY', apiKeyConfigured: false, updatedAt: new Date().toISOString() })
