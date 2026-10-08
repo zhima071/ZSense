@@ -4,6 +4,7 @@ import selfsigned from 'selfsigned'
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import https from 'node:https'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -40,6 +41,12 @@ const HUB_HEARTBEAT_INTERVAL_MS = 3_000
 const HUB_REQUEST_TIMEOUT_MS = 8_000
 const HUB_LOCAL_UPSTREAM = 'local://web-bridge'
 
+function directNetworkUnavailable(error) {
+  const code = String(error?.code || error?.cause?.code || '')
+  return ['ECONNREFUSED', 'ECONNRESET', 'ENETUNREACH', 'EHOSTUNREACH', 'ETIMEDOUT', 'EPIPE'].includes(code) ||
+    ['AbortError', 'TimeoutError'].includes(String(error?.name || '')) || error instanceof TypeError
+}
+
 function readJson(filePath) {
   try {
     const value = JSON.parse(fs.readFileSync(filePath, 'utf8'))
@@ -68,6 +75,25 @@ export function isPrivateNetworkAddress(value) {
   const match100 = address.match(/^100\.(\d+)\./)
   if (match100 && Number(match100[1]) >= 64 && Number(match100[1]) <= 127) return true
   return /^(?:fc|fd|fe8|fe9|fea|feb)[0-9a-f:]*$/i.test(address)
+}
+
+export function isGlobalIpv6Address(value) {
+  const address = normalizedAddress(value).toLowerCase()
+  if (net.isIP(address) !== 6) return false
+  const first = Number.parseInt(address.split(':', 1)[0], 16)
+  if (first < 0x2000 || first > 0x3fff) return false
+  const second = Number.parseInt(address.split(':')[1] || '0', 16)
+  return !(first === 0x2001 && second === 0x0db8) && !(first >= 0x3ff0 && first <= 0x3fff)
+}
+
+function globalIpv6Addresses() {
+  const addresses = new Set()
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      if (!entry.internal && entry.family === 'IPv6' && isGlobalIpv6Address(entry.address)) addresses.add(normalizedAddress(entry.address))
+    }
+  }
+  return [...addresses].slice(0, 2)
 }
 
 function localAddresses() {
@@ -127,6 +153,14 @@ export function canonicalHubMessage({ action, challengeId, nonce, expiresAt, dev
     name: cleanText(name, 60),
     upstream: cleanText(upstream, 500),
   })
+}
+
+export function canonicalLanEndpoint({ nonce, remoteDeviceId, deviceId, webBridgePort, webBridgeFingerprint }) {
+  return `zsense-lan-endpoint-v1\n${nonce}\n${remoteDeviceId}\n${deviceId}\n${webBridgePort}\n${webBridgeFingerprint}`
+}
+
+export function canonicalDirectEndpoints({ deviceId, issuedAt, expiresAt, addresses, port, fingerprint }) {
+  return `zsense-direct-v1\n${deviceId}\n${issuedAt}\n${expiresAt}\n${addresses.join(',')}\n${port}\n${fingerprint}`
 }
 
 export function normalizePeerAccess(value) {
@@ -372,6 +406,42 @@ export class DeviceLinkService {
   }
 
   identityPublicKey() { return this.identity?.publicKey || '' }
+
+  signedDirectEndpoints() {
+    if (!this.identity || !this.state.remote?.enabled || !this.state.remote?.hubBound) return null
+    const bridge = this.webBridgeInfoProvider?.()
+    const addresses = globalIpv6Addresses()
+    const port = Number(bridge?.port)
+    const fingerprint = String(bridge?.fingerprint || '').replace(/:/g, '').toUpperCase()
+    const deviceId = this.#ensureRemoteDeviceId()
+    if (!bridge?.ipv6Listening || !deviceId || !addresses.length || !Number.isInteger(port) || port < 1 || port > 65_535 || !/^[0-9A-F]{64}$/.test(fingerprint)) return null
+    const issuedAt = Date.now()
+    const expiresAt = issuedAt + 60_000
+    const payload = { deviceId, issuedAt, expiresAt, addresses, port, fingerprint }
+    return { ...payload, signature: sign(null, Buffer.from(canonicalDirectEndpoints(payload)), createPrivateKey(this.identity.privateKey)).toString('base64url') }
+  }
+
+  verifySignedDirectEndpoints(remoteDeviceId, value) {
+    const target = validRemoteDeviceId(remoteDeviceId)
+    const peer = this.state.trustedPeers.find((item) => item.remoteDeviceId === target && item.connected && item.identityPublicKey)
+    const candidate = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+    const addresses = candidate.addresses
+    const issuedAt = Number(candidate.issuedAt)
+    const expiresAt = Number(candidate.expiresAt)
+    const port = Number(candidate.port)
+    const fingerprint = String(candidate.fingerprint || '').replace(/:/g, '').toUpperCase()
+    if (!peer || candidate.deviceId !== target || !Array.isArray(addresses) || !addresses.length || addresses.length > 2 ||
+      addresses.some((address) => typeof address !== 'string' || !isGlobalIpv6Address(address)) ||
+      !Number.isSafeInteger(issuedAt) || !Number.isSafeInteger(expiresAt) || issuedAt > Date.now() + 30_000 ||
+      expiresAt < Date.now() || expiresAt > issuedAt + 60_000 ||
+      !Number.isInteger(port) || port < 1 || port > 65_535 || !/^[0-9A-F]{64}$/.test(fingerprint) ||
+      !/^[A-Za-z0-9_-]{64,200}$/.test(String(candidate.signature || ''))) return []
+    try {
+      const payload = { deviceId: target, issuedAt, expiresAt, addresses, port, fingerprint }
+      if (!verify(null, Buffer.from(canonicalDirectEndpoints(payload)), createPublicKey(peer.identityPublicKey), Buffer.from(candidate.signature, 'base64url'))) return []
+      return addresses.map((address) => ({ address, port, fingerprint, remoteDeviceId: target }))
+    } catch { return [] }
+  }
 
   identityPublicKeyFingerprint() {
     try { return `sha256:${createHash('sha256').update(createPublicKey(this.identityPublicKey()).export({ type: 'spki', format: 'der' })).digest('hex')}` }
@@ -1051,6 +1121,7 @@ export class DeviceLinkService {
       platformLabel: platformLabel(descriptor.platform),
       address,
       port,
+      remoteDeviceId: validRemoteDeviceId(descriptor.remoteDeviceId),
       lastSeenAt: new Date().toISOString(),
       paired: this.state.trustedPeers.some((peer) => peer.deviceId === deviceId),
       ...(descriptor.manual ? { manual: true } : {}),
@@ -1058,7 +1129,7 @@ export class DeviceLinkService {
     }
     this.discovered.set(deviceId, next)
     const trusted = this.state.trustedPeers.find((peer) => peer.deviceId === deviceId)
-    const trustedChanged = Boolean(trusted && (trusted.name !== next.name || trusted.platform !== next.platform || trusted.address !== next.address || trusted.port !== next.port))
+    const trustedChanged = Boolean(trusted && trusted.source !== 'remote' && (trusted.name !== next.name || trusted.platform !== next.platform || trusted.address !== next.address || trusted.port !== next.port))
     if (trustedChanged && trusted) {
       Object.assign(trusted, { name: next.name, platform: next.platform, address: next.address, port: next.port })
       this.#persist()
@@ -1076,6 +1147,7 @@ export class DeviceLinkService {
       platform: payload.platform,
       address: normalizedAddress(remoteAddress),
       port: Number(payload.port),
+      remoteDeviceId: payload.remoteDeviceId,
     })
     // 收到“别的设备”的公告才说明组播这条路是通的（组播回环会把自己的公告也收回来，不能算）。
     if (registered && deviceId !== this.state.deviceId) {
@@ -1151,6 +1223,37 @@ export class DeviceLinkService {
     await this.#pingPeer(peer)
     this.#emitChanged()
     return this.inspect()
+  }
+
+  /** 广告只提供候选地址；必须用 Hub 已绑定的 Ed25519 公钥验证端点后才能直连。 */
+  async resolveTrustedLanEndpoint(remoteDeviceId) {
+    const target = validRemoteDeviceId(remoteDeviceId)
+    const peer = this.state.trustedPeers.find((item) => item.remoteDeviceId === target && item.connected && item.identityPublicKey)
+    if (!target || !peer || !this.started) return null
+    let candidates = [...this.discovered.values()].filter((item) => item.remoteDeviceId === target)
+    if (!candidates.length) {
+      await this.scan({ deep: false }).catch(() => undefined)
+      candidates = [...this.discovered.values()].filter((item) => item.remoteDeviceId === target)
+    }
+    for (const candidate of candidates) {
+      try {
+        const nonce = randomBytes(32).toString('base64url')
+        const result = await this.#request(candidate, '/v1/resolve', { nonce }, '', 1_200)
+        const descriptor = result?.device
+        const bridge = result?.webBridge
+        const fingerprint = String(bridge?.fingerprint || '').replace(/:/g, '').toUpperCase()
+        const port = Number(bridge?.port)
+        if (descriptor?.remoteDeviceId !== target || descriptor?.deviceId !== candidate.deviceId ||
+          !Number.isInteger(port) || port < 1 || port > 65_535 || !/^[0-9A-F]{64}$/.test(fingerprint) ||
+          !/^[A-Za-z0-9_-]{64,200}$/.test(String(result?.signature || ''))) continue
+        const expectedKey = createPublicKey(peer.identityPublicKey)
+        if (createPublicKey(descriptor.identityPublicKey).export({ type: 'spki', format: 'der' }).compare(expectedKey.export({ type: 'spki', format: 'der' })) !== 0) continue
+        const signed = canonicalLanEndpoint({ nonce, remoteDeviceId: target, deviceId: candidate.deviceId, webBridgePort: port, webBridgeFingerprint: fingerprint })
+        if (!verify(null, Buffer.from(signed), expectedKey, Buffer.from(result.signature, 'base64url'))) continue
+        return { address: candidate.address, port, fingerprint, remoteDeviceId: target }
+      } catch { /* 无效公告或不可达端点不影响云端回退。 */ }
+    }
+    return null
   }
 
   disconnect(deviceId) {
@@ -1278,18 +1381,19 @@ export class DeviceLinkService {
 
   // 公网任务不占用交换中心的长连接：签名提交，随后用短请求查询状态。
   // 每个请求都消耗一次挑战，签名绑定请求体，中心不能悄悄替换任务内容。
-  async #cloudTaskRequest(peer, route, body) {
+  async #cloudTaskRequest(peer, route, body, transport = null) {
     const target = validRemoteDeviceId(peer.remoteDeviceId || peer.deviceId)
     const ownId = validRemoteDeviceId(this.state.remote?.deviceId)
     if (!target || !ownId || !peer.identityPublicKey) throw new Error('云端设备身份尚未完成配对，请重新连接。')
     if (!this.state.remote?.enabled) throw new Error('云端 Agent 通信需要本机开启远程连接。')
-    const origin = `https://${target}.${this.#publicDeviceDomain()}`
+    const origin = transport?.origin || `https://${target}.${this.#publicDeviceDomain()}`
+    const fetchImpl = transport?.fetchImpl || fetch
     const fetchShort = async (url, options) => {
       const controller = new AbortController()
       const timer = setTimeout(() => controller.abort(), HUB_REQUEST_TIMEOUT_MS)
       timer.unref?.()
       try {
-        const response = await fetch(url, { ...options, signal: controller.signal })
+        const response = await fetchImpl(url, { ...options, signal: controller.signal })
         const payload = await response.json().catch(() => null)
         if (!response.ok || payload?.ok === false) {
           const error = new Error(cleanText(payload?.error, 300) || `云端设备返回 HTTP ${response.status}。`)
@@ -1311,10 +1415,48 @@ export class DeviceLinkService {
     })
   }
 
+  async #directTaskTransport(peer) {
+    const target = validRemoteDeviceId(peer.remoteDeviceId || peer.deviceId)
+    const ownId = validRemoteDeviceId(this.state.remote?.deviceId)
+    const { connectTrustedRemote, createPinnedLanFetch } = await import('./remote-trust-connect.mjs')
+    const tryCandidate = async (candidate) => {
+      const fetchImpl = createPinnedLanFetch(candidate.fingerprint, { maxResponseBytes: 2 * 1024 * 1024 })
+      try {
+        await connectTrustedRemote({
+          origin: candidate.origin, ownId, targetId: target,
+          signChallenge: (deviceId, nonce) => this.signRemoteChallenge(deviceId, nonce), fetchImpl, timeoutMs: 1_200,
+        })
+        return { origin: candidate.origin, fetchImpl }
+      } catch (error) {
+        if (!directNetworkUnavailable(error)) throw error
+        return null
+      }
+    }
+    const lan = await this.resolveTrustedLanEndpoint(target)
+    if (lan) {
+      const transport = await tryCandidate({ origin: `https://${lan.address}:${lan.port}`, fingerprint: lan.fingerprint })
+      if (transport) return transport
+    }
+    // Cloud ticket is only used to carry a short-lived, device-signed IPv6 descriptor.
+    // It cannot nominate an endpoint without the paired Ed25519 public key.
+    const cloud = await connectTrustedRemote({
+      origin: `https://${target}.${this.#publicDeviceDomain()}`, ownId, targetId: target,
+      signChallenge: (deviceId, nonce) => this.signRemoteChallenge(deviceId, nonce),
+    })
+    for (const direct of this.verifySignedDirectEndpoints(target, cloud.directCandidates)) {
+      const transport = await tryCandidate({ origin: `https://[${direct.address}]:${direct.port}`, fingerprint: direct.fingerprint })
+      if (transport) return transport
+    }
+    return null
+  }
+
   async #runCloudTask(peer, prompt, budget) {
+    let transport = null
+    try { transport = await this.#directTaskTransport(peer) }
+    catch (error) { if (!directNetworkUnavailable(error)) throw error }
     let submitted
     try {
-      submitted = await this.#cloudTaskRequest(peer, '/bridge/agent-task', { prompt, timeoutMs: budget })
+      submitted = await this.#cloudTaskRequest(peer, '/bridge/agent-task', { prompt, timeoutMs: budget }, transport)
     } catch (error) {
       if (error?.name === 'AbortError' || error instanceof TypeError || Number(error?.status) >= 500) {
         throw new Error('云端任务提交结果不确定：对方可能已经收到任务。本机不会自动重发，请先查看对方设备的运行记录。')
@@ -1329,8 +1471,13 @@ export class DeviceLinkService {
       await new Promise((resolve) => setTimeout(resolve, 2_000))
       let result
       try {
-        result = await this.#cloudTaskRequest(peer, '/bridge/agent-task-result', { taskId })
+        result = await this.#cloudTaskRequest(peer, '/bridge/agent-task-result', { taskId }, transport)
       } catch (error) {
+        // A submitted task is never resent. Result lookup may switch to cloud safely.
+        if (transport && directNetworkUnavailable(error)) {
+          transport = null
+          continue
+        }
         // 查询失败可安全重试；任务提交永不自动重试，避免重复执行。
         if (++failures >= 3 || /任务不存在|已过期|身份|签名|授权/.test(String(error?.message || ''))) throw error
         continue
@@ -1463,6 +1610,7 @@ export class DeviceLinkService {
       name: this.state.deviceName,
       platform: this.platform,
       port: this.httpPort,
+      remoteDeviceId: this.#ensureRemoteDeviceId(),
       timestamp: Date.now(),
     }))
     this.discoverySocket.send(payload, remote.port, remote.address, () => undefined)
@@ -1563,6 +1711,7 @@ export class DeviceLinkService {
                 platform: descriptor.platform,
                 address: host,
                 port: Number(descriptor.port) || port,
+                remoteDeviceId: descriptor.remoteDeviceId,
                 lastSeenAt: new Date().toISOString(),
                 source: 'scan',
               })
@@ -1621,6 +1770,7 @@ export class DeviceLinkService {
       name: this.state.deviceName,
       platform: this.platform,
       port: this.httpPort,
+      remoteDeviceId: this.#ensureRemoteDeviceId(),
       timestamp: Date.now(),
     }))
     this.discoverySocket.send(payload, this.discoveryPort, this.discoveryAddress, () => undefined)
@@ -1635,6 +1785,20 @@ export class DeviceLinkService {
     if (request.method !== 'POST') return jsonResponse(response, 404, { ok: false, error: '接口不存在。' })
     try {
       const body = await readBody(request)
+      if (request.url === '/v1/resolve') {
+        const nonce = String(body?.nonce || '')
+        if (!/^[A-Za-z0-9_-]{32,100}$/.test(nonce)) return jsonResponse(response, 400, { ok: false, error: '设备端点挑战无效。' })
+        const device = this.#localDescriptor()
+        const rawBridge = this.webBridgeInfoProvider?.()
+        const port = Number(rawBridge?.port)
+        const fingerprint = String(rawBridge?.fingerprint || '').replace(/:/g, '').toUpperCase()
+        if (!device.remoteDeviceId || !Number.isInteger(port) || port < 1 || port > 65_535 || !/^[0-9A-F]{64}$/.test(fingerprint)) {
+          return jsonResponse(response, 503, { ok: false, error: '局域网远程页面尚未就绪。' })
+        }
+        const signed = canonicalLanEndpoint({ nonce, remoteDeviceId: device.remoteDeviceId, deviceId: device.deviceId, webBridgePort: port, webBridgeFingerprint: fingerprint })
+        const signature = sign(null, Buffer.from(signed), createPrivateKey(this.identity.privateKey)).toString('base64url')
+        return jsonResponse(response, 200, { ok: true, device, webBridge: { port, fingerprint }, signature })
+      }
       if (request.url === '/v1/pair') {
         const attempts = (this.pairAttempts.get(remoteAddress) || []).filter((at) => Date.now() - at < PAIR_ATTEMPT_WINDOW_MS)
         if (attempts.length >= PAIR_ATTEMPT_LIMIT) return jsonResponse(response, 429, { ok: false, error: '配对尝试过多，请稍后再试。' })

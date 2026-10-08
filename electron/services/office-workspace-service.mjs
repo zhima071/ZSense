@@ -1920,6 +1920,7 @@ export class OfficeWorkspaceService {
     } catch { return [] }
 
     const documents = new Map()
+    const startedAt = Math.max(0, Number(since) || 0)
     const remember = (candidate) => {
       if (documents.size >= 8 || !candidate) return
       let resolvedPath
@@ -1934,13 +1935,15 @@ export class OfficeWorkspaceService {
         const stats = fs.statSync(resolvedPath)
         const extension = path.extname(resolvedPath).toLowerCase()
         if (!stats.isFile() || !ALL_EXTENSIONS.has(extension) || stats.size <= 0 || stats.size > MAX_FILE_BYTES) return
+        // 旧图片可能再次出现在回复或工具结果里；只有本轮新建或修改的图片才挂到本条消息下。
+        if (IMAGE_EXTENSIONS.has(extension) && stats.mtimeMs < startedAt) return
         documents.set(resolvedPath, { resolvedPath, stats, extension })
       } catch { /* output may mention a file that no longer exists */ }
     }
 
     const sourceText = [
       String(content || ''),
-      ...toolEvents.flatMap((event) => [event?.input, event?.output, event?.detail]).filter((value) => typeof value === 'string'),
+      ...toolEvents.flatMap((event) => [event?.output, event?.detail]).filter((value) => typeof value === 'string'),
     ].join('\n')
     const patterns = [
       /\]\((?:<)?([^)>\n]+\.(?:docx|xlsx|csv|tsv|pptx|doc|xls|ppt))(?:>)?\)/gi,
@@ -1955,7 +1958,6 @@ export class OfficeWorkspaceService {
     }
 
     let visited = 0
-    const threshold = Math.max(0, Number(since) || 0) - 1_500
     const walk = (directory, depth) => {
       if (depth > 8 || visited >= MAX_DISCOVERY_FILES || documents.size >= 8) return
       let entries
@@ -1971,7 +1973,7 @@ export class OfficeWorkspaceService {
         if (!entry.isFile() || !ALL_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue
         visited += 1
         try {
-          if (fs.statSync(target).mtimeMs >= threshold) remember(target)
+          if (fs.statSync(target).mtimeMs >= startedAt) remember(target)
         } catch { /* file may disappear while an editor operation is finishing */ }
       }
     }

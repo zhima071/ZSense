@@ -9,7 +9,7 @@ const sdk = process.env.ANDROID_HOME || path.join(toolchain, 'sdk')
 const avdHome = process.env.ANDROID_AVD_HOME || path.join(toolchain, 'avd')
 const adb = path.join(sdk, 'platform-tools', 'adb')
 const emulator = path.join(sdk, 'emulator', 'emulator')
-const apk = process.env.ZSENSE_ANDROID_PREVIEW_APK || path.join(project, '安装包', '当前', 'ZSense-0.1.1-android13-release.apk')
+const apk = process.env.ZSENSE_ANDROID_PREVIEW_APK || path.join(project, '安装包', '当前', 'ZSense-0.1.2-android13-release.apk')
 
 for (const item of [adb, emulator, apk]) if (!fs.existsSync(item)) throw new Error(`预览所需文件不存在：${item}`)
 

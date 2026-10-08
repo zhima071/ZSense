@@ -10,7 +10,7 @@ import { readPdfDocument, readPdfDocumentChunk, savePdfDocument, transformPdfPag
 import { fetchOfficialModelCatalog } from './services/model-catalog-service.mjs'
 import { createMemoryMaintenanceQueue, shouldExtractMemory } from './services/memory-intelligence.mjs'
 import { defaultUpdateFeedUrl } from './services/update-service.mjs'
-import { connectTrustedRemote } from './services/remote-trust-connect.mjs'
+import { connectTrustedRemote, createPinnedLanFetch } from './services/remote-trust-connect.mjs'
 
 const channelIds = new Set(['web', 'telegram', 'discord', 'slack', 'wecom', 'weixin', 'dingtalk', 'feishu', 'webhook'])
 const externalChannelIds = new Set([...channelIds].filter((id) => id !== 'web'))
@@ -26,6 +26,50 @@ const attachmentLimit = 8
 const htmlEmbeddedImageSizeLimit = 4 * 1024 * 1024
 const portableConfigurationFormat = 'zsense-portable-configuration'
 const portableConfigurationSchemaVersion = 1
+const trustedLanWindows = new Map()
+
+app.on('certificate-error', (event, contents, url, _error, certificate, callback) => {
+  const trusted = trustedLanWindows.get(contents.id)
+  if (!trusted) return
+  try {
+    const actual = String(certificate?.fingerprint || '').replace(/:/g, '').toUpperCase()
+    if (new URL(url).origin !== trusted.origin || actual !== trusted.fingerprint) return
+    event.preventDefault()
+    callback(true)
+  } catch { /* 非目标页面的证书错误继续按 Electron 默认规则拒绝。 */ }
+})
+
+async function openTrustedLanWindow(url, fingerprint) {
+  const origin = new URL(url).origin
+  const window = new BrowserWindow({
+    width: 1220, height: 860, minWidth: 760, minHeight: 540, show: false,
+    title: 'ZSense · 设备直连',
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, partition: `zsense-trusted-lan-${randomUUID()}` },
+  })
+  trustedLanWindows.set(window.webContents.id, { origin, fingerprint })
+  window.webContents.setWindowOpenHandler(({ url: target }) => {
+    try {
+      if (new URL(target).origin === origin) void window.loadURL(target)
+      else if (/^https?:\/\//i.test(target)) void shell.openExternal(target)
+    } catch { /* 忽略无效跳转。 */ }
+    return { action: 'deny' }
+  })
+  window.webContents.on('will-navigate', (event, target) => {
+    try {
+      if (new URL(target).origin === origin) return
+      event.preventDefault()
+      if (/^https?:\/\//i.test(target)) void shell.openExternal(target)
+    } catch { event.preventDefault() }
+  })
+  window.on('closed', () => trustedLanWindows.delete(window.webContents.id))
+  try {
+    await window.loadURL(url)
+    window.show()
+  } catch (error) {
+    window.destroy()
+    throw error
+  }
+}
 const portableConfigurationMaxBytes = 12 * 1024 * 1024
 const channelFields = {
   web: { public: [], secret: [], required: [] },
@@ -754,6 +798,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     deviceLinkService.onRemoteDisabled = () => webBridgeService.revokeRemoteSessions()
     webBridgeService.pairingCodeProvider = () => deviceLinkService.currentPairingCode?.() || ''
     webBridgeService.deviceIdentityProvider = () => deviceLinkService.identityPublicKey()
+    webBridgeService.directCandidatesProvider = () => deviceLinkService.signedDirectEndpoints()
     webBridgeService.onRemotePeerConnected = (deviceId, name, publicKey) => {
       const accepted = deviceLinkService.rememberRemotePeer?.(deviceId, name, publicKey)
       if (accepted !== true) return false
@@ -772,7 +817,7 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     deviceLinkService.webBridgeInfoProvider = () => {
       const bridge = webBridgeService.inspect()
       return bridge.running && bridge.certificate
-        ? { port: bridge.port, fingerprint: String(bridge.certificate.fingerprint || '').replace(/:/g, '').toUpperCase() }
+        ? { port: bridge.port, fingerprint: String(bridge.certificate.fingerprint || '').replace(/:/g, '').toUpperCase(), ipv6Listening: bridge.ipv6Listening === true }
         : null
     }
   }
@@ -833,13 +878,46 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const origin = `https://${deviceId}.zsense.space`
     const ownId = String(deviceLinkService.inspect()?.remote?.deviceId || '')
     if (!/^[a-z0-9][a-z0-9-]{1,58}$/.test(ownId)) throw new Error('本机还没有完成交换中心设备号注册，请确认能访问 hub.zsense.space 后重试。')
+    const lan = await deviceLinkService.resolveTrustedLanEndpoint(deviceId)
+    if (lan) {
+      try {
+        const direct = await connectTrustedRemote({
+          origin: `https://${lan.address}:${lan.port}`,
+          ownId,
+          targetId: deviceId,
+          signChallenge: (target, nonce) => deviceLinkService.signRemoteChallenge(target, nonce),
+          fetchImpl: createPinnedLanFetch(lan.fingerprint),
+        })
+        await openTrustedLanWindow(direct.url, lan.fingerprint)
+        return { ...direct, opened: true, connectionMode: 'lan' }
+      } catch (error) {
+        if (/证书|身份|授权|签名|拒绝|trusted|forbidden|cert|ssl|tls/i.test(String(error?.message || ''))) throw error
+        // 端点在验签后突然离线时才尝试现有云端链路。
+      }
+    }
     try {
-      return await connectTrustedRemote({
+      const result = await connectTrustedRemote({
         origin,
         ownId,
         targetId: deviceId,
         signChallenge: (target, nonce) => deviceLinkService.signRemoteChallenge(target, nonce),
       })
+      const directCandidates = deviceLinkService.verifySignedDirectEndpoints(deviceId, result.directCandidates)
+      if (directCandidates.length) {
+        try {
+          const direct = await Promise.any(directCandidates.map((candidate) => connectTrustedRemote({
+            origin: `https://[${candidate.address}]:${candidate.port}`,
+            ownId,
+            targetId: deviceId,
+            signChallenge: (target, nonce) => deviceLinkService.signRemoteChallenge(target, nonce),
+            fetchImpl: createPinnedLanFetch(candidate.fingerprint),
+            timeoutMs: 900,
+          }).then((ticket) => ({ ticket, candidate }))))
+          await openTrustedLanWindow(direct.ticket.url, direct.candidate.fingerprint)
+          return { ...direct.ticket, opened: true, connectionMode: 'p2p' }
+        } catch { /* IPv6 端到端不可达或入站防火墙拒绝时沿用已取得的云端票据。 */ }
+      }
+      return { ...result, opened: false, connectionMode: 'cloud' }
     } catch (error) {
       if (error?.name === 'TimeoutError' || error?.name === 'AbortError') throw new Error('连接对方设备超时，请确认它在线且网络通畅。')
       if (error instanceof TypeError) throw new Error('连不上对方设备，请确认它在线并且已打开设备互联。')

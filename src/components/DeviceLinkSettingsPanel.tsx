@@ -44,8 +44,8 @@ export function DeviceLinkSettingsPanel() {
     const safeUrl = `https://${peer.deviceId}.zsense.space`
     try {
       const result = await unwrapDesktop(window.zsenseDesktop!.deviceLink.trustConnect(peer.deviceId))
-      window.open(result.url || safeUrl, '_blank', 'noopener')
-      setNotice(`已免密进入 ${peer.name || peer.deviceId}。`)
+      if (!result.opened) window.open(result.url || safeUrl, '_blank', 'noopener')
+      setNotice(`已通过${result.connectionMode === 'lan' ? '局域网直连' : result.connectionMode === 'p2p' ? '公网 IPv6 直连' : '云端连接'}免密进入 ${peer.name || peer.deviceId}。`)
     } catch (reason) {
       // 密钥验证失败时仍可打开登录页，但不会免密放行。
       setNotice(`${errorMessage(reason)} 已改为直接打开登录页，请使用对方的访问密码。`)
@@ -156,8 +156,8 @@ export function DeviceLinkSettingsPanel() {
     try {
       if (trustedTarget?.source === 'remote' || trustedTarget?.connectionMode === 'cloud') {
         const result = await unwrapDesktop(window.zsenseDesktop!.deviceLink.trustConnect(trustedTarget.remoteDeviceId || trustedTarget.deviceId))
-        window.open(result.url, '_blank', 'noopener')
-        setNotice(`已通过云端打开 ${trustedTarget.name}；设备密钥已验证。`)
+        if (!result.opened) window.open(result.url, '_blank', 'noopener')
+        setNotice(`已通过${result.connectionMode === 'lan' ? '局域网直连' : result.connectionMode === 'p2p' ? '公网 IPv6 直连' : '云端连接'}打开 ${trustedTarget.name}；设备密钥已验证。`)
       } else if (trustedTarget) {
         applyStatus(await unwrapDesktop(window.zsenseDesktop!.deviceLink.connect(trustedTarget.deviceId)))
         setNotice(`已通过局域网连接 ${trustedTarget.name}。`)

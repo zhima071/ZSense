@@ -22,7 +22,7 @@ declare global {
         revokeRemoteIdentity: () => Promise<DesktopResult<DeviceLinkStatus>>
         setRemoteUpstream: (mode: 'auto' | 'local') => Promise<DesktopResult<DeviceLinkStatus>>
         setRemoteToken: (token: string) => Promise<DesktopResult<DeviceLinkStatus>>
-        trustConnect: (deviceId: string) => Promise<{ ok: boolean; data?: { url: string; deviceId: string }; error?: string }>
+        trustConnect: (deviceId: string) => Promise<{ ok: boolean; data?: { url: string; deviceId: string; opened?: boolean; connectionMode?: 'lan' | 'p2p' | 'cloud' }; error?: string }>
         pairConnect: (deviceId: string, code: string) => Promise<{ ok: boolean; data?: { url: string; deviceId: string }; error?: string }>
         setName: (name: string) => Promise<DesktopResult<DeviceLinkStatus>>
         refreshCode: () => Promise<DesktopResult<DeviceLinkStatus>>

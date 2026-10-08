@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowUp, Bot as BotIcon, Globe2, LoaderCircle, Paintbrus
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { errorMessage, unwrapDesktop } from '../services/desktop'
 import { mergeChatAttachments, useChatAttachmentDrop, useChatAttachmentPaste } from '../services/chat-attachments'
+import { chatComposerDraftKey, moveChatComposerDraft, useChatComposerDraft } from '../services/chat-composer-drafts'
 import { chatRunKey, insertSteeringTranscript, moveChatRun, removeChatRun, setChatRun, updateChatRun, useChatRun, type ChatTranscriptItem } from '../services/chat-run-store'
 import { isCanvasDocumentPath } from '../services/office-artifacts'
 import type { AgentLoopStep, AppSettings, Bot, ChatAttachment, ChatClarification, ChatClarificationAnswer, ChatResult, ChatStreamEvent, ChatToolEvent, ChatUsage, Conversation, ModelConfiguration, ModelProvider, ReasoningEffort, RuntimeStatus, Skill, VoiceChatRequest } from '../types'
@@ -58,7 +59,6 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
   const display = useDisplaySettings()
   const initialModel = conversation?.model || bot.model || defaultModelConfiguration.model || ''
   const initialProvider = (conversation?.modelProvider || bot.modelProvider || (defaultModelConfiguration.model ? defaultModelConfiguration.provider : '')) as ModelProvider | ''
-  const [draft, setDraft] = useState('')
   const [messages, setMessages] = useState<TranscriptItem[]>(() => (conversation?.messages || []).map((message) => ({
     id: message.id,
     role: message.role as TranscriptItem['role'],
@@ -75,13 +75,14 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
     error: message.role === 'system',
   })))
   const [conversationId, setConversationId] = useState<string | undefined>(conversation?.id)
+  const composerDraftKey = chatComposerDraftKey('bot', conversationId || conversation?.id, bot.id)
+  const [draft, setDraft, attachments, setAttachments] = useChatComposerDraft(composerDraftKey)
   const viewRunKey = chatRunKey('bot', conversationId, bot.id)
   const activeRun = useChatRun(viewRunKey)
   const [modelProvider, setModelProvider] = useState<ModelProvider | ''>(initialProvider)
   const [model, setModel] = useState(initialModel)
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(conversation?.reasoningEffort || 'high')
   const [workspacePath, setWorkspacePath] = useState(conversation?.workspacePath || defaultWorkspacePath)
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [usage, setUsage] = useState<ChatUsage | undefined>(conversation?.usage)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string>()
@@ -267,6 +268,7 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
         const previousKey = currentRunKey
         resolvedConversationId = streamEvent.conversationId
         currentRunKey = moveChatRun(previousKey, chatRunKey('bot', resolvedConversationId, bot.id), resolvedConversationId)
+        moveChatComposerDraft(composerDraftKey, chatComposerDraftKey('bot', resolvedConversationId, bot.id))
         if (activeViewKeyRef.current === previousKey) {
           activeViewKeyRef.current = currentRunKey
           conversationIdRef.current = resolvedConversationId
@@ -320,6 +322,7 @@ export function ChatDialog({ bot, bots, skills, conversation, runtime, savedMode
         const previousKey = currentRunKey
         resolvedConversationId = result.conversationId
         currentRunKey = moveChatRun(previousKey, chatRunKey('bot', result.conversationId, bot.id), result.conversationId)
+        moveChatComposerDraft(composerDraftKey, chatComposerDraftKey('bot', result.conversationId, bot.id))
         if (activeViewKeyRef.current === previousKey) {
           activeViewKeyRef.current = currentRunKey
           conversationIdRef.current = result.conversationId

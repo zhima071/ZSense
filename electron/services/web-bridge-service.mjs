@@ -14,6 +14,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
 import https from 'node:https'
+import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
@@ -95,6 +96,15 @@ export function isLanAddress(value) {
   const match100 = address.match(/^100\.(\d+)\./)
   if (match100 && Number(match100[1]) >= 64 && Number(match100[1]) <= 127) return true
   return /^(?:fc|fd|fe8|fe9|fea|feb)[0-9a-f:]*$/i.test(address)
+}
+
+function isPublicIpv6Address(value) {
+  const address = normalizedAddress(value).toLowerCase()
+  if (net.isIP(address) !== 6) return false
+  const first = Number.parseInt(address.split(':', 1)[0], 16)
+  if (first < 0x2000 || first > 0x3fff) return false
+  const second = Number.parseInt(address.split(':')[1] || '0', 16)
+  return !(first === 0x2001 && second === 0x0db8) && first < 0x3ff0
 }
 
 export function lanAddresses() {
@@ -227,6 +237,7 @@ export class WebBridgeService {
     this.certificate = null
     this.redirectServer = null
     this.port = 0
+    this.ipv6Listening = false
     this.httpPort = 0
     this.onChanged = onChanged
     this.statePath = path.join(rootPath, 'web-bridge', 'state.json')
@@ -352,6 +363,7 @@ export class WebBridgeService {
       enabled: this.state.enabled === true,
       running,
       port,
+      ipv6Listening: running && this.ipv6Listening,
       httpPort: this.httpPort || 0,
       protocol: this.useHttps ? 'https' : 'http',
       accessCode: this.state.enabled ? this.state.accessCode : '',
@@ -440,19 +452,27 @@ export class WebBridgeService {
       throw new Error(this.lastError)
     }
     const handler = (request, response) => void this.#handleHttp(request, response)
-    const listen = (port) => new Promise((resolve, reject) => {
+    const listen = (port, host) => new Promise((resolve, reject) => {
       const server = this.certificate
         ? https.createServer({ key: this.certificate.key, cert: this.certificate.cert }, handler)
         : http.createServer(handler)
       server.on('clientError', (_error, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'))
       server.once('error', reject)
-      server.listen(port, '0.0.0.0', () => { server.off('error', reject); resolve(server) })
+      server.listen({ port, host, ipv6Only: false }, () => { server.off('error', reject); resolve(server) })
     })
+    const listenDirect = async (port) => {
+      try { const server = await listen(port, '::'); this.ipv6Listening = true; return server }
+      catch (error) {
+        if (!['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(error?.code)) throw error
+        this.ipv6Listening = false
+        return await listen(port, '0.0.0.0')
+      }
+    }
     try {
-      this.server = await listen(this.state.port)
+      this.server = await listenDirect(this.state.port)
     } catch (error) {
       if (this.state.port === 0) throw error
-      this.server = await listen(0)
+      this.server = await listenDirect(0)
     }
     this.port = Number(this.server.address()?.port) || this.state.port
     if (this.state.port !== this.port) { this.state.port = this.port; this.#persist() }
@@ -488,6 +508,7 @@ export class WebBridgeService {
     this.server = null
     this.redirectServer = null
     this.httpPort = 0
+    this.ipv6Listening = false
     this.started = false
     // 关闭时不能被长期存活的浏览器 / fetch keep-alive 连接阻塞。
     server?.closeAllConnections?.()
@@ -532,7 +553,8 @@ export class WebBridgeService {
     const ticket = crypto.randomBytes(24).toString('base64url')
     this.trustTickets.push({ ticket, deviceId, expiresAt: Date.now() + TRUST_TICKET_TTL_MS })
     this.trustTickets = this.trustTickets.slice(-20)
-    return { ok: true, data: { ticket, expiresInSeconds: Math.round(TRUST_TICKET_TTL_MS / 1000), entryPath: `/bridge/enter?ticket=${encodeURIComponent(ticket)}` } }
+    return { ok: true, data: { ticket, expiresInSeconds: Math.round(TRUST_TICKET_TTL_MS / 1000), entryPath: `/bridge/enter?ticket=${encodeURIComponent(ticket)}`,
+      directCandidates: this.directCandidatesProvider?.(deviceId) || null } }
   }
 
   #consumeSignedDeviceRequest(request, route, body) {
@@ -567,7 +589,8 @@ export class WebBridgeService {
 
   #allowRemote(request) {
     const address = normalizedAddress(request.socket.remoteAddress)
-    return isLanAddress(address) ? address : ''
+    if (isLanAddress(address)) return address
+    return isPublicIpv6Address(address) && this.remoteAccessAllowed?.() ? address : ''
   }
 
   async #readBody(request) {
@@ -639,7 +662,7 @@ export class WebBridgeService {
   async #handleHttp(request, response) {
     const address = this.#allowRemote(request)
     if (!address) return jsonResponse(response, 403, { ok: false, error: '只允许局域网设备访问。' })
-    const fromTunnel = Boolean(request.headers['cf-ray'] || request.headers['cf-connecting-ip'] || request.headers['cf-worker'] || /(?:^|\.)zsense\.space(?::\d+)?$/i.test(String(request.headers.host || '')))
+    const fromTunnel = Boolean(isPublicIpv6Address(address) || request.headers['cf-ray'] || request.headers['cf-connecting-ip'] || request.headers['cf-worker'] || /(?:^|\.)zsense\.space(?::\d+)?$/i.test(String(request.headers.host || '')))
     if (fromTunnel && typeof this.remoteAccessAllowed === 'function' && !this.remoteAccessAllowed()) {
       return jsonResponse(response, 403, { ok: false, error: '远程连接已关闭。' })
     }

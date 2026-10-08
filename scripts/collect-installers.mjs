@@ -60,7 +60,7 @@ if (platform === 'android' || platform === 'all') {
       const sourceName = path.basename(element.outputFile || '')
       if (!/^app-release\.apk$/.test(sourceName) || !/^\d+\.\d+\.\d+$/.test(element.versionName || '')) continue
       const source = path.join(output, sourceName)
-      if (fs.existsSync(source)) await moveArtifact(source, `ZSense-Companion-${element.versionName}-android13-release.apk`)
+      if (fs.existsSync(source)) await moveArtifact(source, `ZSense-${element.versionName}-android13-release.apk`)
     }
   }
 }

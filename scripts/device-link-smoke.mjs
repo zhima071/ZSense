@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { generateKeyPairSync } from 'node:crypto'
+import { generateKeyPairSync, sign } from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
-import { DeviceLinkService, isPrivateNetworkAddress } from '../electron/services/device-link-service.mjs'
+import { DeviceLinkService, canonicalDirectEndpoints, isGlobalIpv6Address, isPrivateNetworkAddress } from '../electron/services/device-link-service.mjs'
 import { createDeviceDataProvider } from '../electron/services/device-data-service.mjs'
 import { ZSenseDatabase } from '../electron/services/database.mjs'
 
@@ -93,6 +93,9 @@ try {
   assert.match(panelSource, /aria-label="立即扫描局域网"/, '纯图标按钮必须保留无障碍标签')
   assert.equal(isPrivateNetworkAddress('192.168.1.8'), true)
   assert.equal(isPrivateNetworkAddress('8.8.8.8'), false)
+  assert.equal(isGlobalIpv6Address('2001:4860:4860::8888'), true)
+  assert.equal(isGlobalIpv6Address('fd12::1234'), false)
+  assert.equal(isGlobalIpv6Address('2001:db8::1'), false)
   await serviceA.setEnabled(true)
   await serviceB.setEnabled(true)
 
@@ -118,6 +121,20 @@ try {
   assert.equal(serviceA.inspect().trustedPeers.length, 1, '同一台设备的云端身份应合并到已有局域网记录')
   assert.equal(serviceA.inspect().trustedPeers[0].source, 'lan')
   assert.equal(serviceA.inspect().trustedPeers[0].cloudPaired, true)
+  const directClaim = { deviceId: 'win00002', issuedAt: Date.now(), expiresAt: Date.now() + 50_000,
+    addresses: ['2001:4860:4860::8888'], port: 39073, fingerprint: 'A'.repeat(64) }
+  const signedClaim = { ...directClaim, signature: sign(null, Buffer.from(canonicalDirectEndpoints(directClaim)), serviceB.identity.privateKey).toString('base64url') }
+  assert.equal(serviceA.verifySignedDirectEndpoints('win00002', signedClaim).length, 1, '跨网直连端点必须由已配对设备签名')
+  assert.deepEqual(serviceA.verifySignedDirectEndpoints('win00002', { ...signedClaim, port: 39074 }), [], '不能篡改已签名的端口')
+  assert.deepEqual(serviceA.verifySignedDirectEndpoints('win00002', { ...signedClaim, addresses: ['fd12::1234'] }), [], '不能引导到内网 IPv6')
+  assert.deepEqual(serviceA.verifySignedDirectEndpoints('win00002', { ...signedClaim, expiresAt: Date.now() - 1 }), [], '过期的直连描述不得重放')
+  serviceB.webBridgeInfoProvider = () => ({ port: 39073, fingerprint: 'A'.repeat(64) })
+  serviceA.ingestAdvertisement({ protocol: 'zsense-device-link', version: 2, deviceId: statusB.device.deviceId, remoteDeviceId: 'win00002', name: 'Windows-B', platform: 'win32', port: statusB.device.port }, '127.0.0.1')
+  const directEndpoint = await serviceA.resolveTrustedLanEndpoint('win00002')
+  assert.deepEqual(directEndpoint, { address: '127.0.0.1', port: 39073, fingerprint: 'A'.repeat(64), remoteDeviceId: 'win00002' }, '同邮箱设备应先验证设备公钥再使用局域网入口')
+  serviceA.ingestAdvertisement({ protocol: 'zsense-device-link', version: 2, deviceId: statusB.device.deviceId, remoteDeviceId: 'win00002', name: '冒名设备', platform: 'win32', port: statusA.device.port }, '127.0.0.1')
+  assert.equal(await serviceA.resolveTrustedLanEndpoint('win00002'), null, '冒名局域网公告不能让云端身份切到错误端点')
+  serviceA.ingestAdvertisement({ protocol: 'zsense-device-link', version: 2, deviceId: statusB.device.deviceId, remoteDeviceId: 'win00002', name: 'Windows-B', platform: 'win32', port: statusB.device.port }, '127.0.0.1')
   const forgedKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' })
   assert.equal(serviceA.rememberRemotePeer('win00002', '冒名设备', forgedKey), false, '已绑定的设备公钥不得静默替换')
   const nonce = 'A'.repeat(32)
@@ -136,6 +153,7 @@ try {
   assert.ok(previousSecret.length >= 32)
   serviceA.disconnect(statusB.device.deviceId)
   assert.equal(serviceA.inspect().trustedPeers[0].connected, false)
+  assert.deepEqual(serviceA.verifySignedDirectEndpoints('win00002', signedClaim), [], '设备断开后不能继续使用旧直连端点')
   await serviceA.connect(statusB.device.deviceId)
   assert.equal(serviceA.inspect().trustedPeers[0].online, true)
 

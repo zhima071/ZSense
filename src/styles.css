@@ -3316,6 +3316,7 @@ kbd { border-color: var(--border); box-shadow: 0 1px 0 rgba(15, 23, 42, .1); }
 .markdown-inline-image:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .markdown-local-image-status { display: inline-block; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 11px; }
 .chat-message .markdown-content p { margin: 0 0 10px; color: inherit; font-size: inherit; line-height: inherit; white-space: normal; }
+.chat-message.user .markdown-content p { white-space: pre-wrap; }
 .chat-message .markdown-content h1,
 .chat-message .markdown-content h2,
 .chat-message .markdown-content h3,

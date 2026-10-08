@@ -385,11 +385,17 @@ public final class MainActivity extends Activity {
 
         section(advanced, "远程任务");
         task = field(advanced, "给选中设备的任务", true);
-        addButton(advanced, "通过云端发送任务", () -> {
+        addButton(advanced, "发送远程任务（自动选择连接）", () -> {
             if (!requireField(target, "请先填写目标设备号。") || !requireField(task, "请输入任务内容。")) return;
             String selectedDevice = value(target), prompt = value(task);
-            performTask("正在通过云端发送任务…", () ->
-                    showTaskResult("云端任务结果：\n" + client.cloudTask(selectedDevice, prompt), true));
+            String trustedKey = "";
+            for (int index = 0; index < cachedCloudPeers.length(); index++) {
+                JSONObject peer = cachedCloudPeers.optJSONObject(index);
+                if (peer != null && selectedDevice.equals(peer.optString("deviceId"))) { trustedKey = peer.optString("identityPublicKey"); break; }
+            }
+            String peerKey = trustedKey;
+            performTask("正在安全连接设备并发送任务…", () ->
+                    showTaskResult("远程任务结果：\n" + client.cloudTask(selectedDevice, prompt, peerKey), true));
         });
         addButton(advanced, "通过局域网发送任务", () -> {
             if (!requireField(target, "请先填写目标设备号。") || !requireField(task, "请输入任务内容。")) return;
@@ -504,6 +510,13 @@ public final class MainActivity extends Activity {
         intent.putExtra("device-id", id);
         intent.putExtra("connect", true);
         intent.putExtra("prefer-lan", preferLan);
+        for (int index = 0; index < cachedCloudPeers.length(); index++) {
+            JSONObject peer = cachedCloudPeers.optJSONObject(index);
+            if (peer != null && id.equals(peer.optString("deviceId"))) {
+                intent.putExtra("identity-public-key", peer.optString("identityPublicKey"));
+                break;
+            }
+        }
         if (code != null && !code.isBlank()) intent.putExtra("pair-code", code);
         startActivity(intent);
     }

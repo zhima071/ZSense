@@ -260,6 +260,27 @@ try {
   assert.throws(() => service.resolveImagePath(htmlPath), /不是 ZSense 支持的图片/)
   const discoveredImage = service.discoverArtifacts({ workspacePath: temporaryRoot, content: `[AI 生成的图片](${imagePath})`, since: Date.now() - 60_000 })
   assert.equal(discoveredImage.some((item) => item.path === fs.realpathSync.native(imagePath) && item.kind === 'image' && item.mimeType === 'image/png'), true)
+  const previousImageTime = new Date(Date.now() - 10_000)
+  fs.utimesSync(imagePath, previousImageTime, previousImageTime)
+  const nextTurnStartedAt = Date.now()
+  const carriedImage = service.discoverArtifacts({
+    workspacePath: temporaryRoot,
+    content: `[上一条回复的图片](${imagePath})`,
+    toolEvents: [{ input: imagePath, output: `读取了 ${imagePath}` }],
+    since: nextTurnStartedAt,
+  })
+  assert.equal(carriedImage.some((item) => item.path === fs.realpathSync.native(imagePath)), false, 'a previous reply image must not be attached to the next reply')
+  const nearPreviousImageTime = new Date(nextTurnStartedAt - 500)
+  fs.utimesSync(imagePath, nearPreviousImageTime, nearPreviousImageTime)
+  const nearTurnArtifacts = service.discoverArtifacts({ workspacePath: temporaryRoot, since: nextTurnStartedAt })
+  assert.equal(nearTurnArtifacts.some((item) => item.path === fs.realpathSync.native(imagePath)), false, 'the previous turn image must not leak through a timestamp grace period')
+  const nextImagePath = path.join(temporaryRoot, 'next-turn-image.png')
+  fs.writeFileSync(nextImagePath, fs.readFileSync(imagePath))
+  const nextImageTime = new Date(nextTurnStartedAt + 1_000)
+  fs.utimesSync(nextImagePath, nextImageTime, nextImageTime)
+  const nextTurnArtifacts = service.discoverArtifacts({ workspacePath: temporaryRoot, since: nextTurnStartedAt })
+  assert.equal(nextTurnArtifacts.some((item) => item.path === fs.realpathSync.native(nextImagePath)), true, 'this turn\'s new image must still be attached')
+  assert.equal(nextTurnArtifacts.some((item) => item.path === fs.realpathSync.native(imagePath)), false, 'old workspace images must not leak through the new-file scan')
   assert.equal(service.listRecent().length, 5)
 
   const skillManager = new SkillManager(path.join(temporaryRoot, 'agent-core'))

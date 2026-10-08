@@ -2,6 +2,9 @@ package com.zsense.companion;
 
 import android.util.Base64;
 
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
+import org.bouncycastle.crypto.signers.Ed25519Signer;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -10,9 +13,12 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.ConnectException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.Inet6Address;
+import java.net.NoRouteToHostException;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -21,6 +27,7 @@ import java.security.cert.X509Certificate;
 import java.util.Locale;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.Arrays;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
@@ -99,6 +106,10 @@ final class DeviceClient {
     }
 
     String cloudEntry(String targetDeviceId, String pairCode) throws Exception {
+        return cloudEntryWithDirect(targetDeviceId, pairCode, null).getString("url");
+    }
+
+    JSONObject cloudEntryWithDirect(String targetDeviceId, String pairCode, String trustedPublicKey) throws Exception {
         requireRegistered();
         String origin = cloudOrigin(targetDeviceId);
         JSONObject ticket;
@@ -116,19 +127,107 @@ final class DeviceClient {
         }
         String path = ticket.getString("entryPath");
         if (!path.startsWith("/bridge/enter?ticket=")) throw new IllegalStateException("目标设备返回了无效入场地址。");
-        return origin + path;
+        JSONObject cloud = new JSONObject().put("url", origin + path).put("mode", "cloud");
+        if (trustedPublicKey == null || trustedPublicKey.isBlank() || pairCode != null && !pairCode.isBlank()) return cloud;
+        JSONArray candidates = verifyDirectCandidates(targetDeviceId, trustedPublicKey, ticket.optJSONObject("directCandidates"));
+        for (int i = 0; i < candidates.length(); i++) {
+            JSONObject candidate = candidates.getJSONObject(i);
+            String directOrigin = "https://[" + candidate.getString("address") + "]:" + candidate.getInt("port");
+            String pin = candidate.getString("fingerprint");
+            try {
+                String nonce = postRaw(directOrigin + "/bridge/trust-challenge", "{}", deviceId(), null, null, pin, null, 1_200)
+                        .getJSONObject("data").getString("nonce");
+                if (!nonce.matches("[A-Za-z0-9_-]{24,100}")) throw new IllegalStateException("直连设备挑战无效。");
+                String directPath = postRaw(directOrigin + "/bridge/trust-ticket", "{}", deviceId(), nonce,
+                        identity.sign(targetDeviceId + ":" + nonce), pin, null, 1_200).getJSONObject("data").getString("entryPath");
+                if (!directPath.matches("/bridge/enter\\?ticket=[A-Za-z0-9_-]{20,160}")) throw new IllegalStateException("直连入场票据无效。");
+                return new JSONObject().put("url", directOrigin + directPath).put("fingerprint", pin).put("mode", "p2p");
+            } catch (ConnectException | NoRouteToHostException | SocketTimeoutException unavailable) {
+                // Only a transport failure may fall back. TLS pin or authorization failures remain visible.
+            }
+        }
+        return cloud;
     }
 
-    String cloudTask(String targetDeviceId, String prompt) throws Exception {
+    private static JSONArray verifyDirectCandidates(String target, String trustedPublicKey, JSONObject value) {
+        JSONArray verified = new JSONArray();
+        if (value == null) return verified;
+        try {
+            byte[] key = publicKeyDer(trustedPublicKey);
+            JSONArray addresses = value.getJSONArray("addresses");
+            long issued = value.getLong("issuedAt"), expires = value.getLong("expiresAt"), now = System.currentTimeMillis();
+            int port = value.getInt("port");
+            String fingerprint = value.getString("fingerprint");
+            if (!target.equals(value.getString("deviceId")) || addresses.length() < 1 || addresses.length() > 2 ||
+                    issued > now + 30_000 || expires < now || expires > issued + 60_000 ||
+                    port < 1 || port > 65_535 || !fingerprint.matches("[0-9A-F]{64}")) return verified;
+            StringBuilder joined = new StringBuilder();
+            for (int i = 0; i < addresses.length(); i++) {
+                String address = addresses.getString(i);
+                if (address.contains("[") || address.contains("]") || !globalIpv6(address)) return verified;
+                if (i > 0) joined.append(',');
+                joined.append(address);
+            }
+            String canonical = "zsense-direct-v1\n" + target + "\n" + issued + "\n" + expires + "\n" + joined + "\n" + port + "\n" + fingerprint;
+            byte[] bytes = canonical.getBytes(StandardCharsets.UTF_8);
+            Ed25519Signer verifier = new Ed25519Signer();
+            verifier.init(false, new Ed25519PublicKeyParameters(Arrays.copyOfRange(key, 12, 44), 0));
+            verifier.update(bytes, 0, bytes.length);
+            if (!verifier.verifySignature(Base64.decode(value.getString("signature"), Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING))) return verified;
+            for (int i = 0; i < addresses.length(); i++) verified.put(new JSONObject()
+                    .put("address", addresses.getString(i)).put("port", port).put("fingerprint", fingerprint));
+        } catch (Exception invalid) { return new JSONArray(); }
+        return verified;
+    }
+
+    static boolean globalIpv6(String address) {
+        if (address != null && address.startsWith("[") && address.endsWith("]")) address = address.substring(1, address.length() - 1);
+        if (address == null || !address.matches("[0-9a-fA-F:]{2,39}") || !address.contains(":")) return false;
+        try {
+            InetAddress parsed = InetAddress.getByName(address);
+            if (!(parsed instanceof Inet6Address)) return false;
+            byte[] bytes = parsed.getAddress();
+            int firstGroup = (bytes[0] & 0xff) << 8 | bytes[1] & 0xff;
+            int secondGroup = (bytes[2] & 0xff) << 8 | bytes[3] & 0xff;
+            return firstGroup >= 0x2000 && firstGroup <= 0x3fff &&
+                    !(firstGroup == 0x2001 && secondGroup == 0x0db8) && firstGroup < 0x3ff0;
+        } catch (Exception invalid) { return false; }
+    }
+
+    String cloudTask(String targetDeviceId, String prompt, String trustedPublicKey) throws Exception {
         if (prompt.isBlank() || prompt.length() > 8_000) throw new IllegalArgumentException("任务内容必须在 1–8000 字之间。");
-        JSONObject sent = signedBridge(targetDeviceId, "/bridge/agent-task",
-                new JSONObject().put("prompt", prompt).put("timeoutMs", 300_000));
+        JSONObject entry = trustedPublicKey == null || trustedPublicKey.isBlank() ? null : sameAccountLanEntry(targetDeviceId, trustedPublicKey);
+        if (entry == null) entry = cloudEntryWithDirect(targetDeviceId, null, trustedPublicKey);
+        String directOrigin = entry.has("fingerprint") ? new URL(entry.getString("url")).getProtocol() + "://" + new URL(entry.getString("url")).getAuthority() : null;
+        String pin = entry.optString("fingerprint", null);
+        JSONObject sent;
+        try {
+            sent = signedBridge(targetDeviceId, "/bridge/agent-task",
+                    new JSONObject().put("prompt", prompt).put("timeoutMs", 300_000), directOrigin, pin);
+        } catch (ConnectException | NoRouteToHostException | SocketTimeoutException unavailable) {
+            if (directOrigin == null) throw unavailable;
+            directOrigin = null; pin = null; // Challenge failed before the task body was sent.
+            try {
+                sent = signedBridge(targetDeviceId, "/bridge/agent-task",
+                        new JSONObject().put("prompt", prompt).put("timeoutMs", 300_000), null, null);
+            } catch (UncertainSubmission uncertain) {
+                throw new IllegalStateException("任务提交结果不确定：对方可能已经收到任务。请先检查对方运行记录，不要直接重复提交。", uncertain);
+            }
+        } catch (UncertainSubmission uncertain) {
+            throw new IllegalStateException("任务提交结果不确定：对方可能已经收到任务。请先检查对方运行记录，不要直接重复提交。", uncertain);
+        }
         String taskId = sent.getJSONObject("data").getString("taskId");
         if (!taskId.matches("[0-9a-fA-F-]{36}")) throw new IllegalStateException("目标设备未确认收到任务。");
         long deadline = System.currentTimeMillis() + 315_000;
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(2_000);
-            JSONObject result = signedBridge(targetDeviceId, "/bridge/agent-task-result", new JSONObject().put("taskId", taskId)).getJSONObject("data");
+            JSONObject result;
+            try { result = signedBridge(targetDeviceId, "/bridge/agent-task-result", new JSONObject().put("taskId", taskId), directOrigin, pin).getJSONObject("data"); }
+            catch (ConnectException | NoRouteToHostException | SocketTimeoutException unavailable) {
+                if (directOrigin == null) throw unavailable;
+                directOrigin = null; pin = null; // Result lookup is idempotent; task submission is not.
+                continue;
+            }
             switch (result.optString("status")) {
                 case "complete": return result.optJSONObject("result") == null ? "任务完成" : result.getJSONObject("result").optString("output", "任务完成");
                 case "failed": throw new IllegalStateException(result.optString("error", "远程任务失败。"));
@@ -139,14 +238,22 @@ final class DeviceClient {
         throw new IllegalStateException("等待超时。任务可能仍在桌面运行，请先检查运行记录，不要直接重复提交。");
     }
 
-    private JSONObject signedBridge(String target, String route, JSONObject body) throws Exception {
-        String origin = cloudOrigin(target);
-        String nonce = post(origin + "/bridge/trust-challenge", new JSONObject(), deviceId()).getJSONObject("data").getString("nonce");
+    private static final class UncertainSubmission extends Exception {
+        UncertainSubmission(Exception cause) { super(cause); }
+    }
+
+    private JSONObject signedBridge(String target, String route, JSONObject body, String directOrigin, String pin) throws Exception {
+        String origin = directOrigin == null ? cloudOrigin(target) : directOrigin;
+        String nonce = postRaw(origin + "/bridge/trust-challenge", "{}", deviceId(), null, null, pin).getJSONObject("data").getString("nonce");
         String bodyText = body.toString();
         String payload = "zsense-agent-v1\nPOST\n" + route + "\n" + nonce + "\n" + bodyText;
         String digest = Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)),
                 Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
-        return postRaw(origin + route, bodyText, deviceId(), nonce, identity.sign(target + ":" + digest), null);
+        try { return postRaw(origin + route, bodyText, deviceId(), nonce, identity.sign(target + ":" + digest), pin); }
+        catch (java.io.IOException uncertain) {
+            if ("/bridge/agent-task".equals(route)) throw new UncertainSubmission(uncertain);
+            throw uncertain;
+        }
     }
 
     JSONObject pairLan(String ip, int port, String credential) throws Exception {
@@ -174,7 +281,9 @@ final class DeviceClient {
         return peer;
     }
 
-    JSONArray scanLan() throws Exception {
+    JSONArray scanLan() throws Exception { return scanLan(2_000); }
+
+    private JSONArray scanLan(long durationMs) throws Exception {
         JSONArray found = new JSONArray();
         Set<String> seen = new HashSet<>();
         JSONObject probe = new JSONObject().put("protocol", "zsense-device-link").put("version", 2)
@@ -186,7 +295,7 @@ final class DeviceClient {
             socket.setSoTimeout(300);
             for (String address : new String[]{"239.255.90.71", "255.255.255.255"})
                 socket.send(new DatagramPacket(bytes, bytes.length, InetAddress.getByName(address), 39071));
-            long deadline = System.currentTimeMillis() + 2_000;
+            long deadline = System.currentTimeMillis() + durationMs;
             while (System.currentTimeMillis() < deadline) {
                 try {
                     byte[] buffer = new byte[2_048];
@@ -199,11 +308,74 @@ final class DeviceClient {
                             !device.optString("deviceId").matches("[a-zA-Z0-9-]{2,100}")) continue;
                     String key = device.optString("deviceId");
                     if (seen.add(key)) found.put(new JSONObject().put("ip", ip).put("deviceId", key)
+                            .put("remoteDeviceId", device.optString("remoteDeviceId"))
                             .put("name", device.optString("name", key)).put("port", device.optInt("port", 39072)));
                 } catch (SocketTimeoutException ignored) { /* continue until scan deadline */ }
             }
         }
         return found;
+    }
+
+    /** Hub 公钥校验通过后才接收局域网端点与 Web 证书指纹；候选广播本身不可信。 */
+    JSONObject sameAccountLanEntry(String targetDeviceId, String trustedPublicKey) throws Exception {
+        requireRegistered();
+        if (!targetDeviceId.matches("[a-z0-9][a-z0-9-]{1,58}")) throw new IllegalArgumentException("设备号无效。");
+        byte[] expectedKey = publicKeyDer(trustedPublicKey);
+        JSONArray candidates;
+        try { candidates = scanLan(750); }
+        catch (java.net.SocketException unavailable) { return null; }
+        for (int index = 0; index < candidates.length(); index++) {
+            JSONObject candidate = candidates.optJSONObject(index);
+            if (candidate == null || !targetDeviceId.equals(candidate.optString("remoteDeviceId"))) continue;
+            String ip = candidate.optString("ip");
+            int devicePort = candidate.optInt("port");
+            if (!privateIpv4(ip) || devicePort < 1 || devicePort > 65_535) continue;
+            byte[] random = new byte[32]; new java.security.SecureRandom().nextBytes(random);
+            String nonce = Base64.encodeToString(random, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+            try {
+                // 此请求只发送随机数；空指纹只用于发现阶段，任何返回值都须先验 Ed25519 签名。
+                JSONObject result = postRaw("https://" + ip + ":" + devicePort + "/v1/resolve",
+                        new JSONObject().put("nonce", nonce).toString(), null, null, null, "");
+                JSONObject descriptor = result.getJSONObject("device");
+                JSONObject bridge = result.getJSONObject("webBridge");
+                int port = bridge.getInt("port");
+                String fingerprint = bridge.getString("fingerprint").toUpperCase(Locale.ROOT);
+                if (!targetDeviceId.equals(descriptor.getString("remoteDeviceId")) ||
+                        !candidate.getString("deviceId").equals(descriptor.getString("deviceId")) ||
+                        !MessageDigest.isEqual(expectedKey, publicKeyDer(descriptor.getString("identityPublicKey"))) ||
+                        port < 1 || port > 65_535 || !fingerprint.matches("[0-9A-F]{64}")) continue;
+                String canonical = "zsense-lan-endpoint-v1\n" + nonce + "\n" + targetDeviceId + "\n" +
+                        descriptor.getString("deviceId") + "\n" + port + "\n" + fingerprint;
+                Ed25519Signer verifier = new Ed25519Signer();
+                verifier.init(false, new Ed25519PublicKeyParameters(Arrays.copyOfRange(expectedKey, 12, 44), 0));
+                byte[] signed = canonical.getBytes(StandardCharsets.UTF_8);
+                verifier.update(signed, 0, signed.length);
+                if (!verifier.verifySignature(Base64.decode(result.getString("signature"), Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING))) continue;
+                String origin = "https://" + ip + ":" + port;
+                String ticketNonce = postRaw(origin + "/bridge/trust-challenge", "{}", deviceId(), null, null, fingerprint)
+                        .getJSONObject("data").getString("nonce");
+                if (!ticketNonce.matches("[A-Za-z0-9_-]{24,100}")) throw new IllegalStateException("局域网设备身份挑战无效。");
+                String path = postRaw(origin + "/bridge/trust-ticket", "{}", deviceId(), ticketNonce,
+                        identity.sign(targetDeviceId + ":" + ticketNonce), fingerprint).getJSONObject("data").getString("entryPath");
+                if (!path.matches("/bridge/enter\\?ticket=[A-Za-z0-9_-]{20,160}")) throw new IllegalStateException("局域网入场票据无效。");
+                return new JSONObject().put("url", origin + path).put("fingerprint", fingerprint);
+            } catch (ConnectException | NoRouteToHostException | SocketTimeoutException unavailable) {
+                // 路由变化或设备刚离线时尝试其它候选地址；最终回退云端。
+            } catch (org.json.JSONException invalid) {
+                // 不可信局域网公告可能指向伪造端点，不能据此接受其证书信息。
+            } catch (IllegalStateException unavailable) {
+                if (unavailable.getMessage() == null || !unavailable.getMessage().contains("局域网远程页面尚未就绪")) throw unavailable;
+            }
+        }
+        return null;
+    }
+
+    private static byte[] publicKeyDer(String pem) {
+        String encoded = pem.replace("-----BEGIN PUBLIC KEY-----", "").replace("-----END PUBLIC KEY-----", "").replaceAll("\\s", "");
+        byte[] der = Base64.decode(encoded, Base64.DEFAULT);
+        byte[] prefix = new byte[]{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00};
+        if (der.length != 44 || !MessageDigest.isEqual(prefix, Arrays.copyOfRange(der, 0, 12))) throw new IllegalArgumentException("设备公钥无效。");
+        return der;
     }
 
     String lanTask(String targetDeviceId, String prompt) throws Exception {
@@ -295,10 +467,13 @@ final class DeviceClient {
         return postRaw(url, body, deviceId, nonce, signature, fingerprint, null);
     }
     private static JSONObject postRaw(String url, String body, String deviceId, String nonce, String signature, String fingerprint, String bearer) throws Exception {
+        return postRaw(url, body, deviceId, nonce, signature, fingerprint, bearer, 8_000);
+    }
+    private static JSONObject postRaw(String url, String body, String deviceId, String nonce, String signature, String fingerprint, String bearer, int timeoutMs) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         final String[] observedFingerprint = {""};
-        connection.setConnectTimeout(8_000);
-        connection.setReadTimeout(url.endsWith("/v1/run") ? 315_000 : 12_000);
+        connection.setConnectTimeout(timeoutMs);
+        connection.setReadTimeout(url.endsWith("/v1/run") ? 315_000 : timeoutMs == 8_000 ? 12_000 : timeoutMs);
         connection.setRequestMethod("POST");
         connection.setRequestProperty("Content-Type", "application/json");
         if (deviceId != null) connection.setRequestProperty("x-zsense-device", deviceId);

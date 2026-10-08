@@ -9,7 +9,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { mkdtempSync } from 'node:fs'
 import { WebBridgeService, isLanAddress } from '../electron/services/web-bridge-service.mjs'
-import { connectTrustedRemote, fastTrustDigest } from '../electron/services/remote-trust-connect.mjs'
+import { isGlobalIpv6Address } from '../electron/services/device-link-service.mjs'
+import { connectTrustedRemote, createPinnedLanFetch, fastTrustDigest } from '../electron/services/remote-trust-connect.mjs'
 
 // 服务默认用自签证书，测试进程内跳过证书校验即可
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
@@ -228,6 +229,32 @@ try {
   assert.equal((await fetchJson(fastRequest.url, fastRequest.options)).status, 403, '快速入场签名不能重放')
   const persistedFastNonces = JSON.parse(fs.readFileSync(path.join(rootPath, 'web-bridge', 'state.json'), 'utf8')).fastTrustNonces
   assert.equal(persistedFastNonces.length, 1, '已使用随机数必须持久化以防应用重启后重放')
+  const pinnedConnection = await connectTrustedRemote({
+    origin: base, ownId: 'paired-device', targetId: 'remote-device', signChallenge: signTestChallenge,
+    fetchImpl: createPinnedLanFetch(status.certificate.fingerprint),
+  })
+  assert.match(pinnedConnection.url, /\/bridge\/enter\?ticket=/, '验证证书指纹后应能使用局域网短时票据')
+  if (process.env.ZSENSE_CHECK_PUBLIC_IPV6 === '1') {
+    const publicAddress = Object.values(os.networkInterfaces()).flat()
+      .find((item) => item && !item.internal && item.family === 'IPv6' && isGlobalIpv6Address(item.address))?.address
+    if (!publicAddress) throw new Error('这台电脑没有可用于本机直连验证的公网 IPv6 地址。')
+    const ipv6Origin = `https://[${publicAddress}]:${status.port}`
+    const pinnedIpv6Fetch = createPinnedLanFetch(status.certificate.fingerprint)
+    service.remoteAccessAllowed = () => false
+    const disabled = await pinnedIpv6Fetch(`${ipv6Origin}/bridge/session`, { method: 'GET', signal: AbortSignal.timeout(2_000) })
+    assert.equal(disabled.status, 403, '关闭远程连接时公网 IPv6 入站必须被拒绝')
+    service.remoteAccessAllowed = () => true
+    const ipv6Ticket = await connectTrustedRemote({
+      origin: ipv6Origin, ownId: 'paired-device', targetId: 'remote-device', signChallenge: signTestChallenge,
+      fetchImpl: pinnedIpv6Fetch, timeoutMs: 2_000,
+    })
+    assert.match(ipv6Ticket.url, /\/bridge\/enter\?ticket=/, '本机公网 IPv6 地址应通过证书固定和设备签名换得票据')
+    console.log(JSON.stringify({ publicIpv6SelfTest: true, boundAddress: publicAddress, remoteOffRejected: true, pinnedSignedEntry: true }))
+  }
+  await assert.rejects(() => connectTrustedRemote({
+    origin: base, ownId: 'paired-device', targetId: 'remote-device', signChallenge: signTestChallenge,
+    fetchImpl: createPinnedLanFetch('A'.repeat(64)),
+  }), /证书与已验证身份不一致/, '证书指纹不符时不得发送设备签名')
   const replayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zsense-web-replay-'))
   const replayPort = await new Promise((resolve) => {
     const probe = net.createServer()

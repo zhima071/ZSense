@@ -229,6 +229,7 @@ try {
   assert(app.includes('availableConfigurations={availableModelConfigurations}') && modelPage.includes('<h2>可用模型</h2>') && modelPage.includes('visibleAvailableConfigurations.map'), 'AI 模型设置页没有展示官网同步后的统一可用模型')
   assert(modelPage.includes('catalogQuery') && modelPage.includes('deferredCatalogQuery') && modelPage.includes('model-catalog-search'), 'AI 模型设置页缺少即时搜索或延迟过滤')
   assert(modelPage.includes('catalogProvider') && modelPage.includes('catalogCredential') && modelPage.includes('visibleModelCount'), 'AI 模型设置页缺少供应商、凭证状态筛选或分批显示')
+  assert(modelPage.includes('[configuration.provider, configuration.model, configuration.baseUrl, configuration.apiKeyName, configuration.updatedAt]'), '官网列表刷新不应因工作区快照对象更新而重置正在编辑的供应商和 API Key')
   for (const chatSource of [nativeChat, botChat]) {
     assert(chatSource.includes('<MarkdownMessage content={message.content} workspacePath={workspacePath} onOpenOfficeFile={openOfficeArtifact} onOpenBrowserUrl={openBrowserUrl} />'), '对话内容没有同时接入文件面板与会话浏览器')
   }

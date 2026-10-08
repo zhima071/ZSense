@@ -237,6 +237,7 @@ public final class RemoteActivity extends Activity {
                     deviceClient = client;
                     String entry;
                     String fingerprint = null;
+                    String trustedKey = getIntent().getStringExtra("identity-public-key");
                     if (getIntent().getBooleanExtra("prefer-lan", true) && client.hasLanPeer(id)) {
                         runOnUiThread(() -> message.setText("正在验证局域网设备…"));
                         try {
@@ -248,11 +249,27 @@ public final class RemoteActivity extends Activity {
                             // that network. Only transport failures may fall back to the cloud;
                             // authorization or certificate errors must stay visible to the user.
                             runOnUiThread(() -> message.setText("局域网暂不可达，正在尝试云端连接…"));
-                            entry = client.cloudEntry(id, null);
+                            JSONObject fallback = client.cloudEntryWithDirect(id, null, trustedKey);
+                            entry = fallback.getString("url");
+                            fingerprint = fallback.optString("fingerprint", null);
+                        }
+                    } else if (getIntent().getBooleanExtra("prefer-lan", true) && trustedKey != null && !trustedKey.isEmpty()) {
+                        runOnUiThread(() -> message.setText("正在查找局域网直连…"));
+                        JSONObject direct = client.sameAccountLanEntry(id, trustedKey);
+                        if (direct != null) {
+                            entry = direct.getString("url");
+                            fingerprint = direct.getString("fingerprint");
+                        } else {
+                            runOnUiThread(() -> message.setText("未发现安全直连，正在使用云端…"));
+                            JSONObject fallback = client.cloudEntryWithDirect(id, getIntent().getStringExtra("pair-code"), trustedKey);
+                            entry = fallback.getString("url");
+                            fingerprint = fallback.optString("fingerprint", null);
                         }
                     } else {
                         runOnUiThread(() -> message.setText("正在验证云端设备…"));
-                        entry = client.cloudEntry(id, getIntent().getStringExtra("pair-code"));
+                        JSONObject fallback = client.cloudEntryWithDirect(id, getIntent().getStringExtra("pair-code"), trustedKey);
+                        entry = fallback.getString("url");
+                        fingerprint = fallback.optString("fingerprint", null);
                     }
                     String finalEntry = entry;
                     String finalFingerprint = fingerprint;
@@ -268,17 +285,18 @@ public final class RemoteActivity extends Activity {
         Uri entryUri = entry == null ? null : Uri.parse(entry);
         boolean cloud = id != null && id.matches("[a-z0-9][a-z0-9-]{1,58}") && entryUri != null &&
                 (id + ".zsense.space").equals(entryUri.getHost()) && certificatePin == null;
-        boolean isLan = id != null && id.matches("[a-z0-9][a-z0-9-]{1,58}") && entryUri != null &&
-                privateIpv4(entryUri.getHost()) && entryUri.getPort() > 0 && certificatePin != null && certificatePin.matches("[0-9A-F]{64}");
+        boolean isPinnedDirect = id != null && id.matches("[a-z0-9][a-z0-9-]{1,58}") && entryUri != null &&
+                (privateIpv4(entryUri.getHost()) || DeviceClient.globalIpv6(entryUri.getHost())) &&
+                entryUri.getPort() > 0 && certificatePin != null && certificatePin.matches("[0-9A-F]{64}");
         boolean ticketEntry = entryUri != null && "/bridge/enter".equals(entryUri.getPath()) && entryUri.getQueryParameterNames().contains("ticket");
-        if ((!cloud && !isLan) || entryUri == null || !"https".equals(entryUri.getScheme()) ||
-                !(ticketEntry || (isLan && "/".equals(entryUri.getPath())))) {
+        if ((!cloud && !isPinnedDirect) || entryUri == null || !"https".equals(entryUri.getScheme()) ||
+                !(ticketEntry || (isPinnedDirect && "/".equals(entryUri.getPath())))) {
             showFailure("设备返回的远程地址无效。", true); return;
         }
         trustedHost = entryUri.getHost();
         trustedPort = entryUri.getPort();
         pin = certificatePin;
-        lan = isLan;
+        lan = isPinnedDirect;
         message.setText("正在加载远程工作区…");
         web.loadUrl(entry);
     }

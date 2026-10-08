@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowUp, Globe2, LoaderCircle, Paintbrush, Settings2, Sp
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { errorMessage, unwrapDesktop } from '../services/desktop'
 import { mergeChatAttachments, useChatAttachmentDrop, useChatAttachmentPaste } from '../services/chat-attachments'
+import { chatComposerDraftKey, moveChatComposerDraft, useChatComposerDraft } from '../services/chat-composer-drafts'
 import { chatRunKey, getChatRun, insertSteeringTranscript, moveChatRun, removeChatRun, setChatRun, updateChatRun, useChatRun, type ChatTranscriptItem } from '../services/chat-run-store'
 import { isCanvasDocumentPath } from '../services/office-artifacts'
 import type { AgentLoopStep, AppSettings, Bot, ChatAttachment, ChatClarification, ChatClarificationAnswer, ChatResult, ChatStreamEvent, ChatToolEvent, ChatUsage, Conversation, ModelConfiguration, ModelProvider, ReasoningEffort, RuntimeStatus, Skill, VoiceChatRequest } from '../types'
@@ -83,13 +84,13 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
   const activeRun = useChatRun(viewRunKey)
   const conversationTitle = activeConversation?.title.trim() || '新对话'
   const [messages, setMessages] = useState<TranscriptItem[]>(() => transcript(activeConversation, defaultModelConfiguration))
-  const [draft, setDraft] = useState('')
+  const composerDraftKey = chatComposerDraftKey('native', activeConversationId, '', resetToken)
+  const [draft, setDraft, attachments, setAttachments] = useChatComposerDraft(composerDraftKey)
   const [pendingDraftSubmit, setPendingDraftSubmit] = useState('')
   const [modelProvider, setModelProvider] = useState<ModelProvider | ''>(() => (activeConversation?.modelProvider || (defaultModelConfiguration.model ? defaultModelConfiguration.provider : '')) as ModelProvider | '')
   const [model, setModel] = useState(() => activeConversation?.model || defaultModelConfiguration.model || '')
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>(() => activeConversation?.reasoningEffort || 'high')
   const [workspacePath, setWorkspacePath] = useState(() => activeConversation?.workspacePath || defaultWorkspacePath)
-  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [usage, setUsage] = useState<ChatUsage | undefined>(() => activeConversation?.usage)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
@@ -135,13 +136,11 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
     setSending(Boolean(preservedRun?.sending))
     conversationIdRef.current = activeConversationId || ''
     setMessages(preservedRun?.messages || transcript(activeConversation, defaultModelConfiguration))
-    setDraft('')
     setModelProvider((activeConversation?.modelProvider || (defaultModelConfiguration.model ? defaultModelConfiguration.provider : '')) as ModelProvider | '')
     setModel(activeConversation?.model || defaultModelConfiguration.model || '')
     setReasoningEffort(activeConversation?.reasoningEffort || 'high')
     setWorkspacePath(activeConversation?.workspacePath || defaultWorkspacePath)
     setUsage(preservedRun?.usage || activeConversation?.usage)
-    setAttachments([])
     setError('')
     setOfficeArtifactPath('')
     setCanvasOpen(false)
@@ -313,6 +312,7 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
         const previousKey = currentRunKey
         resolvedConversationId = streamEvent.conversationId
         currentRunKey = moveChatRun(previousKey, chatRunKey('native', resolvedConversationId), resolvedConversationId)
+        moveChatComposerDraft(composerDraftKey, chatComposerDraftKey('native', resolvedConversationId))
         if (activeViewKeyRef.current === previousKey) {
           activeViewKeyRef.current = currentRunKey
           conversationIdRef.current = resolvedConversationId
@@ -367,6 +367,7 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
         const previousKey = currentRunKey
         resolvedConversationId = result.conversationId
         currentRunKey = moveChatRun(previousKey, chatRunKey('native', result.conversationId), result.conversationId)
+        moveChatComposerDraft(composerDraftKey, chatComposerDraftKey('native', result.conversationId))
         if (activeViewKeyRef.current === previousKey) {
           activeViewKeyRef.current = currentRunKey
           conversationIdRef.current = result.conversationId

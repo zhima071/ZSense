@@ -4,7 +4,7 @@
   "description": "内置 ZSense Agent Core 的多 Bot 桌面工作台",
   "author": "ZSense",
   "private": true,
-  "version": "0.26.6",
+  "version": "0.26.7",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -52,6 +52,7 @@
     "test:browser": "node scripts/browser-workspace-smoke.mjs",
     "test:pdf-viewer": "node scripts/pdf-viewer-smoke.mjs",
     "test:chat": "node scripts/zsense-gateway-smoke.mjs",
+    "test:chat-composer-draft": "node scripts/chat-composer-draft-smoke.mjs",
     "test:settings-native": "node scripts/settings-native-smoke.mjs",
     "test:icon-tooltips": "node scripts/icon-tooltip-smoke.mjs",
     "test:dialog-overlay": "node scripts/dialog-overlay-smoke.mjs",

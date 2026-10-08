@@ -104,7 +104,9 @@ export function ModelPage({ configuration, savedConfigurations, availableConfigu
     setApiKey('')
     setClearApiKey(false)
     setManualModel(false)
-  }, [configuration])
+    // 刷新官网列表会重新载入工作区，产生新的 configuration 对象；
+    // 仅在默认模型配置实际变更时重置表单，避免丢失当前供应商和未保存的密钥。
+  }, [configuration.provider, configuration.model, configuration.baseUrl, configuration.apiKeyName, configuration.updatedAt])
 
   useEffect(() => { setVisibleModelCount(40) }, [catalogCredential, catalogProvider, deferredCatalogQuery])
 
