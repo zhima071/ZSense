@@ -35,6 +35,32 @@ jobs:
           path: .cache/windows-offline-assets
           key: zsense-windows-offline-v1-${{ hashFiles('scripts/windows-offline-assets.mjs') }}
 
+      - name: Restore pinned speech models from previous release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $previous = '.cache\previous-release'
+          New-Item -ItemType Directory -Force $previous | Out-Null
+          gh release download v0.26.6 -R zhima071/ZSense --pattern 'ZSense-0.26.6-win-x64.exe' --dir $previous
+          if ($LASTEXITCODE -ne 0) { throw '无法下载已固定的上一版 Windows 安装包。' }
+          $installer = Join-Path $previous 'ZSense-0.26.6-win-x64.exe'
+          $digest = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne '7a7046ae33cdfcbd434e0b7ad9c2db93fa84adc977b360bb3ca28813e7005f6a') {
+            throw '上一版 Windows 安装包 SHA-256 不匹配。'
+          }
+          $extracted = Join-Path $previous 'extracted'
+          New-Item -ItemType Directory -Force $extracted | Out-Null
+          tar -xf $installer -C $extracted 'resources/bundled-tools/tts/moss/' 'resources/bundled-tools/stt/ggml-base.bin' 'resources/bundled-tools/stt/LICENSE.whisper.cpp' 'resources/bundled-tools/stt/LICENSE.openai-whisper' 'resources/bundled-tools/licenses/LICENSE.lark-cli'
+          if ($LASTEXITCODE -ne 0) { throw '无法读取上一版安装包中的语音资源。' }
+          $tools = Join-Path $extracted 'resources/bundled-tools'
+          New-Item -ItemType Directory -Force 'bundled-tools/shared/tts', 'bundled-tools/darwin-arm64/stt', 'bundled-tools/darwin-arm64/licenses' | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $tools 'tts/moss') 'bundled-tools/shared/tts/moss'
+          Copy-Item -Force (Join-Path $tools 'stt/ggml-base.bin') 'bundled-tools/darwin-arm64/stt/ggml-base.bin'
+          Copy-Item -Force (Join-Path $tools 'stt/LICENSE.whisper.cpp') 'bundled-tools/darwin-arm64/stt/LICENSE.whisper.cpp'
+          Copy-Item -Force (Join-Path $tools 'stt/LICENSE.openai-whisper') 'bundled-tools/darwin-arm64/stt/LICENSE.openai-whisper'
+          Copy-Item -Force (Join-Path $tools 'licenses/LICENSE.lark-cli') 'bundled-tools/darwin-arm64/licenses/LICENSE.lark-cli'
+
       - name: Prepare pinned Windows offline tools
         shell: pwsh
         env:
