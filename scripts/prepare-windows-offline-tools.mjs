@@ -126,6 +126,7 @@ async function main() {
   const archives = new Map()
   for (const asset of windowsSourceAssets) archives.set(asset.id, await sourceArchive(asset))
 
+  safeCopy(archives.get('cloudflared'), path.join(windowsBundleRoot, 'cloudflared.exe'))
   safeCopy(archives.get('officecli'), path.join(windowsBundleRoot, 'officecli.exe'))
   safeCopy(archives.get('microsoft-vc-redist'), path.join(windowsBundleRoot, 'redist', 'VC_redist.x64.exe'))
 

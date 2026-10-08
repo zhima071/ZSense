@@ -16,7 +16,7 @@ export const windowsSourceAssets = Object.freeze([
     id: 'cloudflared',
     version: '2026.7.3',
     archiveName: 'cloudflared-windows-amd64.exe',
-    sha256: '2837888cc0f5d58f15b6dc478376de90b4d3ba5241c7947455d1e0a0df429712',
+    sha256: '8635da433b6df8194746e88ed9d2589566c20e38bfc2a80e431a348b7c765841',
     urls: [
       mirrorUrl('cloudflared/2026.7.3/cloudflared-windows-amd64.exe'),
       'https://github.com/cloudflare/cloudflared/releases/download/2026.7.3/cloudflared-windows-amd64.exe',

@@ -76,6 +76,9 @@ if (macInstallers.length !== 1 || !available.includes(winInstaller) || androidIn
   throw new Error('发布目录必须各有一份 macOS DMG、Windows EXE、Android APK')
 }
 const assetNames = [macInstallers[0], winInstaller, androidInstallers[0]]
+for (const name of assetNames) {
+  if (!checksumByName.has(name)) throw new Error(`SHA256SUMS 缺少本次发布的安装包：${name}`)
+}
 console.log(JSON.stringify({ verified: true, version, repo: repo || null, assets: assetNames, publish }, null, 2))
 
 if (publish) {

@@ -7,6 +7,7 @@ const installer = read('build/installer.nsh')
 const workflow = read('.github/workflows/build-windows-offline.yml')
 const desktopBuild = read('scripts/desktop-build.mjs')
 const windowsAssets = read('scripts/windows-offline-assets.mjs')
+const windowsPrepare = read('scripts/prepare-windows-offline-tools.mjs')
 const electronMain = read('electron/main.mjs')
 
 assert.equal(packageJson.build?.win?.target, 'nsis')
@@ -60,6 +61,7 @@ assert(workflow.includes('npm run test:windows-tools'))
 assert(workflow.includes('npm run test:office'))
 assert(workflow.includes('npm run desktop:build:win'))
 assert(desktopBuild.includes("run('scripts/verify-windows-offline-tools.mjs')"), 'Windows 构建没有强制执行完整离线资源检查')
+assert(windowsPrepare.includes("safeCopy(archives.get('cloudflared'), path.join(windowsBundleRoot, 'cloudflared.exe'))"), 'Windows 离线准备没有把校验后的 cloudflared 写入安装资源')
 for (const requiredFile of ['officecli.exe', 'dws.exe', 'kdocs-cli.exe', 'whisper-cli.exe', 'ggml-base.bin', 'VC_redist.x64.exe']) {
   assert(windowsAssets.includes(`'${requiredFile}'`) || windowsAssets.includes(`/${requiredFile}`), `Windows 完整资源定义缺少：${requiredFile}`)
 }
