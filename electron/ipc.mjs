@@ -969,6 +969,16 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const feedUrl = requested || String(database.loadSettings().updateFeedUrl || '') || defaultUpdateFeedUrl()
     return updateService.check(feedUrl)
   })
+  safeHandle(ipcMain, 'zsense:update:download', () => {
+    if (!updateService) throw new Error('当前运行环境不支持应用内更新。')
+    return updateService.download()
+  })
+  safeHandle(ipcMain, 'zsense:update:pause-download', () => updateService?.pauseDownload())
+  safeHandle(ipcMain, 'zsense:update:cancel-download', () => updateService?.cancelDownload())
+  safeHandle(ipcMain, 'zsense:update:install', () => {
+    if (!updateService) throw new Error('当前运行环境不支持应用内更新。')
+    return updateService.install()
+  })
   safeHandle(ipcMain, 'zsense:update:open-download', async (payload) => {
     const target = text(payload, '下载地址', 2_000)
     let url

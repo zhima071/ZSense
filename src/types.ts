@@ -1014,6 +1014,16 @@ export interface DeviceLinkRemoteRunResult {
 export interface UpdateStatus {
   currentVersion: string
   platform: string
+  download?: UpdateDownloadStatus
+}
+
+export interface UpdateDownloadStatus {
+  phase: 'idle' | 'downloading' | 'paused' | 'ready' | 'canceled' | 'error' | 'installing'
+  version: string
+  receivedBytes: number
+  totalBytes: number
+  bytesPerSecond: number
+  error: string
 }
 
 export interface UpdateCheckResult {
@@ -1024,6 +1034,8 @@ export interface UpdateCheckResult {
   updateAvailable?: boolean
   upToDate?: boolean
   downloadUrl?: string
+  installSupported?: boolean
+  installHint?: string
   notes?: string
   publishedAt?: string
   checkedAt?: string

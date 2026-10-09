@@ -1,6 +1,6 @@
 export {}
 
-import type { AgentCapabilitiesStatus, AppSettings, ApprovalGrant, AuthStatus, AuthUser, AutonomySnapshot, AutonomyTaskKind, Bot, BrowserDataState, BrowserSitePermission, ChatAttachment, ChatClarificationAnswer, ChatRequest, ChatResult, ChatStreamEvent, ComputerUseStatus, ConfigurationTransferResult, Conversation, CreateUserInput, DesktopResult, DeviceLinkPeerAccess, DeviceLinkRemoteRunResult, DeviceLinkRemoteStatus, DeviceLinkStatus, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnectionConfigurationInput, GatewayPairingRequest, HtmlDocumentSession, LocalVoiceOption, LocalVoiceSpeechResult, LocalVoiceTranscriptionRequest, McpServerConfiguration, McpServerConfigurationInput, McpTestResult, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfigurationInput, OfficeDocumentState, OfficeEditResult, OfficeRecentFile, OfficeSearchHit, OfficeSessionEvent, OfficeSessionResult, OfficeSheetCellChange, OfficeSheetGrid, OfficeWorkItem, OfficeWordOperation, OfficeWorkbookGrid, OfficeWorkbookOperation, OfficeWorkspaceStatus, RuntimeCommandResult, RuntimeStatus, ScheduledTaskInput, SkillEditorInput, SkillImportResult, SkillMaintenanceResult, UpdateCheckResult, UpdateStatus, UpdateUserInput, VoiceSynthesisRequest, VoiceWakeDetectedEvent, VoiceWakeStatus, WebBridgeStatus, WeixinQrLoginStatus, WordDocumentSession, WorkspaceSnapshot } from './types'
+import type { AgentCapabilitiesStatus, AppSettings, ApprovalGrant, AuthStatus, AuthUser, AutonomySnapshot, AutonomyTaskKind, Bot, BrowserDataState, BrowserSitePermission, ChatAttachment, ChatClarificationAnswer, ChatRequest, ChatResult, ChatStreamEvent, ComputerUseStatus, ConfigurationTransferResult, Conversation, CreateUserInput, DesktopResult, DeviceLinkPeerAccess, DeviceLinkRemoteRunResult, DeviceLinkRemoteStatus, DeviceLinkStatus, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnectionConfigurationInput, GatewayPairingRequest, HtmlDocumentSession, LocalVoiceOption, LocalVoiceSpeechResult, LocalVoiceTranscriptionRequest, McpServerConfiguration, McpServerConfigurationInput, McpTestResult, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfigurationInput, OfficeDocumentState, OfficeEditResult, OfficeRecentFile, OfficeSearchHit, OfficeSessionEvent, OfficeSessionResult, OfficeSheetCellChange, OfficeSheetGrid, OfficeWorkItem, OfficeWordOperation, OfficeWorkbookGrid, OfficeWorkbookOperation, OfficeWorkspaceStatus, RuntimeCommandResult, RuntimeStatus, ScheduledTaskInput, SkillEditorInput, SkillImportResult, SkillMaintenanceResult, UpdateCheckResult, UpdateDownloadStatus, UpdateStatus, UpdateUserInput, VoiceSynthesisRequest, VoiceWakeDetectedEvent, VoiceWakeStatus, WebBridgeStatus, WeixinQrLoginStatus, WordDocumentSession, WorkspaceSnapshot } from './types'
 
 declare global {
   interface Window {
@@ -48,6 +48,11 @@ declare global {
       update: {
         status: () => Promise<DesktopResult<UpdateStatus>>
         check: (feedUrl?: string) => Promise<DesktopResult<UpdateCheckResult>>
+        download: () => Promise<DesktopResult<UpdateDownloadStatus>>
+        pauseDownload: () => Promise<DesktopResult<UpdateDownloadStatus>>
+        cancelDownload: () => Promise<DesktopResult<UpdateDownloadStatus>>
+        install: () => Promise<DesktopResult<{ scheduled: boolean; version: string }>>
+        onProgress: (callback: (status: UpdateDownloadStatus) => void) => () => void
         openDownload: (url: string) => Promise<DesktopResult<{ opened: boolean; url: string }>>
       }
       pdf: {

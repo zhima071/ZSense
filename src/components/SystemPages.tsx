@@ -33,6 +33,7 @@ import {
   Power,
   Plus,
   Pencil,
+  Pause,
   Play,
   RefreshCw,
   Save,
@@ -56,7 +57,7 @@ import { formatLocalDateTime } from '../services/date-time'
 import { errorMessage, unwrapDesktop } from '../services/desktop'
 import { deleteMossVoice, importMossVoice, listLocalVoiceOptions, speakLocalAudio, stopLocalSpeech } from '../services/local-speech'
 import { VOICE_LANGUAGE_OPTIONS } from '../services/voice-language'
-import type { Activity, AgentCapabilitiesStatus, AppSettings, AuthUser, AutonomySnapshot, AutonomyTask, AutonomyTaskKind, Bot, Conversation, LocalVoiceOption, McpServerConfiguration, McpServerConfigurationInput, MemoryItem, RuntimeCommandResult, RuntimeStatus, UpdateCheckResult, UpdateStatus, VoiceWakeStatus } from '../types'
+import type { Activity, AgentCapabilitiesStatus, AppSettings, AuthUser, AutonomySnapshot, AutonomyTask, AutonomyTaskKind, Bot, Conversation, LocalVoiceOption, McpServerConfiguration, McpServerConfigurationInput, MemoryItem, RuntimeCommandResult, RuntimeStatus, UpdateCheckResult, UpdateDownloadStatus, UpdateStatus, VoiceWakeStatus } from '../types'
 import { MemoryDialog, type MemoryDialogMode } from './MemoryDialog'
 import { BrowserSettingsPanel } from './BrowserSettingsPanel'
 import { DeviceLinkSettingsPanel } from './DeviceLinkSettingsPanel'
@@ -597,8 +598,10 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
   const [voiceLanguagesExpanded, setVoiceLanguagesExpanded] = useState(false)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>()
   const [updateResult, setUpdateResult] = useState<UpdateCheckResult>()
+  const [updateDownload, setUpdateDownload] = useState<UpdateDownloadStatus>()
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [openingDownload, setOpeningDownload] = useState(false)
+  const [installingUpdate, setInstallingUpdate] = useState(false)
   const [localVoices, setLocalVoices] = useState<LocalVoiceOption[]>([])
   const [loadingVoices, setLoadingVoices] = useState(false)
   const [previewingVoice, setPreviewingVoice] = useState(false)
@@ -623,9 +626,10 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
     if (section !== 'runtime' || !window.zsenseDesktop?.update) return
     let active = true
     void unwrapDesktop(window.zsenseDesktop.update.status())
-      .then((status) => { if (active) setUpdateStatus(status) })
+      .then((status) => { if (active) { setUpdateStatus(status); setUpdateDownload(status.download) } })
       .catch(() => undefined)
-    return () => { active = false }
+    const unsubscribe = window.zsenseDesktop.update.onProgress((status) => { if (active) setUpdateDownload(status) })
+    return () => { active = false; unsubscribe() }
   }, [section])
 
   const checkForUpdates = async () => {
@@ -650,6 +654,33 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
     try { await unwrapDesktop(window.zsenseDesktop.update.openDownload(url)) }
     catch (error) { setLocalError(`打开下载地址失败：${errorMessage(error)}`) }
     finally { setOpeningDownload(false) }
+  }
+
+  const downloadUpdate = async () => {
+    if (!window.zsenseDesktop?.update || updateDownload?.phase === 'downloading') return
+    setLocalError(undefined)
+    try { setUpdateDownload(await unwrapDesktop(window.zsenseDesktop.update.download())) }
+    catch (error) { setLocalError(`下载更新失败：${errorMessage(error)}`) }
+  }
+
+  const pauseUpdateDownload = async () => {
+    if (!window.zsenseDesktop?.update) return
+    try { setUpdateDownload(await unwrapDesktop(window.zsenseDesktop.update.pauseDownload())) }
+    catch (error) { setLocalError(`暂停下载失败：${errorMessage(error)}`) }
+  }
+
+  const cancelUpdateDownload = async () => {
+    if (!window.zsenseDesktop?.update) return
+    try { setUpdateDownload(await unwrapDesktop(window.zsenseDesktop.update.cancelDownload())) }
+    catch (error) { setLocalError(`取消下载失败：${errorMessage(error)}`) }
+  }
+
+  const installUpdate = async () => {
+    if (!window.zsenseDesktop?.update || installingUpdate) return
+    setInstallingUpdate(true)
+    setLocalError(undefined)
+    try { await unwrapDesktop(window.zsenseDesktop.update.install()) }
+    catch (error) { setLocalError(`安装更新失败：${errorMessage(error)}`); setInstallingUpdate(false) }
   }
 
   useEffect(() => {
@@ -922,7 +953,7 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
                 <button className="button secondary" disabled={checkingUpdate} onClick={() => void checkForUpdates()}>{checkingUpdate ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />}{checkingUpdate ? '检查中…' : '检查更新'}</button>
               </div>
               <div className="settings-form two-column">
-                <label className="full-field"><span>自定义更新地址（可选）</span><input value={draft.updateFeedUrl} placeholder="留空使用 ZSense 的 GitHub Releases" onChange={(event) => setDraft({ ...draft, updateFeedUrl: event.target.value })} /><small>留空时点击「检查更新」会读取公开的 GitHub Release；也可填写自己的 JSON 或 latest*.yml 更新清单地址。不会自动下载或安装。</small></label>
+                <label className="full-field"><span>自定义更新地址（可选）</span><input value={draft.updateFeedUrl} placeholder="留空使用 ZSense 的 GitHub Releases" onChange={(event) => setDraft({ ...draft, updateFeedUrl: event.target.value })} /><small>官方版本可在应用内下载、校验并启动更新；自定义 JSON 或 latest*.yml 更新源如未提供可验证的官方安装包，仍需手动安装。</small></label>
               </div>
               {updateResult && <div className={`runtime-message ${updateResult.ok ? (updateResult.updateAvailable ? 'warning' : 'success') : 'warning'}`}>
                 {updateResult.ok ? (updateResult.updateAvailable ? <Download size={17} /> : <FileCheck2 size={17} />) : <AlertTriangle size={17} />}
@@ -937,7 +968,24 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
               </div>}
               {updateResult?.ok && updateResult.notes && <pre className="update-notes">{updateResult.notes}</pre>}
               {updateResult?.ok && updateResult.updateAvailable && <div className="runtime-actions">
-                <button className="button primary" disabled={!updateResult.downloadUrl || openingDownload} onClick={() => void openDownload()}><Download size={16} />{openingDownload ? '正在打开…' : updateResult.downloadUrl ? '打开下载地址' : '更新清单未提供下载地址'}</button>
+                {updateResult.installSupported ? <>
+                  {updateDownload && updateDownload.version === updateResult.latestVersion && (updateDownload.phase === 'downloading' || updateDownload.phase === 'paused' || (updateDownload.phase === 'error' && updateDownload.receivedBytes > 0)) ? <>
+                    <div className="update-download-progress" role="status" aria-live="polite">
+                      <span>{updateDownload.phase === 'downloading' ? '正在下载' : updateDownload.phase === 'paused' ? '已暂停' : '下载中断'} v{updateResult.latestVersion} · {(updateDownload.receivedBytes / 1024 / 1024).toFixed(1)} MB{updateDownload.totalBytes ? ` / ${(updateDownload.totalBytes / 1024 / 1024).toFixed(1)} MB` : ''}{updateDownload.phase === 'downloading' ? ` · ${updateDownload.bytesPerSecond >= 1024 * 1024 ? `${(updateDownload.bytesPerSecond / 1024 / 1024).toFixed(1)} MB/s` : `${Math.round(updateDownload.bytesPerSecond / 1024)} KB/s`}` : ''}</span>
+                      <progress max={updateDownload.totalBytes || undefined} value={updateDownload.receivedBytes} />
+                    </div>
+                    {updateDownload.phase === 'downloading'
+                      ? <button className="button secondary" onClick={() => void pauseUpdateDownload()}><Pause size={16} />暂停下载</button>
+                      : <button className="button primary" onClick={() => void downloadUpdate()}><Play size={16} />继续下载</button>}
+                    <button className="button secondary" onClick={() => void cancelUpdateDownload()}><X size={16} />取消下载</button>
+                  </> : updateDownload && updateDownload.version === updateResult.latestVersion && updateDownload.phase === 'ready' ?
+                    <button className="button primary" disabled={installingUpdate} onClick={() => void installUpdate()}><RefreshCw size={16} />{installingUpdate ? '准备安装…' : updateStatus?.platform === 'darwin' ? '安装并重启' : '启动安装向导'}</button>
+                    : updateDownload?.phase === 'installing' ? <span>安装程序即将启动…</span> :
+                    <button className="button primary" onClick={() => void downloadUpdate()}><Download size={16} />在应用内下载更新</button>}
+                </> : <>
+                  <span>{updateResult.installHint}</span>
+                  {updateResult.downloadUrl && <button className="button secondary" disabled={openingDownload} onClick={() => void openDownload()}><ExternalLink size={16} />{openingDownload ? '正在打开…' : '浏览器打开安装包'}</button>}
+                </>}
               </div>}
             </div>
 

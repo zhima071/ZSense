@@ -82,7 +82,7 @@ npm run desktop:build:win   # 产出 .exe（NSIS，含 Windows 离线工具链�
 | B2 | `run-electron.mjs` 清理 `ELECTRON_RUN_AS_NODE`，恢复 GUI 测试；canvas 冒烟测试补 `app.quit()` | `scripts/run-electron.mjs`、`scripts/zsense-canvas-smoke.mjs` |
 | A1 | 删除“SSE（预留兼容）”假开关：设置里改成只读的“事件接收方式”，同时移除 `eventProtocol` 字段（类型 / 默认值 / 校验 / UI） | `src/components/SystemPages.tsx`、`src/types.ts`、`src/App.tsx`、`electron/ipc.mjs`、`electron/services/database.mjs` |
 | A3 | 删除死通道 `zsense:channels:update` 及其校验函数、`database.updateChannel`；`preload` 与 `ipc` 通道数现在都是 156 且完全一致 | `electron/ipc.mjs`、`electron/services/database.mjs` |
-| C1 | 新增应用内检查更新：`UpdateService`（支持 `latest-mac.yml` / `latest.yml` / JSON 清单，按平台选 `.dmg`/`.zip`/`.exe`，只提示 + 系统浏览器打开下载地址） | `electron/services/update-service.mjs`、`electron/ipc.mjs`、`electron/preload.cjs`、`src/components/SystemPages.tsx`、`src/types.ts`、`src/electron.d.ts` |
+| C1 | 应用内更新：`UpdateService` 检查官方 Release 和自定义清单；官方包在应用内显示速度与进度，暂停保留缓存并支持重启后 Range 续传，取消清理缓存，完成后校验 SHA-256；macOS 自动替换并重启，Windows 启动安装向导；自定义源若不满足官方校验条件则手动安装 | `electron/services/update-service.mjs`、`electron/services/update-install-service.mjs`、`electron/ipc.mjs`、`electron/preload.cjs`、`src/components/SystemPages.tsx`、`src/types.ts`、`src/electron.d.ts` |
 | A4 | 补 5 个零覆盖模块的冒烟测试 | `scripts/memory-intelligence-smoke.mjs`、`scripts/pdf-parser-smoke.mjs`、`scripts/secrets-vault-smoke.mjs`、`scripts/update-service-smoke.mjs`、`scripts/device-task-runner-smoke.mjs` |
 | A2 | 设备互联从“只能连上”变成“能用”：互相读取状态 + 通过对方执行任务 | `electron/services/device-link-service.mjs`、`electron/services/device-task-runner.mjs`、`electron/main.mjs`、`src/components/DeviceLinkSettingsPanel.tsx`、`scripts/device-link-smoke.mjs` |
 

@@ -53,6 +53,15 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
   update: Object.freeze({
     status: () => invoke('zsense:update:status'),
     check: (feedUrl) => invoke('zsense:update:check', feedUrl || ''),
+    download: () => invoke('zsense:update:download'),
+    pauseDownload: () => invoke('zsense:update:pause-download'),
+    cancelDownload: () => invoke('zsense:update:cancel-download'),
+    install: () => invoke('zsense:update:install'),
+    onProgress: (callback) => {
+      const listener = (_event, status) => callback(status)
+      ipcRenderer.on('zsense:update:progress', listener)
+      return () => ipcRenderer.removeListener('zsense:update:progress', listener)
+    },
     openDownload: (url) => invoke('zsense:update:open-download', url),
   }),
   pdf: Object.freeze({

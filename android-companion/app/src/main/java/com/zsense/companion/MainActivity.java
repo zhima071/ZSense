@@ -2,12 +2,15 @@ package com.zsense.companion;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.ClipData;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.net.Uri;
+import android.provider.Settings;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.text.InputType;
@@ -20,11 +23,13 @@ import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.view.Gravity;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.io.File;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -85,6 +90,12 @@ public final class MainActivity extends Activity {
     private EditText task;
     private TextView result;
     private ScrollView scroller;
+    private AndroidUpdateManager updater;
+    private LinearLayout updateCard;
+    private TextView updateStatus;
+    private ProgressBar updateProgress;
+    private LinearLayout updateActions;
+    private File pendingInstallApk;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -160,6 +171,17 @@ public final class MainActivity extends Activity {
         headerAction.setOnClickListener(view -> perform("正在查询设备…", this::refreshPeers));
         headerAction.setContentDescription("刷新设备列表");
         header.addView(headerAction);
+        TextView updateAction = text("更新", 12, BLUE, true);
+        updateAction.setPadding(dp(10), dp(8), dp(10), dp(8));
+        updateAction.setBackground(round(Color.rgb(239, 246, 255), 9, 0));
+        LinearLayout.LayoutParams updateActionParams = new LinearLayout.LayoutParams(-2, -2);
+        updateActionParams.leftMargin = dp(6);
+        header.addView(updateAction, updateActionParams);
+        updateAction.setContentDescription("检查应用更新");
+        updateAction.setOnClickListener(view -> {
+            updateCard.setVisibility(View.VISIBLE);
+            updater.check();
+        });
         content.addView(header);
 
         FrameLayout hero = new FrameLayout(this);
@@ -207,6 +229,34 @@ public final class MainActivity extends Activity {
         status.setEllipsize(android.text.TextUtils.TruncateAt.END);
         statusPill.addView(status);
         heroCopy.addView(statusPill);
+
+        updateCard = card(content);
+        updateCard.setVisibility(View.GONE);
+        LinearLayout updateHeading = new LinearLayout(this);
+        updateHeading.setGravity(Gravity.CENTER_VERTICAL);
+        updateCard.addView(updateHeading);
+        updateHeading.addView(text("应用更新", 16, INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        TextView currentVersion = text("当前 " + BuildConfig.VERSION_NAME, 11, MUTED, false);
+        updateHeading.addView(currentVersion);
+        updateStatus = text("检查官方发布的新版本。", 12, MUTED, false);
+        LinearLayout.LayoutParams updateStatusParams = new LinearLayout.LayoutParams(-1, -2);
+        updateStatusParams.topMargin = dp(9);
+        updateCard.addView(updateStatus, updateStatusParams);
+        updateProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        updateProgress.setMax(1000);
+        updateProgress.setVisibility(View.GONE);
+        LinearLayout.LayoutParams updateProgressParams = new LinearLayout.LayoutParams(-1, dp(5));
+        updateProgressParams.topMargin = dp(10);
+        updateCard.addView(updateProgress, updateProgressParams);
+        updateActions = new LinearLayout(this);
+        updateActions.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams updateActionsParams = new LinearLayout.LayoutParams(-1, -2);
+        updateActionsParams.topMargin = dp(10);
+        updateCard.addView(updateActions, updateActionsParams);
+        updater = new AndroidUpdateManager(this, new AndroidUpdateManager.Listener() {
+            @Override public void onState(AndroidUpdateManager.State next) { renderUpdate(next); }
+            @Override public void onInstallReady(File apk) { requestInstall(apk); }
+        });
 
         LinearLayout peersCard = card(content);
         LinearLayout deviceHeading = new LinearLayout(this);
@@ -674,6 +724,85 @@ public final class MainActivity extends Activity {
         notices.postDelayed(hideNotice, 6_000);
     }
 
+    private void renderUpdate(AndroidUpdateManager.State next) {
+        if (updateStatus == null || updateActions == null) return;
+        String detail = next.message;
+        if (next.total > 0 && ("downloading".equals(next.phase) || "paused".equals(next.phase) || "ready".equals(next.phase))) {
+            detail += "\n" + formatSize(next.received) + " / " + formatSize(next.total);
+            if ("downloading".equals(next.phase)) detail += " · " + formatSize(next.bytesPerSecond) + "/秒";
+        }
+        updateStatus.setText(detail);
+        updateProgress.setVisibility(next.total > 0 && ("downloading".equals(next.phase) || "paused".equals(next.phase) || "ready".equals(next.phase)) ? View.VISIBLE : View.GONE);
+        if (next.total > 0) updateProgress.setProgress((int) Math.min(1000, next.received * 1000 / next.total));
+        updateActions.removeAllViews();
+        switch (next.phase) {
+            case "downloading":
+                updateButton("暂停下载", false, updater::pause);
+                updateButton("取消下载", false, updater::cancel);
+                break;
+            case "paused":
+                updateButton("继续下载", true, updater::download);
+                updateButton("取消下载", false, updater::cancel);
+                break;
+            case "available": case "canceled":
+                updateButton("下载更新", true, updater::download);
+                break;
+            case "ready":
+                updateButton("安装更新", true, updater::install);
+                break;
+            case "error":
+                updateButton(next.version.isEmpty() ? "重试检查" : "重试下载", true,
+                        next.version.isEmpty() ? updater::check : updater::download);
+                if (next.received > 0) updateButton("取消并清理", false, updater::cancel);
+                break;
+            case "current":
+                updateButton("再次检查", false, updater::check);
+                break;
+            default: break;
+        }
+    }
+
+    private void updateButton(String title, boolean primary, Runnable action) {
+        TextView button = text(title, 12, primary ? Color.WHITE : BLUE, true);
+        button.setGravity(Gravity.CENTER);
+        button.setMinHeight(dp(42));
+        button.setPadding(dp(8), dp(8), dp(8), dp(8));
+        button.setBackground(round(primary ? BLUE : Color.rgb(239, 246, 255), 9, 0));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        if (updateActions.getChildCount() > 0) params.leftMargin = dp(8);
+        updateActions.addView(button, params);
+        button.setOnClickListener(view -> action.run());
+        button.setFocusable(true);
+        button.setContentDescription(title);
+    }
+
+    private static String formatSize(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return String.format(java.util.Locale.CHINA, "%.1f KB", bytes / 1024d);
+        return String.format(java.util.Locale.CHINA, "%.1f MB", bytes / (1024d * 1024d));
+    }
+
+    private void requestInstall(File apk) {
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            pendingInstallApk = apk;
+            show("请在系统设置中允许 ZSense 安装应用，然后返回继续安装。");
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Exception error) { show("无法打开安装权限设置：" + error.getMessage()); }
+            return;
+        }
+        pendingInstallApk = null;
+        Uri uri = new Uri.Builder().scheme("content").authority(getPackageName() + ".updates")
+                .appendPath(apk.getName()).build();
+        Intent install = new Intent(Intent.ACTION_VIEW);
+        install.setDataAndType(uri, "application/vnd.android.package-archive");
+        install.setClipData(ClipData.newRawUri("ZSense APK", uri));
+        install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try { startActivity(install); }
+        catch (Exception error) { show("无法启动系统安装器：" + error.getMessage()); }
+    }
+
     private boolean requireField(EditText field, String error) {
         if (!value(field).isEmpty()) return true;
         field.setError(error);
@@ -848,6 +977,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onResume() {
         super.onResume();
+        if (pendingInstallApk != null && getPackageManager().canRequestPackageInstalls()) requestInstall(pendingInstallApk);
         heartbeat.postDelayed(heartbeatAction, 15_000);
         if (client != null) worker.execute(() -> { try { refreshPeers(); } catch (Exception ignored) { /* keep cached list when offline */ } });
     }

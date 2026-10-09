@@ -619,7 +619,16 @@ app.whenReady().then(async () => {
   try {
       await deviceLinkService.initialize()
     } catch { /* 设备互联 / 交换中心启动失败不影响主流程 */ }
-  updateService = new UpdateService({ currentVersion: app.getVersion() })
+  updateService = new UpdateService({
+    currentVersion: app.getVersion(),
+    fetchImpl: (url, options) => net.fetch(url, options),
+    downloadDirectory: path.join(userDataDirectory, 'updates'),
+    isPackaged: app.isPackaged,
+    onProgress: (status) => {
+      if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('zsense:update:progress', status)
+    },
+    quitApp: () => app.quit(),
+  })
   auth = new AuthService(database)
   const officeToolName = process.platform === 'win32' ? 'officecli.exe' : 'officecli'
   const dwsToolName = process.platform === 'win32' ? 'dws.exe' : 'dws'

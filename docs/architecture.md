@@ -177,7 +177,7 @@ Bot 对话、AI 对话、网关消息和定时任务都调用同一 Core，因�
 
 ### 软件更新
 
-`electron/services/update-service.mjs` 默认读取公开的 `zhima071/ZSense` GitHub Releases API，也允许用户覆盖更新地址。解析 Release 的版本与附件后，按平台选择 `.dmg` / `.exe`；自定义地址仍支持 `latest-mac.yml` / `latest.yml` 或 JSON 清单。检查更新只提示并调用系统浏览器打开下载地址，不会自动下载或安装。Release 只上传 macOS DMG、Windows EXE、Android APK 三种安装包。
+`electron/services/update-service.mjs` 默认读取公开的 `zhima071/ZSense` GitHub Releases API，也允许用户覆盖更新地址。解析版本、平台架构匹配的 `.dmg` / `.exe` 附件以及 Release 正文的 SHA-256。官方包在应用内流式下载到用户数据目录，显示进度与速度；暂停保留 `.part`，重启后可使用经 `Content-Range` 校验的 HTTP Range 续传，取消删除 `.part`；服务器忽略 Range 时从头下载，校验大小和散列后才允许安装；安装前再次校验。macOS 的独立更新助手等待主进程退出后挂载 DMG、核对应用身份和版本、原位替换并重启；Windows 更新助手等待退出后运行 NSIS 安装向导。自定义 `latest-mac.yml` / `latest.yml` 或 JSON 清单仍可检查版本，但不能借其 URL 绕过官方包校验直接执行安装。Release 只上传 macOS DMG、Windows EXE、Android APK 三种安装包。
 
 ## 数据迁移
 
