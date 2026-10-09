@@ -1,0 +1,48 @@
+name: Test Released Windows Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub Release tag to test
+        required: true
+        default: v0.26.10
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Download the published installer
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          New-Item -ItemType Directory -Force installer | Out-Null
+          gh release download $env:RELEASE_TAG -R zhima071/ZSense --pattern '*-win-x64.exe' --dir installer
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the published installer.' }
+          $file = Get-ChildItem installer -Filter '*-win-x64.exe' | Select-Object -First 1
+          if (-not $file -or $file.Length -lt 500MB) { throw 'Installer is absent or truncated.' }
+          Get-FileHash $file.FullName -Algorithm SHA256 | Format-List
+          Get-AuthenticodeSignature $file.FullName | Select-Object Status,StatusMessage | Format-List
+
+      - name: Validate archive and launch installer silently
+        shell: pwsh
+        run: |
+          $file = (Get-ChildItem installer -Filter '*-win-x64.exe' | Select-Object -First 1).FullName
+          & 'C:\Program Files\7-Zip\7z.exe' t $file | Select-Object -Last 12
+          if ($LASTEXITCODE -ne 0) { throw 'The NSIS archive failed validation.' }
+          $process = Start-Process -FilePath $file -ArgumentList '/S' -PassThru
+          if (-not $process.WaitForExit(300000)) {
+            Stop-Process -Id $process.Id -Force
+            throw 'Installer did not exit within five minutes.'
+          }
+          Write-Host "Installer exit code: $($process.ExitCode)"
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)." }
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\ZSense\ZSense.exe'
+          if (-not (Test-Path $installed -PathType Leaf)) { throw "Installer exited successfully but $installed is missing." }
+          Write-Host "Installed application: $installed"
