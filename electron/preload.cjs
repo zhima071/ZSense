@@ -84,6 +84,14 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
   }),
   screenshot: Object.freeze({
     captureRegion: (rectangle) => invoke('zsense:screenshot:capture-region', rectangle),
+    globalStatus: () => invoke('zsense:global-screenshot:status').then((data) => ({ ok: true, data })),
+    setGlobalShortcut: (shortcut) => invoke('zsense:global-screenshot:set-shortcut', shortcut).then((data) => ({ ok: true, data })),
+    startGlobal: () => invoke('zsense:global-screenshot:start').then((data) => ({ ok: true, data })),
+    onGlobalError: (callback) => {
+      const listener = (_event, message) => callback(message)
+      ipcRenderer.on('zsense:global-screenshot:error', listener)
+      return () => ipcRenderer.removeListener('zsense:global-screenshot:error', listener)
+    },
   }),
   auth: Object.freeze({
     status: () => invoke('zsense:auth:status'),
@@ -117,6 +125,8 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
   }),
   data: Object.freeze({
     loadWorkspace: () => invoke('zsense:data:load'),
+    loadWorkspaceSummary: () => invoke('zsense:data:load-summary'),
+    loadConversation: (conversationId) => invoke('zsense:data:conversation', conversationId),
     conversationTimestamps: () => invoke('zsense:data:conversation-timestamps'),
     syncMessages: () => invoke('zsense:data:sync-messages'),
     onChanged: (callback) => {
@@ -322,6 +332,7 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
       }))),
     }),
     pickWorkspace: () => invoke('zsense:chat:pick-workspace'),
+    listWorkspaceDirectories: (directoryPath = '') => invoke('zsense:chat:list-workspace-directories', directoryPath),
     send: (request) => invoke('zsense:chat:send', request),
     steer: (requestId, message, attachments = [], workspacePath = '') => invoke('zsense:chat:steer', { requestId, message, attachments, workspacePath }),
     cancel: (requestId) => invoke('zsense:chat:cancel', requestId),

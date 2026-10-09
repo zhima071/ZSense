@@ -33,6 +33,7 @@ import { DeviceLinkService } from './services/device-link-service.mjs'
 import { DeviceTaskRunner } from './services/device-task-runner.mjs'
 import { UpdateService } from './services/update-service.mjs'
 import { editContextMenuTemplate } from './services/edit-context-menu.mjs'
+import { GlobalScreenshotService } from './services/global-screenshot-service.mjs'
 
 // 启动期崩溃兜底：主进程若抛出未捕获异常，Electron 只会弹一个模态对话框，
 // 界面卡住、日志空白、什么线索都没有。这里先把堆栈落盘，保证任何启动失败都能查。
@@ -103,6 +104,7 @@ protocol.registerSchemesAsPrivileged([{
 }])
 
 let mainWindow = null
+let globalScreenshotService = null
 let tray = null
 let isQuitting = false
 let database = null
@@ -793,6 +795,8 @@ app.whenReady().then(async () => {
   createApplicationMenu()
   configureMediaPermissions()
   await createWindow()
+  globalScreenshotService = new GlobalScreenshotService({ app, getMainWindow: () => mainWindow })
+  globalScreenshotService.initialize()
   createWindowsTray()
   powerMonitor.on('lock-screen', () => {
     if (!mainWindow || mainWindow.webContents.isDestroyed() || !database?.loadSettings().appLockEnabled) return
@@ -823,6 +827,8 @@ app.on('before-quit', (event) => {
   if (quitCleanupPromise) return
   quitCleanupPromise = (async () => {
     try {
+      globalScreenshotService?.dispose()
+      globalScreenshotService = null
       applyRunWhileLocked(false)
       stopGatewayHealthMonitor()
       await gatewayHealthCheckPromise

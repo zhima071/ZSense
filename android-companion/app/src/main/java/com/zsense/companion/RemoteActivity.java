@@ -238,39 +238,28 @@ public final class RemoteActivity extends Activity {
                     String entry;
                     String fingerprint = null;
                     String trustedKey = getIntent().getStringExtra("identity-public-key");
-                    if (getIntent().getBooleanExtra("prefer-lan", true) && client.hasLanPeer(id)) {
+                    String mode = getIntent().getStringExtra("connection-mode");
+                    if ("lan".equals(mode)) {
                         runOnUiThread(() -> message.setText("正在验证局域网设备…"));
-                        try {
-                            JSONObject result = client.lanEntry(id);
-                            entry = result.getString("url");
-                            fingerprint = result.getString("fingerprint");
-                        } catch (ConnectException | NoRouteToHostException | SocketTimeoutException unavailable) {
-                            // A saved LAN address is not a guarantee that the phone is still on
-                            // that network. Only transport failures may fall back to the cloud;
-                            // authorization or certificate errors must stay visible to the user.
-                            runOnUiThread(() -> message.setText("局域网暂不可达，正在尝试云端连接…"));
-                            JSONObject fallback = client.cloudEntryWithDirect(id, null, trustedKey);
-                            entry = fallback.getString("url");
-                            fingerprint = fallback.optString("fingerprint", null);
+                        JSONObject direct = null;
+                        if (client.hasLanPeer(id)) {
+                            try { direct = client.lanEntry(id); }
+                            catch (ConnectException | NoRouteToHostException | SocketTimeoutException unavailable) {
+                                // A saved address can be stale; try fresh LAN discovery only.
+                                if (trustedKey == null || trustedKey.isEmpty()) throw unavailable;
+                            }
                         }
-                    } else if (getIntent().getBooleanExtra("prefer-lan", true) && trustedKey != null && !trustedKey.isEmpty()) {
-                        runOnUiThread(() -> message.setText("正在查找局域网直连…"));
-                        JSONObject direct = client.sameAccountLanEntry(id, trustedKey);
-                        if (direct != null) {
-                            entry = direct.getString("url");
-                            fingerprint = direct.getString("fingerprint");
-                        } else {
-                            runOnUiThread(() -> message.setText("未发现安全直连，正在使用云端…"));
-                            JSONObject fallback = client.cloudEntryWithDirect(id, getIntent().getStringExtra("pair-code"), trustedKey);
-                            entry = fallback.getString("url");
-                            fingerprint = fallback.optString("fingerprint", null);
-                        }
-                    } else {
+                        if (direct == null && trustedKey != null && !trustedKey.isEmpty())
+                            direct = client.sameAccountLanEntry(id, trustedKey);
+                        if (direct == null) throw new IllegalStateException("未找到可验证的局域网连接。请确认两台设备在同一网络，或返回选择云端连接。");
+                        entry = direct.getString("url");
+                        fingerprint = direct.getString("fingerprint");
+                    } else if ("cloud".equals(mode)) {
                         runOnUiThread(() -> message.setText("正在验证云端设备…"));
-                        JSONObject fallback = client.cloudEntryWithDirect(id, getIntent().getStringExtra("pair-code"), trustedKey);
-                        entry = fallback.getString("url");
-                        fingerprint = fallback.optString("fingerprint", null);
-                    }
+                        // Explicit cloud choice must not silently switch to LAN/P2P.
+                        JSONObject cloud = client.cloudEntryWithDirect(id, getIntent().getStringExtra("pair-code"), null);
+                        entry = cloud.getString("url");
+                    } else throw new IllegalArgumentException("请选择云端或局域网连接方式。");
                     String finalEntry = entry;
                     String finalFingerprint = fingerprint;
                     runOnUiThread(() -> { if (!destroyed) loadEntry(id, finalEntry, finalFingerprint); });

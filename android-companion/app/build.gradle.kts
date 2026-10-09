@@ -23,8 +23,8 @@ android {
         applicationId = "com.zsense.companion"
         minSdk = 33
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
         testInstrumentationRunner = "com.zsense.companion.RemoteInsetsInstrumentation"
         val hubUrl = providers.gradleProperty("zsenseHubUrl").orElse("https://hub.zsense.space").get()
         buildConfigField("String", "HUB_URL", "\"$hubUrl\"")

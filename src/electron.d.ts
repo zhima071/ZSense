@@ -1,11 +1,12 @@
 export {}
 
-import type { AgentCapabilitiesStatus, AppSettings, ApprovalGrant, AuthStatus, AuthUser, AutonomySnapshot, AutonomyTaskKind, Bot, BrowserDataState, BrowserSitePermission, ChatAttachment, ChatClarificationAnswer, ChatRequest, ChatResult, ChatStreamEvent, ComputerUseStatus, ConfigurationTransferResult, CreateUserInput, DesktopResult, DeviceLinkPeerAccess, DeviceLinkRemoteRunResult, DeviceLinkRemoteStatus, DeviceLinkStatus, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnectionConfigurationInput, GatewayPairingRequest, HtmlDocumentSession, LocalVoiceOption, LocalVoiceSpeechResult, LocalVoiceTranscriptionRequest, McpServerConfiguration, McpServerConfigurationInput, McpTestResult, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfigurationInput, OfficeDocumentState, OfficeEditResult, OfficeRecentFile, OfficeSearchHit, OfficeSessionEvent, OfficeSessionResult, OfficeSheetCellChange, OfficeSheetGrid, OfficeWorkItem, OfficeWordOperation, OfficeWorkbookGrid, OfficeWorkbookOperation, OfficeWorkspaceStatus, RuntimeCommandResult, RuntimeStatus, ScheduledTaskInput, SkillEditorInput, SkillImportResult, SkillMaintenanceResult, UpdateCheckResult, UpdateStatus, UpdateUserInput, VoiceSynthesisRequest, VoiceWakeDetectedEvent, VoiceWakeStatus, WebBridgeStatus, WeixinQrLoginStatus, WordDocumentSession, WorkspaceSnapshot } from './types'
+import type { AgentCapabilitiesStatus, AppSettings, ApprovalGrant, AuthStatus, AuthUser, AutonomySnapshot, AutonomyTaskKind, Bot, BrowserDataState, BrowserSitePermission, ChatAttachment, ChatClarificationAnswer, ChatRequest, ChatResult, ChatStreamEvent, ComputerUseStatus, ConfigurationTransferResult, Conversation, CreateUserInput, DesktopResult, DeviceLinkPeerAccess, DeviceLinkRemoteRunResult, DeviceLinkRemoteStatus, DeviceLinkStatus, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnectionConfigurationInput, GatewayPairingRequest, HtmlDocumentSession, LocalVoiceOption, LocalVoiceSpeechResult, LocalVoiceTranscriptionRequest, McpServerConfiguration, McpServerConfigurationInput, McpTestResult, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfigurationInput, OfficeDocumentState, OfficeEditResult, OfficeRecentFile, OfficeSearchHit, OfficeSessionEvent, OfficeSessionResult, OfficeSheetCellChange, OfficeSheetGrid, OfficeWorkItem, OfficeWordOperation, OfficeWorkbookGrid, OfficeWorkbookOperation, OfficeWorkspaceStatus, RuntimeCommandResult, RuntimeStatus, ScheduledTaskInput, SkillEditorInput, SkillImportResult, SkillMaintenanceResult, UpdateCheckResult, UpdateStatus, UpdateUserInput, VoiceSynthesisRequest, VoiceWakeDetectedEvent, VoiceWakeStatus, WebBridgeStatus, WeixinQrLoginStatus, WordDocumentSession, WorkspaceSnapshot } from './types'
 
 declare global {
   interface Window {
     zsenseDesktop?: {
       isDesktop: true
+      transport?: 'web-bridge'
       platform: 'darwin' | 'win32' | 'linux'
       versions: {
         electron: string
@@ -74,6 +75,10 @@ declare global {
       }
       screenshot: {
         captureRegion: (rectangle: { x: number; y: number; width: number; height: number }) => Promise<DesktopResult<{ dataUrl: string; width: number; height: number; name: string }>>
+        globalStatus: () => Promise<DesktopResult<{ shortcut: string; registered: boolean; error: string }>>
+        setGlobalShortcut: (shortcut: string) => Promise<DesktopResult<{ shortcut: string; registered: boolean; error: string }>>
+        startGlobal: () => Promise<DesktopResult<{ shortcut: string; registered: boolean; error: string }>>
+        onGlobalError: (callback: (message: string) => void) => () => void
       }
       auth: {
         status: () => Promise<DesktopResult<AuthStatus>>
@@ -103,6 +108,8 @@ declare global {
   }
       data: {
         loadWorkspace: () => Promise<DesktopResult<WorkspaceSnapshot>>
+        loadWorkspaceSummary: () => Promise<DesktopResult<WorkspaceSnapshot>>
+        loadConversation: (conversationId: string) => Promise<DesktopResult<Conversation>>
         conversationTimestamps: () => Promise<{ ok: boolean; data?: { id: string; updatedAt: string }[]; error?: string }>
         syncMessages: () => Promise<DesktopResult<{ importedMessages: number; workspace: WorkspaceSnapshot }>>
         onChanged: (callback: (snapshot: WorkspaceSnapshot) => void) => () => void
@@ -273,6 +280,7 @@ declare global {
         resolveDroppedAttachments: (files: File[]) => Promise<DesktopResult<ChatAttachment[]>>
         resolvePastedAttachments: (files: File[], workspacePath: string) => Promise<DesktopResult<ChatAttachment[]>>
         pickWorkspace: () => Promise<DesktopResult<string>>
+        listWorkspaceDirectories: (directoryPath?: string) => Promise<DesktopResult<{ path: string; parentPath: string; roots: { label: string; path: string }[]; directories: { name: string; path: string }[]; truncated: boolean }>>
         send: (request: ChatRequest) => Promise<DesktopResult<ChatResult>>
         steer: (requestId: string, message: string, attachments?: ChatAttachment[], workspacePath?: string) => Promise<DesktopResult<{ accepted: boolean; pendingCount: number; steeringId: string; intent: 'adjust' | 'supplement' | 'next' }>>
         cancel: (requestId: string) => Promise<DesktopResult<{ cancelled: boolean }>>

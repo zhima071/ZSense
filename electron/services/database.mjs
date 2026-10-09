@@ -1154,7 +1154,7 @@ export class ZSenseDatabase {
     return this.db.prepare('SELECT id AS id, updated_at AS updatedAt FROM conversations').all().map((row) => ({ id: row.id, updatedAt: row.updatedAt || '' }))
   }
 
-  loadWorkspace() {
+  loadWorkspace({ includeMessages = true } = {}) {
     this.#ensureSkillAssignmentRows()
     const memoriesByBot = new Map()
     for (const row of this.db.prepare('SELECT * FROM memories ORDER BY rowid DESC').all()) {
@@ -1271,24 +1271,31 @@ export class ZSenseDatabase {
       createdAt: row.created_at, metadata: parseJson(row.metadata_json || '{}', {}),
     }))
     const messagesByConversation = new Map()
-    for (const row of this.db.prepare('SELECT * FROM messages ORDER BY datetime(created_at), rowid').all()) {
-      const list = messagesByConversation.get(row.conversation_id) || []
-      list.push({
-        id: row.id,
-        role: row.role,
-        content: row.content,
-        reasoning: row.reasoning || '',
-        agentSteps: parseJson(row.agent_steps_json || '[]', []),
-        toolEvents: parseJson(row.tool_events_json || '[]', []),
-        attachments: attachmentMetadata(parseJson(row.attachments_json || '[]', [])),
-        externalMessageId: row.external_message_id || row.hermes_message_id || '',
-        modelProvider: row.model_provider || '',
-        model: row.model || '',
-        durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
-        outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
-        createdAt: row.created_at,
-      })
-      messagesByConversation.set(row.conversation_id, list)
+    const messageCountsByConversation = new Map()
+    if (includeMessages) {
+      for (const row of this.db.prepare('SELECT * FROM messages ORDER BY datetime(created_at), rowid').all()) {
+        const list = messagesByConversation.get(row.conversation_id) || []
+        list.push({
+          id: row.id,
+          role: row.role,
+          content: row.content,
+          reasoning: row.reasoning || '',
+          agentSteps: parseJson(row.agent_steps_json || '[]', []),
+          toolEvents: parseJson(row.tool_events_json || '[]', []),
+          attachments: attachmentMetadata(parseJson(row.attachments_json || '[]', [])),
+          externalMessageId: row.external_message_id || row.hermes_message_id || '',
+          modelProvider: row.model_provider || '',
+          model: row.model || '',
+          durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
+          outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
+          createdAt: row.created_at,
+        })
+        messagesByConversation.set(row.conversation_id, list)
+      }
+    } else {
+      for (const row of this.db.prepare('SELECT conversation_id, COUNT(*) AS message_count FROM messages GROUP BY conversation_id').all()) {
+        messageCountsByConversation.set(row.conversation_id, Number(row.message_count || 0))
+      }
     }
     // 手动拖拽过顺序的会话按 sort_order 排；没排过的（0）仍按最近更新排在最前
     const conversations = this.db.prepare('SELECT * FROM conversations ORDER BY sort_order ASC, datetime(updated_at) DESC, rowid DESC').all().map((row) => {
@@ -1309,7 +1316,8 @@ export class ZSenseDatabase {
         usage: conversationUsage(row.usage_json),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
-        messageCount: messages.length,
+        messageCount: includeMessages ? messages.length : messageCountsByConversation.get(row.id) || 0,
+        messagesLoaded: includeMessages,
         archived: asBoolean(row.archived),
         sortOrder: Number(row.sort_order || 0),
         groupId: row.group_id || '',

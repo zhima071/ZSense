@@ -82,8 +82,38 @@ final class IdentityStore {
     String email() { return prefs.getString("email", ""); }
     void setEmail(String email) { prefs.edit().putString("email", email).apply(); }
 
+    void saveCloudPeer(String deviceId, String name) throws Exception {
+        if (!deviceId.matches("[a-z0-9][a-z0-9-]{1,58}")) throw new IllegalArgumentException("云端设备号无效。");
+        String label = name == null || name.isBlank() ? deviceId : name.trim();
+        JSONObject peer = new JSONObject().put("deviceId", deviceId)
+                .put("name", label.substring(0, Math.min(label.length(), 60)))
+                .put("lastConnectedAt", System.currentTimeMillis());
+        if (!prefs.edit().putString("cloud:" + deviceId, encrypt(peer.toString().getBytes(StandardCharsets.UTF_8))).commit())
+            throw new IllegalStateException("无法保存云端设备。");
+    }
+
+    JSONArray cloudPeers() throws Exception {
+        JSONArray result = new JSONArray();
+        for (String key : prefs.getAll().keySet()) {
+            if (!key.startsWith("cloud:")) continue;
+            String stored = prefs.getString(key, "");
+            if (stored.isEmpty()) continue;
+            try {
+                JSONObject peer = new JSONObject(new String(decrypt(stored), StandardCharsets.UTF_8));
+                if (key.substring(6).equals(peer.optString("deviceId"))) result.put(peer);
+            } catch (Exception ignored) { /* One corrupt shortcut must not hide the other devices. */ }
+        }
+        return result;
+    }
+
+    void forgetCloudPeer(String deviceId) {
+        if (deviceId != null && deviceId.matches("[a-z0-9][a-z0-9-]{1,58}"))
+            prefs.edit().remove("cloud:" + deviceId).commit();
+    }
+
     void saveLanPeer(String deviceId, JSONObject peer) throws Exception {
-        prefs.edit().putString("lan:" + deviceId, encrypt(peer.toString().getBytes(StandardCharsets.UTF_8))).apply();
+        if (!prefs.edit().putString("lan:" + deviceId, encrypt(peer.toString().getBytes(StandardCharsets.UTF_8))).commit())
+            throw new IllegalStateException("无法保存局域网设备授权。");
     }
 
     JSONObject lanPeer(String deviceId) throws Exception {
@@ -99,7 +129,7 @@ final class IdentityStore {
         SharedPreferences.Editor editor = prefs.edit().remove("lan:" + deviceId);
         if (!remote.isEmpty()) editor.remove("lan:" + remote);
         if (!local.isEmpty()) editor.remove("lan:" + local);
-        editor.apply();
+        if (!editor.commit()) throw new IllegalStateException("无法清除已失效的局域网设备授权。");
     }
 
     JSONArray lanPeers() throws Exception {

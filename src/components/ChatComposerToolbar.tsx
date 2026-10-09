@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { mergeChatAttachments } from '../services/chat-attachments'
 import { unwrapDesktop } from '../services/desktop'
 import { isImageDocumentPath, isPreviewableDocumentPath, previewableDocumentPathFromHref } from '../services/office-artifacts'
+import { RemoteWorkspacePicker } from './RemoteWorkspacePicker'
 import type { ChatAttachment, ChatUsage, ModelConfiguration, ModelProvider, ReasoningEffort } from '../types'
 
 interface ChatComposerToolbarProps {
@@ -141,6 +142,7 @@ export function ChatComposerToolbar({
 }: ChatComposerToolbarProps) {
   const [picking, setPicking] = useState(false)
   const [pickingWorkspace, setPickingWorkspace] = useState(false)
+  const [remoteWorkspaceOpen, setRemoteWorkspaceOpen] = useState(false)
   const modelOptions = useMemo(() => {
     const seen = new Set<string>()
     const options = savedModelConfigurations.filter((item) => item.model).filter((item) => {
@@ -192,6 +194,7 @@ export function ChatComposerToolbar({
 
   const pickWorkspace = async () => {
     if (disabled || pickingWorkspace) return
+    if (window.zsenseDesktop?.transport === 'web-bridge') { setRemoteWorkspaceOpen(true); return }
     setPickingWorkspace(true)
     try {
       const selectedPath = await onPickWorkspace()
@@ -204,6 +207,7 @@ export function ChatComposerToolbar({
   }
 
   return (
+    <>
     <div className={`chat-composer-toolbar ${layout === 'composer' ? 'composer-layout' : ''}`}>
       <div className="chat-composer-toolbar-main">
         <button className="chat-attachment-button chat-compact-control" type="button" onClick={() => void pickAttachments()} disabled={attachmentDisabled || picking} aria-label={picking ? '正在选择附件' : `添加附件，当前已选择 ${attachments.length} 个`} title="添加附件">
@@ -293,6 +297,8 @@ export function ChatComposerToolbar({
         </span>)}
       </div>}
     </div>
+    {remoteWorkspaceOpen && <RemoteWorkspacePicker initialPath={workspacePath} onClose={() => setRemoteWorkspaceOpen(false)} onSelect={onWorkspaceChange} />}
+    </>
   )
 }
 

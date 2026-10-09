@@ -38,18 +38,25 @@ export function DeviceLinkSettingsPanel() {
     upstreamMode: 'auto' as const, upstream: '', registeredAt: '', lastError: '',
   }
   // 邮箱仅由中心验证归属；免密连接必须由已绑定的设备公钥验签。
+  const openRemotePage = async (url: string) => {
+    if (window.zsenseDesktop?.transport === 'web-bridge') {
+      window.open(url, '_blank', 'noopener')
+      return
+    }
+    await unwrapDesktop(window.zsenseDesktop!.browser.openExternal(url))
+  }
   const connectSameEmailPeer = async (peer: { deviceId: string; name: string; url: string }) => {
     setNotice('')
     if (!/^[a-z0-9][a-z0-9-]{1,58}$/.test(peer.deviceId)) { setNotice('对方设备号无效，请检查设备列表。'); return }
     const safeUrl = `https://${peer.deviceId}.zsense.space`
     try {
       const result = await unwrapDesktop(window.zsenseDesktop!.deviceLink.trustConnect(peer.deviceId))
-      if (!result.opened) window.open(result.url || safeUrl, '_blank', 'noopener')
+      if (!result.opened) await openRemotePage(result.url || safeUrl)
       setNotice(`已通过${result.connectionMode === 'lan' ? '局域网直连' : result.connectionMode === 'p2p' ? '公网 IPv6 直连' : '云端连接'}免密进入 ${peer.name || peer.deviceId}。`)
     } catch (reason) {
       // 密钥验证失败时仍可打开登录页，但不会免密放行。
       setNotice(`${errorMessage(reason)} 已改为直接打开登录页，请使用对方的访问密码。`)
-      window.open(safeUrl, '_blank', 'noopener')
+      await openRemotePage(safeUrl).catch(() => undefined)
     }
   }
 
@@ -156,7 +163,7 @@ export function DeviceLinkSettingsPanel() {
     try {
       if (trustedTarget?.source === 'remote' || trustedTarget?.connectionMode === 'cloud') {
         const result = await unwrapDesktop(window.zsenseDesktop!.deviceLink.trustConnect(trustedTarget.remoteDeviceId || trustedTarget.deviceId))
-        if (!result.opened) window.open(result.url, '_blank', 'noopener')
+        if (!result.opened) await openRemotePage(result.url)
         setNotice(`已通过${result.connectionMode === 'lan' ? '局域网直连' : result.connectionMode === 'p2p' ? '公网 IPv6 直连' : '云端连接'}打开 ${trustedTarget.name}；设备密钥已验证。`)
       } else if (trustedTarget) {
         applyStatus(await unwrapDesktop(window.zsenseDesktop!.deviceLink.connect(trustedTarget.deviceId)))
@@ -170,7 +177,7 @@ export function DeviceLinkSettingsPanel() {
         setNotice(`已通过局域网地址 ${target} 安全配对。`)
       } else {
         const result = await unwrapDesktop(window.zsenseDesktop!.deviceLink.pairConnect(target, connectionCode))
-        window.open(result.url, '_blank', 'noopener')
+        await openRemotePage(result.url)
         await load()
         setNotice(`已通过云端与 ${target} 配对；双方分别授权后即可互发 Agent 任务。`)
       }

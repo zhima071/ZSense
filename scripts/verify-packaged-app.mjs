@@ -69,6 +69,10 @@ const requiredFiles = [
   'electron/services/remote-trust-connect.mjs',
   'electron/services/scheduled-task-runner.mjs',
   'electron/services/local-memory-service.mjs',
+  'electron/services/global-screenshot-service.mjs',
+  'electron/global-screenshot-preload.cjs',
+  'electron/global-screenshot.html',
+  'electron/global-screenshot-ui.js',
   'dist/index.html',
 ]
 
@@ -94,6 +98,7 @@ const requiredMarkers = [
   ['钉钉表情已读', '/v1.0/robot/emotion/'],
   ['钉钉表情名称', '🤔Thinking'],
   ['设备数据工具', 'read_device_data'],
+  ['全局截图入口', 'zsense:global-screenshot:start'],
 ]
 
 const missingFiles = requiredFiles.filter((file) => !packedFiles.includes(file))

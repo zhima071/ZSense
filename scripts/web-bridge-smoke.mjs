@@ -19,14 +19,20 @@ const projectRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname)
 const rootPath = mkdtempSync(path.join(os.tmpdir(), 'zsense-web-bridge-'))
 const staticDirectory = path.join(rootPath, 'dist')
 fs.mkdirSync(staticDirectory, { recursive: true })
-fs.writeFileSync(path.join(staticDirectory, 'index.html'), '<!doctype html><html><head><title>ZSense</title></head><body><div id="root"></div></body></html>', 'utf8')
+fs.writeFileSync(path.join(staticDirectory, 'index.html'), '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src \'self\'; script-src \'self\' \'wasm-unsafe-eval\'; style-src \'self\' \'unsafe-inline\'"><title>ZSense</title></head><body><div id="root"></div></body></html>', 'utf8')
 const staticAsset = `console.log("asset")\n${'const value = "zsense";\n'.repeat(300)}`
 fs.writeFileSync(path.join(staticDirectory, 'asset.js'), staticAsset, 'utf8')
 
 // 伪造一批“已注册的 IPC 处理器”，与桌面端一样返回 { ok, data } 信封
 const handled = []
 const handlers = new Map([
-  ['zsense:data:load', async (_event, payload) => { handled.push({ channel: 'zsense:data:load', payload }); return { ok: true, data: { bots: ['Atlas'], echo: payload } } }],
+  ['zsense:data:load', async (_event, payload) => { handled.push({ channel: 'zsense:data:load', payload }); return { ok: true, data: { bots: ['Atlas'], echo: payload, history: '历史消息'.repeat(12_000) } } }],
+  ['zsense:data:load-summary', async () => ({ ok: true, data: { conversations: [{ id: 'conversation-1', messageCount: 1, messagesLoaded: false, messages: [] }] } })],
+  ['zsense:data:conversation', async (_event, conversationId) => { handled.push({ channel: 'zsense:data:conversation', payload: conversationId }); return { ok: true, data: { id: conversationId, messagesLoaded: true, messages: [{ id: 'message-1', content: '历史消息' }] } } }],
+  ['zsense:chat:list-workspace-directories', async (_event, payload) => {
+    handled.push({ channel: 'zsense:chat:list-workspace-directories', payload })
+    return { ok: true, data: { path: '/remote/workspace', parentPath: '/remote', roots: [], directories: [{ name: 'project', path: '/remote/workspace/project' }], truncated: false } }
+  }],
   ['zsense:auth:users:list', async () => ({ ok: true, data: ['should-not-be-callable-from-web'] })],
   ['zsense:data:sync-messages', async (event) => {
     // 模拟主进程向窗口推送流式事件：网页端应该通过 SSE 收到
@@ -72,7 +78,12 @@ try {
   const page = await fetch(`${base}/`)
   const html = await page.text()
   assert.equal(page.status, 200)
-  assert(html.includes('bridge-client.js'), '页面必须注入桥接脚本')
+  assert(html.includes('window.zsenseDesktop = makeNode([])'), '首页应内联桥接入口，节省一次公网请求')
+  assert(!html.includes('src="/bridge-client.js"'), '首页不能再阻塞等待独立桥接脚本')
+  const inlineBridge = html.match(/<script>([\s\S]*?)<\/script>/)?.[1]
+  assert(inlineBridge, '桥接脚本必须完整内联')
+  assert(html.includes(`'sha256-${createHash('sha256').update(inlineBridge).digest('base64')}'`), '内联脚本必须受原有 CSP 哈希约束')
+  assert(!html.includes("script-src 'unsafe-inline'"), '不能为了省时放开任意内联脚本')
   const compressedAsset = await fetch(`${base}/asset.js`, { headers: { 'Accept-Encoding': 'br' } })
   assert.equal(compressedAsset.headers.get('content-encoding'), 'br', '大体积文本静态资源应使用 Brotli 流式压缩')
   assert.equal(await compressedAsset.text(), staticAsset, '压缩静态资源解码后内容不一致')
@@ -119,16 +130,32 @@ try {
   const manifest = await fetchJson(`${base}/bridge/manifest`, { headers: { Cookie: cookie } })
   assert.equal(manifest.payload.ok, true)
   assert(manifest.payload.data.paths.includes('chat.send') && manifest.payload.data.paths.includes('data.loadWorkspace'), '清单应包含真实的 preload 路径')
+  assert(manifest.payload.data.paths.includes('chat.listWorkspaceDirectories'), '远程界面必须能浏览被控设备上的文件夹')
+  assert(manifest.payload.data.paths.includes('data.loadWorkspaceSummary') && manifest.payload.data.paths.includes('data.loadConversation'), '远程按需加载接口必须暴露给 Web Bridge')
   assert(manifest.payload.data.paths.length > 100, `路径数量异常：${manifest.payload.data.paths.length}`)
   assert(manifest.payload.data.eventPaths.some((entry) => entry.channel === 'zsense:chat:event'), '事件清单应包含对话事件通道')
   assert.equal(manifest.payload.data.constants.isDesktop, true, '网页端应被识别为桌面接口')
 
   // 5) 调用通道：走真实 preload 映射（data.load → zsense:data:load），拿到 { ok, data } 信封
-  const invoked = await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: authed, body: JSON.stringify({ path: 'data.loadWorkspace', args: [] }) })
+  const invoked = await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: { ...authed, 'Accept-Encoding': 'gzip' }, body: JSON.stringify({ path: 'data.loadWorkspace', args: [] }) })
   assert.equal(invoked.status, 200)
   assert.equal(invoked.payload.ok, true)
   assert.deepEqual(invoked.payload.data.bots, ['Atlas'])
+  assert.equal(invoked.headers.get('content-encoding'), 'gzip', '远程工作区大响应应压缩传输')
+  assert.equal(invoked.payload.data.history.length, '历史消息'.repeat(12_000).length, '压缩后的工作区应完整还原')
   assert.equal(handled.at(-1).channel, 'zsense:data:load')
+
+  const summary = await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: authed, body: JSON.stringify({ path: 'data.loadWorkspaceSummary', args: [] }) })
+  assert.equal(summary.payload.data.conversations[0].messagesLoaded, false)
+  assert.deepEqual(summary.payload.data.conversations[0].messages, [])
+  const singleHistory = await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: authed, body: JSON.stringify({ path: 'data.loadConversation', args: ['conversation-1'] }) })
+  assert.equal(singleHistory.payload.data.messages[0].content, '历史消息')
+  assert.deepEqual(handled.at(-1), { channel: 'zsense:data:conversation', payload: 'conversation-1' })
+
+  const remoteFolders = await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: authed, body: JSON.stringify({ path: 'chat.listWorkspaceDirectories', args: ['/remote/workspace'] }) })
+  assert.equal(remoteFolders.status, 200, '手机应能通过 Web Bridge 读取被控电脑的工作区目录')
+  assert.equal(remoteFolders.payload.data.directories[0].name, 'project')
+  assert.deepEqual(handled.at(-1), { channel: 'zsense:chat:list-workspace-directories', payload: '/remote/workspace' })
 
   // 6) 账号安全类通道被拦住
   const blocked = await fetchJson(`${base}/bridge/invoke`, { method: 'POST', headers: authed, body: JSON.stringify({ path: 'auth.users.list', args: [] }) })
@@ -179,7 +206,7 @@ try {
     }).on('error', reject)
   })
   assert.equal(httpsPage.status, 200, 'https 首页应可访问')
-  assert(httpsPage.body.includes('bridge-client.js'), 'https 页面同样要注入桥接脚本')
+  assert(httpsPage.body.includes('window.zsenseDesktop = makeNode([])'), 'https 页面同样要注入桥接脚本')
   const secureCookie = await new Promise((resolve, reject) => {
     const payload = JSON.stringify({ code: service.inspect().accessCode })
     const request = https.request({ host: '127.0.0.1', port: status.port, path: '/bridge/login', method: 'POST', agent, headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } }, (response) => {

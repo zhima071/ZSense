@@ -39,6 +39,15 @@ function LazyPageFallback({ label = '正在打开页面…' }: { label?: string 
   return <div className="app-loading route-loading"><LoaderCircle className="spin" size={21} /><strong>{label}</strong></div>
 }
 
+function RemoteConversationFallback({ error, onRetry, onClose }: { error?: string; onRetry: () => void; onClose?: () => void }) {
+  return <div className="remote-conversation-loading" role="status">
+    {onClose && <button type="button" className="icon-button remote-conversation-close" aria-label="关闭对话" title="关闭对话" onClick={onClose}><X size={18} /></button>}
+    {error ? <AlertTriangle size={24} /> : <LoaderCircle className="spin" size={24} />}
+    <strong>{error ? '会话加载失败' : '正在加载会话记录…'}</strong>
+    {error && <><small>{error}</small><button type="button" className="secondary-button" onClick={onRetry}>重试</button></>}
+  </div>
+}
+
 const BOT_STORAGE_KEY = 'zsense-bots-v2'
 const CHANNEL_STORAGE_KEY = 'zsense-channels-v2'
 const GATEWAY_CONNECTION_STORAGE_KEY = 'zsense-gateway-connections-v3'
@@ -233,6 +242,8 @@ export default function App() {
   const [skills, setSkills] = useState<Skill[]>(() => isDesktopApp ? [] : getStoredSkills())
   const [activityItems, setActivityItems] = useState<Activity[]>(isDesktopApp ? [] : fallbackActivities)
   const [conversations, setConversations] = useState<Conversation[]>([])
+  const [remoteConversationErrors, setRemoteConversationErrors] = useState<Record<string, string>>({})
+  const remoteConversationLoadsRef = useRef(new Set<string>())
   const [conversationGroups, setConversationGroups] = useState<ConversationGroup[]>([])
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>([])
   const [scheduledTaskRuns, setScheduledTaskRuns] = useState<ScheduledTaskRun[]>([])
@@ -257,7 +268,8 @@ export default function App() {
   const [nativeVoiceRequest, setNativeVoiceRequest] = useState<VoiceChatRequest>()
   const [botVoiceRequest, setBotVoiceRequest] = useState<VoiceChatRequest>()
   const [loading, setLoading] = useState(isDesktopApp)
-  const [startupAnimationFinished, setStartupAnimationFinished] = useState(() => !isDesktopApp || window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  // 手机 Web Bridge 每次远程打开都会重新载入页面；桌面冷启动动画不应强制增加远程等待。
+  const [startupAnimationFinished, setStartupAnimationFinished] = useState(() => !isDesktopApp || window.zsenseDesktop?.transport === 'web-bridge' || window.matchMedia('(prefers-reduced-motion: reduce)').matches)
   const [notice, setNotice] = useState<Notice>(null)
   const [activeView, setActiveView] = useState<ViewId>('overview')
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('runtime')
@@ -319,6 +331,22 @@ export default function App() {
     setSkillsPath(snapshot.skillsPath)
   }, [])
 
+  const loadRemoteConversation = useCallback(async (conversationId: string) => {
+    if (window.zsenseDesktop?.transport !== 'web-bridge' || remoteConversationLoadsRef.current.has(conversationId)) return
+    remoteConversationLoadsRef.current.add(conversationId)
+    setRemoteConversationErrors((current) => { const next = { ...current }; delete next[conversationId]; return next })
+    try {
+      const loaded = await unwrapDesktop(window.zsenseDesktop.data.loadConversation(conversationId))
+      setConversations((current) => current.map((item) => item.id === conversationId && item.messagesLoaded === false
+        ? { ...item, ...loaded, sortOrder: item.sortOrder, groupId: item.groupId, messagesLoaded: true }
+        : item))
+    } catch (error) {
+      setRemoteConversationErrors((current) => ({ ...current, [conversationId]: errorMessage(error) }))
+    } finally {
+      remoteConversationLoadsRef.current.delete(conversationId)
+    }
+  }, [])
+
   const showNotice = useCallback((tone: 'success' | 'error', message: string) => {
     setNotice({ tone, message })
     window.setTimeout(() => setNotice(null), tone === 'error' ? 5_000 : 2_500)
@@ -345,12 +373,19 @@ export default function App() {
     if (!window.zsenseDesktop || !status.authenticated) return
     setLoading(true)
     try {
-      const [snapshot, runtimeStatus] = await Promise.all([
-        unwrapDesktop(window.zsenseDesktop.data.loadWorkspace()),
-        unwrapDesktop(window.zsenseDesktop.runtime.inspect()),
-      ])
-      applySnapshot(snapshot)
-      setRuntime(runtimeStatus)
+      if (window.zsenseDesktop.transport === 'web-bridge') {
+        // 远程工作区只需快照即可交互；运行时探测经公网单独往返，不阻塞首屏。
+        void unwrapDesktop(window.zsenseDesktop.runtime.inspect()).then(setRuntime)
+          .catch((error) => showNotice('error', `ZSense 核心检测失败：${errorMessage(error)}`))
+        applySnapshot(await unwrapDesktop(window.zsenseDesktop.data.loadWorkspaceSummary()))
+      } else {
+        const [snapshot, runtimeStatus] = await Promise.all([
+          unwrapDesktop(window.zsenseDesktop.data.loadWorkspace()),
+          unwrapDesktop(window.zsenseDesktop.runtime.inspect()),
+        ])
+        applySnapshot(snapshot)
+        setRuntime(runtimeStatus)
+      }
       setDwsAuthStatus(checkingDwsAuthStatus)
       setDwsAuthDismissed(true)
       setBootError('')
@@ -401,6 +436,14 @@ export default function App() {
 
   useEffect(() => window.zsenseDesktop?.runtime.onStatusChanged((status) => setRuntime(status)), [])
   useEffect(() => window.zsenseDesktop?.data.onChanged((snapshot) => applySnapshot(snapshot)), [applySnapshot])
+
+  useEffect(() => {
+    if (window.zsenseDesktop?.transport !== 'web-bridge') return
+    for (const conversationId of [activeNativeConversationId, chatTarget?.conversationId]) {
+      if (!conversationId || remoteConversationErrors[conversationId]) continue
+      if (conversations.find((item) => item.id === conversationId)?.messagesLoaded === false) void loadRemoteConversation(conversationId)
+    }
+  }, [activeNativeConversationId, chatTarget?.conversationId, conversations, loadRemoteConversation, remoteConversationErrors])
 
   // 自愈：只要有请求还在跑，就定时从主进程取一次真实快照。
   // 进度项原本只在 chat.send 的 Promise 结束时才收尾；那一次 IPC 回执一旦没回来，
@@ -1681,9 +1724,15 @@ export default function App() {
   }
 
   const activeBot = bots.find((bot) => bot.id === activeBotId) ?? null
-  const chatBot = bots.find((bot) => bot.id === chatTarget?.botId) ?? null
   const chatConversation = conversations.find((conversation) => conversation.id === chatTarget?.conversationId)
   const nativeConversations = conversations.filter((conversation) => conversation.kind === 'native')
+  const remoteNativeConversation = window.zsenseDesktop?.transport === 'web-bridge'
+    ? nativeConversations.find((conversation) => conversation.id === activeNativeConversationId && conversation.messagesLoaded === false)
+    : undefined
+  const remoteBotConversation = window.zsenseDesktop?.transport === 'web-bridge' && chatConversation?.messagesLoaded === false
+    ? chatConversation : undefined
+  // ChatDialog 只在初次挂载时从 conversation 初始化消息；必须等远程消息就绪后再挂载。
+  const chatBot = remoteBotConversation ? null : bots.find((bot) => bot.id === chatTarget?.botId) ?? null
   const listedNativeConversations = nativeConversations.filter((conversation) => conversation.channelId !== 'scheduled')
   const listedBotConversations = conversations.filter((conversation) => conversation.kind === 'bot' && conversation.channelId !== 'scheduled')
   const nativeDefaultWorkspacePath = settings.defaultWorkspacePath
@@ -1804,6 +1853,7 @@ export default function App() {
           <Suspense fallback={<LazyPageFallback />}>
           {activeBot ? <BotWorkspace bot={activeBot} channels={channels} gatewayConnections={gatewayConnections.filter((connection) => connection.botId === activeBot.id)} skills={skills} conversations={listedBotConversations.filter((conversation) => conversation.botId === activeBot.id)} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} runtime={runtime} scheduledTasks={scheduledTasks.filter((task) => task.ownerBotId === activeBot.id)} onRunScheduledTask={runScheduledTaskNow} onToggleScheduledTask={toggleScheduledTask} onEditScheduledTask={(task) => { setPendingEditTaskId(task.id); navigate('scheduled-tasks') }} onOpenScheduledTaskWorkspace={openScheduledTaskWorkspace} onCreateScheduledTask={() => { setPendingTaskOwnerId(activeBot.id); setPendingEditTaskId('new'); navigate('scheduled-tasks') }} onBack={() => navigate('bots')} onOpenModels={() => navigate('models')} onLoadAuthorizedUsers={loadGatewayAuthorizedUsers} onSaveGateway={saveGatewayConnection} onDeleteGateway={deleteGatewayConnection} onLoadGatewayPairings={loadGatewayPairings} onApproveGatewayPairing={approveGatewayPairing} onStartWeixinLogin={startWeixinLogin} onGetWeixinLoginStatus={getWeixinLoginStatus} onCancelWeixinLogin={cancelWeixinLogin} onOpenRuntime={() => { setSettingsSection('runtime'); navigate('settings') }} onRefreshRuntime={refreshRuntime} onUpdate={updateBot} onDuplicate={duplicateBot} onDelete={deleteBot} onAddMemory={addMemory} onUpdateMemory={updateMemory} onDeleteMemory={deleteMemory} onStartChat={(conversationId) => setChatTarget({ botId: activeBot.id, conversationId })} onRenameConversation={renameConversation} onArchiveConversation={archiveConversation} onDeleteConversation={deleteConversation} /> : (
             <>
+              {activeView === 'chat' && remoteNativeConversation && <RemoteConversationFallback error={remoteConversationErrors[remoteNativeConversation.id]} onRetry={() => void loadRemoteConversation(remoteNativeConversation.id)} />}
               {activeView === 'overview' && <Overview bots={bots} conversations={listedBotConversations} channels={channels} activities={activityItems} scheduledTasks={scheduledTasks} scheduledTaskRuns={scheduledTaskRuns} runtime={runtime} defaultModelConfiguration={modelConfiguration} voiceWakeEnabled={settings.voiceWakeEnabled} onOpenBot={openBot} onNavigate={navigate} onToggleTask={toggleScheduledTask} onRunTask={runScheduledTaskNow} onEditTask={(task) => { setPendingEditTaskId(task.id); navigate('scheduled-tasks') }} onOpenTaskWorkspace={openScheduledTaskWorkspace} onDeleteTask={deleteScheduledTask} onOpenConversation={openNativeChat} onToggleOverviewVisibility={setScheduledTaskOverviewVisibility} onOpenVoiceSettings={() => { setSettingsSection('voice'); navigate('settings') }} />}
               {activeView === 'chat' && <NativeChatPage conversations={nativeConversations} bots={bots} skills={skills} activeConversationId={activeNativeConversationId} resetToken={nativeChatResetToken} draftRequest={nativeChatDraftRequest} runtime={runtime} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} defaultWorkspacePath={nativeDefaultWorkspacePath} voiceRequest={nativeVoiceRequest} speechLanguage={VOICE_LANGUAGE} speechVoice={settings.voiceTtsVoice} speechSpeed={settings.voiceTtsSpeed} browserSettings={settings} onSend={sendNativeChat} onPickAttachments={pickChatAttachments} onPickWorkspace={pickChatWorkspace} onSaveWorkspace={saveConversationWorkspace} onDeleteMessage={deleteConversationMessage} onCancel={cancelChat} onClarify={respondToChatClarification} onConversationChange={setActiveNativeConversationId} onOpenSettings={() => navigate('settings')} onNewConversation={startNativeChat} onVoiceTurnDelta={handleVoiceTurnDelta} onVoiceTurnCompleted={handleVoiceTurnCompleted} onVoiceTurnFailed={handleVoiceTurnFailed} />}
               {activeView === 'bots' && <BotsPage bots={bots} conversations={listedBotConversations} gatewayConnections={gatewayConnections} hiddenSidebarBotIds={settings.hiddenSidebarBotIds} onToggleSidebarBot={toggleSidebarBot} onOpenBot={openBot} onCreate={() => setCreateOpen(true)} onUpdate={updateBot} onDuplicate={duplicateBot} onDelete={deleteBot} />}
@@ -1834,6 +1884,7 @@ export default function App() {
       </div>
       <Suspense fallback={null}>
         {createOpen && <CreateBotDialog open onClose={() => setCreateOpen(false)} onCreate={createBot} defaultModel={modelConfiguration.model || ''} />}
+        {remoteBotConversation && <div className="dialog-backdrop"><div className="remote-conversation-dialog"><RemoteConversationFallback error={remoteConversationErrors[remoteBotConversation.id]} onRetry={() => void loadRemoteConversation(remoteBotConversation.id)} onClose={() => setChatTarget(null)} /></div></div>}
         {chatBot && <ChatDialog key={chatConversation?.id || `new-${chatBot.id}`} bot={chatBot} bots={bots} skills={skills} conversation={chatConversation} runtime={runtime} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} defaultWorkspacePath={chatDefaultWorkspacePath} voiceRequest={voiceOperationRef.current.target?.kind === 'bot' && voiceOperationRef.current.target.botId === chatBot.id ? botVoiceRequest : undefined} speechLanguage={VOICE_LANGUAGE} speechVoice={settings.voiceTtsVoice} speechSpeed={settings.voiceTtsSpeed} browserSettings={settings} onClose={() => { if (voiceOperationRef.current.target?.kind === 'bot' && voiceOperationRef.current.target.botId === chatBot.id) stopVoiceInteraction(false); setChatTarget(null) }} onNewConversation={() => setChatTarget({ botId: chatBot.id })} onSend={sendChat} onPickAttachments={pickChatAttachments} onPickWorkspace={pickChatWorkspace} onSaveWorkspace={saveConversationWorkspace} onDeleteMessage={deleteConversationMessage} onCancel={cancelChat} onClarify={respondToChatClarification} onVoiceTurnDelta={handleVoiceTurnDelta} onVoiceTurnCompleted={handleVoiceTurnCompleted} onVoiceTurnFailed={handleVoiceTurnFailed} onOpenSettings={() => { if (voiceOperationRef.current.target?.kind === 'bot') stopVoiceInteraction(false); setChatTarget(null); navigate('settings') }} />}
         {isDesktopApp && !dwsAuthDismissed && !dwsAuthStatus.authenticated && <DwsAuthSetupDialog status={dwsAuthStatus} onLogin={loginDws} onRefresh={refreshDwsAuth} onLater={() => setDwsAuthDismissed(true)} />}
       </Suspense>

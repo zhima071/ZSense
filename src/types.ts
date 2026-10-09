@@ -653,6 +653,8 @@ export interface Conversation {
   createdAt: string
   updatedAt: string
   messageCount: number
+  /** Remote overview snapshots omit message bodies until this conversation is opened. */
+  messagesLoaded?: boolean
   archived: boolean
   /** 手动拖拽排序后的位置（0 表示还没手动排过，按最近更新排在最前） */
   sortOrder: number

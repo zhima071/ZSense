@@ -64,6 +64,7 @@ import { AccountPanel } from './AccountPanel'
 import { UserManagementPanel } from './UserManagementPanel'
 import { WebAccessPanel } from './WebAccessPanel'
 import { WakePhraseSetupDialog } from './WakePhraseSetupDialog'
+import { GlobalScreenshotSettings } from './GlobalScreenshotSettings'
 
 interface GlobalMemoryPageProps {
   bots: Bot[]
@@ -841,6 +842,7 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
 
           {section === 'display' && <div className="panel settings-block display-settings-panel">
             <div className="panel-header"><div><h2>显示与通知</h2><p>控制对话内容的呈现方式、输入区高度以及系统反馈。</p></div></div>
+            <GlobalScreenshotSettings />
             <SettingSwitch icon={MessageSquareMore} title="流式响应" description="实时显示 AI 回复；关闭后等待完整回答生成后一次显示" checked={draft.streamingResponse} onChange={(checked) => setDraft({ ...draft, streamingResponse: checked })} />
             <SettingSwitch icon={Minimize2} title="紧凑模式" description="减少对话消息之间的间距，在同一屏幕显示更多内容" checked={draft.compactMode} onChange={(checked) => setDraft({ ...draft, compactMode: checked })} />
             <SettingSwitch icon={Brain} title="显示推理过程" description="在 AI 回复中展示模型返回的推理摘要" checked={draft.showReasoning} onChange={(checked) => setDraft({ ...draft, showReasoning: checked })} />

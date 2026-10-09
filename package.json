@@ -4,7 +4,7 @@
   "description": "内置 ZSense Agent Core 的多 Bot 桌面工作台",
   "author": "ZSense",
   "private": true,
-  "version": "0.26.7",
+  "version": "0.26.8",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -61,6 +61,7 @@
     "test:markdown-inline-image": "node scripts/markdown-inline-image-smoke.mjs",
     "test:lark-auth-flow": "node scripts/lark-auth-flow-smoke.mjs",
     "test:screenshot-annotation": "node scripts/screenshot-annotation-smoke.mjs",
+    "test:global-screenshot": "node scripts/run-electron.mjs scripts/global-screenshot-smoke.mjs",
     "test:voice-wake": "node scripts/voice-wake-smoke.mjs",
     "test:voice-conversation": "node scripts/voice-conversation-smoke.mjs",
     "test:scheduled-display": "node scripts/scheduled-task-display-smoke.mjs",
@@ -83,7 +84,8 @@
     "test:bot-slash": "node scripts/bot-slash-command-smoke.mjs",
     "test:conversation-groups": "node scripts/conversation-groups-smoke.mjs",
     "test:safe-console": "node scripts/safe-console-smoke.mjs",
-    "test:web-bridge": "node scripts/web-bridge-smoke.mjs"
+    "test:web-bridge": "node scripts/web-bridge-smoke.mjs",
+    "test:workspace-directory-picker": "node scripts/workspace-directory-picker-smoke.mjs"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.73.3",

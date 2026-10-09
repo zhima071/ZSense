@@ -71,8 +71,18 @@ const BLOCKED_CHANNELS = new Set([
   'zsense:auth:set-lock-password',
 ])
 
-function jsonResponse(response, status, payload) {
+function jsonResponse(response, status, payload, request = null) {
   const body = Buffer.from(JSON.stringify(payload))
+  // 工作区快照可能包含大量历史消息。只压缩已通过会话鉴权的大响应，避免每次远程
+  // 打开都把整份 JSON 原样穿过公网；小型鉴权响应保持原有行为。
+  if (request && body.length >= 32 * 1024 && /(?:^|,)\s*gzip\s*(?:;|,|$)/i.test(String(request.headers['accept-encoding'] || ''))) {
+    response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding', 'Cache-Control': 'no-store' })
+    const compressor = createGzip({ level: 3 })
+    compressor.once('error', () => response.destroy())
+    compressor.pipe(response)
+    compressor.end(body)
+    return
+  }
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store' })
   response.end(body)
 }
@@ -620,7 +630,17 @@ export class WebBridgeService {
     }
     if (path.basename(filePath) === 'index.html') {
       const html = fs.readFileSync(filePath, 'utf8')
-      const injected = html.replace('<head>', `<head>\n    <script src="/bridge-client.js"></script>\n    <meta name="zsense-web-bridge" content="1" />`)
+      const bridgeClient = fs.readFileSync(new URL('../web-bridge-client.js', import.meta.url), 'utf8')
+      // 公网每个独立静态请求都可能多花一个 RTT。把很小的桥接入口嵌进首页，
+      // 并把精确内容哈希加入原有 CSP；绝不放宽为 unsafe-inline。
+      const scriptHash = crypto.createHash('sha256').update(bridgeClient).digest('base64')
+      const canInline = html.includes('</head>') && /script-src\s+[^;"\n]+/.test(html) && !bridgeClient.includes('</script')
+      const withPolicy = canInline
+        ? html.replace(/script-src(?=[\s;])([^;"\n]*)/, (directive) => `${directive} 'sha256-${scriptHash}'`)
+        : html
+      const injected = canInline
+        ? withPolicy.replace('</head>', `    <script>${bridgeClient}</script>\n    <meta name="zsense-web-bridge" content="1" />\n  </head>`)
+        : withPolicy.replace('<head>', `<head>\n    <script src="/bridge-client.js"></script>\n    <meta name="zsense-web-bridge" content="1" />`)
       const body = Buffer.from(injected)
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length, 'Cache-Control': 'no-store' })
       response.end(body)
@@ -909,7 +929,7 @@ export class WebBridgeService {
           handler(fakeEvent, call.payload),
           new Promise((resolve) => { const timer = setTimeout(() => resolve({ ok: false, error: `调用超时（${call.channel}）：操作超过 ${Math.round(INVOKE_TIMEOUT_MS / 1000)} 秒没有返回。` }), INVOKE_TIMEOUT_MS); timer.unref?.() }),
         ])
-        return jsonResponse(response, 200, result && typeof result === 'object' && 'ok' in result ? result : { ok: true, data: result })
+        return jsonResponse(response, 200, result && typeof result === 'object' && 'ok' in result ? result : { ok: true, data: result }, request)
       }
       if (pathname === '/bridge/events' && request.method === 'GET') {
         if (!session) return jsonResponse(response, 401, { ok: false, error: '需要先输入访问口令。' })

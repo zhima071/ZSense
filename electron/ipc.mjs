@@ -11,6 +11,7 @@ import { fetchOfficialModelCatalog } from './services/model-catalog-service.mjs'
 import { createMemoryMaintenanceQueue, shouldExtractMemory } from './services/memory-intelligence.mjs'
 import { defaultUpdateFeedUrl } from './services/update-service.mjs'
 import { connectTrustedRemote, createPinnedLanFetch } from './services/remote-trust-connect.mjs'
+import { listWorkspaceDirectories } from './services/workspace-directory-picker.mjs'
 
 const channelIds = new Set(['web', 'telegram', 'discord', 'slack', 'wecom', 'weixin', 'dingtalk', 'feishu', 'webhook'])
 const externalChannelIds = new Set([...channelIds].filter((id) => id !== 'web'))
@@ -1150,6 +1151,12 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
   }
 
   safeHandle(ipcMain, 'zsense:data:load', () => database.loadWorkspace())
+  safeHandle(ipcMain, 'zsense:data:load-summary', () => database.loadWorkspace({ includeMessages: false }))
+  safeHandle(ipcMain, 'zsense:data:conversation', (payload) => {
+    const conversation = database.getConversation(text(payload, '会话 ID', 180))
+    if (!conversation) throw new Error('会话不存在或已被删除。')
+    return conversation
+  })
   safeHandle(ipcMain, 'zsense:office-tasks:list', (payload) => officeTaskService?.list({ botId: optionalText(payload?.botId, 'Bot ID', 180), conversationId: optionalText(payload?.conversationId, '会话 ID', 180) }) || [])
   safeHandle(ipcMain, 'zsense:office-tasks:search', (payload) => {
     const value = object(payload, '知识检索请求')
@@ -1957,6 +1964,11 @@ function withScheduledTaskOwner(task, payload) {
     })
     if (result.canceled || !result.filePaths[0]) return ''
     return validateWorkspaceDirectory(result.filePaths[0])
+  })
+  safeHandle(ipcMain, 'zsense:chat:list-workspace-directories', (payload) => {
+    const requestedPath = optionalText(payload, '文件夹路径', 4_000)
+    const defaultPath = database.loadSettings().defaultWorkspacePath || ''
+    return listWorkspaceDirectories(requestedPath, defaultPath)
   })
   safeHandle(ipcMain, 'zsense:chat:send', async (payload, event) => {
     const value = object(payload, '对话请求')

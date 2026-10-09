@@ -28,6 +28,22 @@ for (let conversation = 0; conversation < conversationCount; conversation += 1) 
   }
 }
 
+// 远程首屏不能把所有会话消息连同大段 reasoning/tool_events 一起传到手机。
+const lightweight = database.loadWorkspace({ includeMessages: false })
+const complete = database.loadWorkspace()
+const lightweightBytes = Buffer.byteLength(JSON.stringify(lightweight))
+const completeBytes = Buffer.byteLength(JSON.stringify(complete))
+assert.equal(lightweight.conversations.length, conversationCount)
+assert(lightweight.conversations.every((item) => item.messagesLoaded === false && item.messages.length === 0 && item.messageCount === 6), '远程目录应保留消息数，但不携带正文')
+assert(complete.conversations.every((item) => item.messagesLoaded === true && item.messages.length === 6), '桌面快照仍应含完整消息')
+const firstHistory = database.getConversation('conversation-efficiency-1')
+const secondHistory = database.getConversation('conversation-efficiency-2')
+assert.equal(firstHistory.messages.length, 6, '打开会话应补载该会话完整历史')
+assert(firstHistory.messages.every((item) => item.id.startsWith('message-efficiency-1-')), '补载不能混入其它会话消息')
+assert(secondHistory.messages.every((item) => item.id.startsWith('message-efficiency-2-')), '切换会话应读取对应的历史')
+assert.equal(database.getConversation('conversation-does-not-exist'), null, '已删除会话不能返回伪造的空历史')
+assert(lightweightBytes < completeBytes / 4, '轻量快照应显著小于完整快照')
+
 const planFor = (sql) => database.db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((row) => String(row.detail)).join(' | ')
 
 // 1) 按会话读取消息：必须走索引，且不再需要临时排序（这是打开会话和每轮 Agent 读历史的必经之路）
@@ -104,7 +120,9 @@ console.log(JSON.stringify({
   noFullSnapshotSettingReads: true,
   streamingDeltasCoalesced: true,
   streamingBehaviorVerified: true,
+  remoteWorkspaceSummary: true,
   testRunnerRecursionGuard: true,
   measuredMs: { settingsRead: Number(settingsMs.toFixed(2)), gatewayRuntime: Number(gatewayMs.toFixed(2)), fullSnapshot: Number(workspaceMs.toFixed(2)) },
+  remoteSnapshotBytes: { summary: lightweightBytes, full: completeBytes },
 }, null, 0))
 process.exit(0)

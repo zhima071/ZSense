@@ -966,6 +966,46 @@ fieldset { margin: 0; padding: 0; border: 0; }
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
 
+/* Remote WebView workspace selection: the host OS file dialog is invisible on a phone. */
+.remote-workspace-overlay { position: fixed; inset: 0; z-index: 160; display: grid; place-items: center; padding: 16px; background: rgba(15, 23, 42, .56); }
+.remote-workspace-picker { width: min(560px, 100%); max-height: min(760px, calc(100dvh - 32px)); overflow: hidden; display: flex; flex-direction: column; gap: 12px; padding: 20px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: 0 26px 70px rgba(15, 23, 42, .28); }
+.remote-workspace-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.remote-workspace-header span { display: block; margin-bottom: 3px; color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.remote-workspace-header h2 { color: var(--text); font-size: 19px; line-height: 1.3; }
+.remote-workspace-icon-button { flex: 0 0 44px; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 11px; background: var(--surface-raised); cursor: pointer; }
+.remote-workspace-hint { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.remote-workspace-roots { display: flex; flex-wrap: wrap; gap: 8px; }
+.remote-workspace-roots button { min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-raised); font-size: 13px; font-weight: 650; cursor: pointer; }
+.remote-workspace-roots button:hover, .remote-workspace-list button:hover { border-color: var(--primary); background: var(--primary-soft); }
+.remote-workspace-jump { display: grid; gap: 6px; }
+.remote-workspace-jump label, .remote-workspace-search span { color: var(--text-soft); font-size: 12px; font-weight: 700; }
+.remote-workspace-jump > div { display: flex; gap: 8px; }
+.remote-workspace-jump input, .remote-workspace-search input { min-width: 0; min-height: 44px; width: 100%; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--text); font-size: 14px; }
+.remote-workspace-jump button { flex: 0 0 auto; min-width: 64px; min-height: 44px; padding: 0 12px; border-radius: 10px; background: var(--primary-soft); color: var(--primary-strong); font-size: 13px; font-weight: 700; cursor: pointer; }
+.remote-workspace-navigation { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.remote-workspace-navigation button { flex: 0 0 auto; min-height: 44px; display: inline-flex; align-items: center; gap: 4px; padding: 0 10px; border-radius: 10px; background: var(--surface-raised); cursor: pointer; font-size: 13px; }
+.remote-workspace-navigation span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 12px; }
+.remote-workspace-search { display: grid; gap: 6px; }
+.remote-workspace-list { flex: 1 1 auto; min-height: 120px; overflow-y: auto; overscroll-behavior: contain; display: grid; align-content: start; gap: 6px; }
+.remote-workspace-list button { width: 100%; min-height: 48px; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); text-align: left; cursor: pointer; }
+.remote-workspace-list button > svg:first-child { flex: 0 0 auto; color: var(--primary); }
+.remote-workspace-list button > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.remote-workspace-list button > svg:last-child { flex: 0 0 auto; color: var(--faint); }
+.remote-workspace-empty { min-height: 100px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--faint); font-size: 13px; text-align: center; }
+.remote-workspace-limit { color: var(--faint); font-size: 12px; }
+.remote-workspace-error { padding: 9px 11px; border-radius: 9px; background: var(--red-soft); color: var(--red); font-size: 12px; line-height: 1.4; }
+.remote-workspace-footer { display: flex; gap: 8px; justify-content: flex-end; padding-top: 4px; border-top: 1px solid var(--border); }
+.remote-workspace-footer button { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 16px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; }
+.remote-workspace-footer .secondary { background: var(--surface-raised); color: var(--text-soft); }
+.remote-workspace-footer .primary { background: var(--primary); color: white; }
+.remote-workspace-picker button:disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 700px) {
+  .remote-workspace-overlay { height: var(--zsense-remote-viewport-height, 100dvh); align-items: end; padding: 0; }
+  .remote-workspace-picker { width: 100%; max-height: calc(var(--zsense-remote-viewport-height, 100dvh) - env(safe-area-inset-top) - 8px); overflow-y: auto; overscroll-behavior: contain; padding: 16px 16px max(16px, env(safe-area-inset-bottom)); border-radius: 18px 18px 0 0; }
+  .remote-workspace-header h2 { font-size: 18px; }
+  .remote-workspace-footer > button { flex: 1 1 0; }
+}
+
 .unified-composer {
   position: relative;
 }
@@ -1478,6 +1518,14 @@ fieldset { margin: 0; padding: 0; border: 0; }
 .loading-logo { width: 120px; height: 120px; margin-bottom: 3px; border-radius: 24px; object-fit: contain; }
 .app-loading strong { color: var(--text-soft); font-size: 13px; }
 .app-loading small { color: var(--faint); font-size: 10px; }
+.remote-conversation-loading { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: var(--bg); color: var(--muted); text-align: center; }
+.remote-conversation-loading strong { color: var(--text); font-size: 14px; }
+.remote-conversation-loading small { max-width: 34rem; overflow-wrap: anywhere; line-height: 1.5; }
+.remote-conversation-loading .secondary-button { min-height: 34px; padding: 6px 14px; }
+.remote-conversation-close { position: absolute; top: 14px; right: 14px; }
+.remote-conversation-dialog { position: relative; width: min(720px, 100%); height: min(420px, 70dvh); overflow: hidden; border: 1px solid var(--border); border-radius: 15px; background: var(--bg); }
+#main-content { position: relative; }
+#main-content:has(> .remote-conversation-loading) .native-chat-page { visibility: hidden; }
 .spin { animation: zsense-spin 900ms linear infinite; }
 @keyframes zsense-spin { to { transform: rotate(360deg); } }
 
@@ -5175,6 +5223,24 @@ kbd { border-color: var(--border); box-shadow: 0 1px 0 rgba(15, 23, 42, .1); }
 .chat-input-height-row label input { width: 70px; height: 100%; padding: 0 4px 0 10px; border: 0; outline: 0; color: var(--text); font-size: 10px; }
 .chat-input-height-row label span { padding-right: 9px; color: var(--muted); font-size: 9px; }
 .display-settings-error { margin-top: 12px; }
+.global-screenshot-row { min-height: 88px; padding: 13px 16px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.global-screenshot-copy { min-width: 0; }
+.global-screenshot-copy strong, .global-screenshot-copy small { display: block; }
+.global-screenshot-controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
+.global-screenshot-controls .button { white-space: nowrap; }
+.global-screenshot-key, .global-screenshot-controls input { min-width: 126px; height: 34px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); color: var(--text-soft); font-size: 10px; text-align: center; }
+.global-screenshot-key { cursor: pointer; }
+.global-screenshot-key:hover { border-color: var(--primary); background: var(--primary-soft); }
+.global-screenshot-key:focus-visible, .global-screenshot-controls input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.global-screenshot-controls input { width: 220px; }
+.global-screenshot-feedback { grid-column: 2 / -1; min-height: 0; }
+.global-screenshot-feedback small { display: inline-flex; align-items: center; gap: 4px; margin-top: 0; }
+.global-screenshot-feedback .error { color: var(--red); }
+@media (max-width: 900px) {
+  .global-screenshot-row { grid-template-columns: auto minmax(0, 1fr); }
+  .global-screenshot-controls { grid-column: 2; justify-content: flex-start; }
+  .global-screenshot-feedback { grid-column: 2; }
+}
 
 /* Voice wake: local ZSense wake-word status and controls. */
 .voice-wake-settings-panel { overflow: hidden; }

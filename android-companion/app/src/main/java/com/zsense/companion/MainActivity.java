@@ -64,7 +64,11 @@ public final class MainActivity extends Activity {
     private final Runnable hideNotice = () -> { if (notice != null) notice.setVisibility(View.GONE); };
     private TextView deviceLabel;
     private TextView deviceCount;
-    private LinearLayout deviceList;
+    private TextView cloudDeviceCount;
+    private TextView lanDeviceCount;
+    private LinearLayout cloudDeviceList;
+    private LinearLayout lanDeviceList;
+    private LinearLayout cloudCard;
     private LinearLayout accountCard;
     private LinearLayout lanCard;
     private LinearLayout advancedCard;
@@ -74,6 +78,7 @@ public final class MainActivity extends Activity {
     private EditText code;
     private EditText target;
     private EditText pairCode;
+    private EditText taskTarget;
     private EditText lanIp;
     private EditText lanPort;
     private EditText lanCredential;
@@ -212,12 +217,35 @@ public final class MainActivity extends Activity {
         deviceCount = text("0 台", 12, MUTED, false);
         deviceHeading.addView(deviceCount);
         peersCard.addView(deviceHeading);
-        deviceList = new LinearLayout(this);
-        deviceList.setOrientation(LinearLayout.VERTICAL);
-        deviceList.addView(text("正在读取设备…", 12, MUTED, false));
-        LinearLayout.LayoutParams listParams = new LinearLayout.LayoutParams(-1, -2);
-        listParams.topMargin = dp(12);
-        peersCard.addView(deviceList, listParams);
+        TextView cloudTitle = text("云端连接", 14, INK, true);
+        LinearLayout.LayoutParams cloudTitleParams = new LinearLayout.LayoutParams(-1, -2);
+        cloudTitleParams.topMargin = dp(18);
+        peersCard.addView(cloudTitle, cloudTitleParams);
+        cloudDeviceCount = text("正在读取…", 11, MUTED, false);
+        peersCard.addView(cloudDeviceCount);
+        cloudDeviceList = new LinearLayout(this);
+        cloudDeviceList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams cloudListParams = new LinearLayout.LayoutParams(-1, -2);
+        cloudListParams.topMargin = dp(8);
+        peersCard.addView(cloudDeviceList, cloudListParams);
+        TextView connectOtherAccount = text("连接其他账号的设备  →", 12, BLUE, true);
+        connectOtherAccount.setGravity(Gravity.CENTER_VERTICAL);
+        connectOtherAccount.setMinHeight(dp(48));
+        connectOtherAccount.setFocusable(true);
+        connectOtherAccount.setContentDescription("通过云端连接其他账号的设备，输入设备号和配对码");
+        peersCard.addView(connectOtherAccount);
+
+        TextView lanTitle = text("局域网连接", 14, INK, true);
+        LinearLayout.LayoutParams lanTitleParams = new LinearLayout.LayoutParams(-1, -2);
+        lanTitleParams.topMargin = dp(18);
+        peersCard.addView(lanTitle, lanTitleParams);
+        lanDeviceCount = text("正在查找附近设备…", 11, MUTED, false);
+        peersCard.addView(lanDeviceCount);
+        lanDeviceList = new LinearLayout(this);
+        lanDeviceList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams lanListParams = new LinearLayout.LayoutParams(-1, -2);
+        lanListParams.topMargin = dp(8);
+        peersCard.addView(lanDeviceList, lanListParams);
 
         LinearLayout connectHeading = new LinearLayout(this);
         connectHeading.setOrientation(LinearLayout.VERTICAL);
@@ -234,19 +262,68 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams methodsParams = new LinearLayout.LayoutParams(-1, -2);
         methodsParams.topMargin = dp(11);
         content.addView(methods, methodsParams);
-        emailOptionStatus = text("验证邮箱后自动发现", 11, MUTED, false);
-        connectionTile(methods, "@", "邮箱发现", emailOptionStatus, () -> {
-            accountCard.setVisibility(View.VISIBLE);
+        connectionTile(methods, "◎", "云端连接", text("跨网络连接其他设备", 11, MUTED, false), () -> {
+            cloudCard.setVisibility(View.VISIBLE);
             lanCard.setVisibility(View.GONE);
+            accountCard.setVisibility(View.GONE);
             selectConnectionTile(methods, 0);
-            scroller.post(() -> scroller.smoothScrollTo(0, accountCard.getTop()));
+            scroller.post(() -> scroller.smoothScrollTo(0, cloudCard.getTop()));
         }, true);
-        connectionTile(methods, "⌁", "局域网配对", text("附近设备直接连接", 11, MUTED, false), () -> {
+        connectionTile(methods, "⌁", "局域网连接", text("附近设备直接连接", 11, MUTED, false), () -> {
             lanCard.setVisibility(View.VISIBLE);
+            cloudCard.setVisibility(View.GONE);
             accountCard.setVisibility(View.GONE);
             selectConnectionTile(methods, 1);
             scroller.post(() -> scroller.smoothScrollTo(0, lanCard.getTop()));
         }, false);
+
+        cloudCard = card(content);
+        cloudCard.setVisibility(View.GONE);
+        section(cloudCard, "云端连接其他设备");
+        cloudCard.addView(text("跨网络或不同邮箱连接：输入桌面设备号与 6 位配对码。已配对设备可留空配对码。", 12, MUTED, false));
+        TextView cloudIdLabel = text("桌面设备号", 12, INK, true);
+        LinearLayout.LayoutParams cloudIdLabelParams = new LinearLayout.LayoutParams(-1, -2);
+        cloudIdLabelParams.topMargin = dp(12);
+        cloudCard.addView(cloudIdLabel, cloudIdLabelParams);
+        target = field(cloudCard, "桌面设备号", false);
+        target.setId(View.generateViewId());
+        cloudIdLabel.setLabelFor(target.getId());
+        TextView cloudCodeLabel = text("6 位配对码 · 首次连接时填写", 12, INK, true);
+        LinearLayout.LayoutParams cloudCodeLabelParams = new LinearLayout.LayoutParams(-1, -2);
+        cloudCodeLabelParams.topMargin = dp(12);
+        cloudCard.addView(cloudCodeLabel, cloudCodeLabelParams);
+        pairCode = field(cloudCard, "6 位配对码（首次连接时填写）", false);
+        pairCode.setId(View.generateViewId());
+        cloudCodeLabel.setLabelFor(pairCode.getId());
+        pairCode.setInputType(InputType.TYPE_CLASS_NUMBER);
+        pairCode.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(6)});
+        addButton(cloudCard, "云端打开桌面", () -> {
+            if (!requireField(target, "请输入目标设备号。")) return;
+            String codeText = value(pairCode);
+            if (!codeText.isEmpty() && !codeText.matches("[0-9]{6}")) {
+                pairCode.setError("配对码必须是 6 位数字。");
+                show("配对码必须是 6 位数字。");
+                return;
+            }
+            openRemote(value(target), codeText, "cloud");
+        });
+        emailOptionStatus = text("同邮箱设备自动发现 · 验证或更换邮箱  →", 12, BLUE, true);
+        emailOptionStatus.setGravity(Gravity.CENTER_VERTICAL);
+        emailOptionStatus.setMinHeight(dp(48));
+        emailOptionStatus.setFocusable(true);
+        emailOptionStatus.setContentDescription("验证或更换邮箱，自动发现同邮箱设备");
+        emailOptionStatus.setOnClickListener(view -> {
+            accountCard.setVisibility(View.VISIBLE);
+            scroller.post(() -> scroller.smoothScrollTo(0, accountCard.getTop()));
+        });
+        cloudCard.addView(emailOptionStatus);
+        connectOtherAccount.setOnClickListener(view -> {
+            cloudCard.setVisibility(View.VISIBLE);
+            lanCard.setVisibility(View.GONE);
+            accountCard.setVisibility(View.GONE);
+            selectConnectionTile(methods, 0);
+            scroller.post(() -> scroller.smoothScrollTo(0, cloudCard.getTop()));
+        });
 
         accountCard = card(content);
         accountCard.setVisibility(View.GONE);
@@ -273,7 +350,7 @@ public final class MainActivity extends Activity {
                 show("邮箱验证成功。现在可查看同账号设备。");
                 runOnUiThread(() -> {
                     accountCard.setVisibility(View.GONE);
-                    emailOptionStatus.setText("已绑定 " + identity.email());
+                    emailOptionStatus.setText("同邮箱设备自动发现 · 已绑定邮箱  →");
                     scroller.smoothScrollTo(0, 0);
                 });
                 refreshPeers();
@@ -288,18 +365,18 @@ public final class MainActivity extends Activity {
         LinearLayout advanced = card(content);
         advancedCard = advanced;
         advanced.setVisibility(View.GONE);
-        TextView more = text("手动连接、远程任务与本机设置  →", 12, MUTED, false);
+        TextView more = text("远程任务与本机设置  →", 12, MUTED, false);
         advancedToggle = more;
         more.setPadding(dp(4), dp(19), dp(4), dp(8));
         more.setOnClickListener(view -> {
             boolean expand = advanced.getVisibility() != View.VISIBLE;
             advanced.setVisibility(expand ? View.VISIBLE : View.GONE);
-            more.setText(expand ? "收起手动连接与设置  ↑" : "手动连接、远程任务与本机设置  →");
-            more.setContentDescription(expand ? "收起手动连接、远程任务与本机设置" : "展开手动连接、远程任务与本机设置");
+            more.setText(expand ? "收起远程任务与设置  ↑" : "远程任务与本机设置  →");
+            more.setContentDescription(expand ? "收起远程任务与本机设置" : "展开远程任务与本机设置");
             if (expand) scroller.post(() -> scroller.smoothScrollTo(0, advanced.getTop()));
         });
         more.setFocusable(true);
-        more.setContentDescription("展开手动连接、远程任务与本机设置");
+        more.setContentDescription("展开远程任务与本机设置");
         content.addView(more);
         content.removeView(advanced);
         content.addView(advanced);
@@ -314,13 +391,6 @@ public final class MainActivity extends Activity {
         addButton(advanced, "更换绑定邮箱", () -> {
             accountCard.setVisibility(View.VISIBLE);
             scroller.post(() -> scroller.smoothScrollTo(0, accountCard.getTop()));
-        });
-        section(advanced, "手动连接");
-        target = field(advanced, "设备号", false);
-        pairCode = field(advanced, "不同邮箱首次云端配对：6 位配对码；同邮箱留空", false);
-        addButton(advanced, "云端打开桌面", () -> {
-            if (!requireField(target, "请输入目标设备号。")) return;
-            openRemote(value(target), value(pairCode), false);
         });
         lanIp = field(lanCard, "局域网 IPv4 地址（例 192.168.1.10）", false);
         lanIp.setInputType(InputType.TYPE_CLASS_PHONE);
@@ -377,6 +447,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     String peerId = peer.optString("remoteDeviceId", peer.optString("deviceId"));
                     target.setText(peerId);
+                    taskTarget.setText(peerId);
                 });
                 refreshPeers();
                 show("局域网配对成功：" + peer.optString("name") + "。现在可点击设备进入桌面界面。");
@@ -384,10 +455,11 @@ public final class MainActivity extends Activity {
         });
 
         section(advanced, "远程任务");
+        taskTarget = field(advanced, "任务目标设备号", false);
         task = field(advanced, "给选中设备的任务", true);
         addButton(advanced, "发送远程任务（自动选择连接）", () -> {
-            if (!requireField(target, "请先填写目标设备号。") || !requireField(task, "请输入任务内容。")) return;
-            String selectedDevice = value(target), prompt = value(task);
+            if (!requireField(taskTarget, "请先填写目标设备号。") || !requireField(task, "请输入任务内容。")) return;
+            String selectedDevice = value(taskTarget), prompt = value(task);
             String trustedKey = "";
             for (int index = 0; index < cachedCloudPeers.length(); index++) {
                 JSONObject peer = cachedCloudPeers.optJSONObject(index);
@@ -398,8 +470,8 @@ public final class MainActivity extends Activity {
                     showTaskResult("远程任务结果：\n" + client.cloudTask(selectedDevice, prompt, peerKey), true));
         });
         addButton(advanced, "通过局域网发送任务", () -> {
-            if (!requireField(target, "请先填写目标设备号。") || !requireField(task, "请输入任务内容。")) return;
-            String selectedDevice = value(target), prompt = value(task);
+            if (!requireField(taskTarget, "请先填写目标设备号。") || !requireField(task, "请输入任务内容。")) return;
+            String selectedDevice = value(taskTarget), prompt = value(task);
             performTask("局域网任务执行中…", () ->
                     showTaskResult("局域网任务结果：\n" + client.lanTask(selectedDevice, prompt), true));
         });
@@ -418,9 +490,9 @@ public final class MainActivity extends Activity {
                 client = new DeviceClient(identity);
                 runOnUiThread(() -> {
                     email.setText(identity.email());
-                    emailOptionStatus.setText(identity.email().isEmpty() ? "验证邮箱后自动发现" : "已绑定 " + identity.email());
+                    emailOptionStatus.setText(identity.email().isEmpty() ? "同邮箱设备自动发现 · 验证邮箱  →" : "同邮箱设备自动发现 · 已绑定邮箱  →");
                     deviceLabel.setText("设备号：" + (identity.deviceId().isEmpty() ? "尚未登记" : identity.deviceId()));
-                    status.setText(identity.deviceId().isEmpty() ? "请登记本机设备身份。" : "已就绪。邮箱验证后可显示同账号设备。");
+                    status.setText(identity.deviceId().isEmpty() ? "请登记本机设备身份。" : "设备已就绪，可云端连接或验证邮箱自动发现。");
                 });
                 if (identity.deviceId().isEmpty()) {
                     client.register();
@@ -443,73 +515,94 @@ public final class MainActivity extends Activity {
             catch (Exception error) { peers = cachedCloudPeers; cloudError = error.getMessage(); }
         }
         JSONArray lanPeers = client.lanPeers();
+        JSONArray savedCloudPeers = client.savedCloudPeers();
+        JSONArray nearby = new JSONArray();
+        if (peers.length() > 0) {
+            try { nearby = client.scanLanNearby(); }
+            catch (Exception ignored) { /* LAN discovery is optional; saved peers remain visible. */ }
+        }
         JSONArray cloudPeers = peers;
+        JSONArray rememberedCloudPeers = savedCloudPeers;
+        JSONArray nearbyPeers = nearby;
         String refreshError = cloudError;
         runOnUiThread(() -> {
-            deviceList.removeAllViews();
-            java.util.HashSet<String> shown = new java.util.HashSet<>();
-            for (int i = 0; i < lanPeers.length(); i++) {
-                JSONObject peer = lanPeers.optJSONObject(i);
-                if (peer == null) continue;
-                String id = peer.optString("remoteDeviceId", peer.optString("deviceId"));
-                if (id.isEmpty() || !shown.add(id)) continue;
-                String name = peer.optString("name", id);
-                addDeviceRow(name, "局域网已配对", true, id);
-            }
+            cloudDeviceList.removeAllViews();
+            lanDeviceList.removeAllViews();
+            java.util.HashSet<String> allIds = new java.util.HashSet<>();
+            java.util.HashSet<String> lanIds = new java.util.HashSet<>();
+            java.util.HashSet<String> trustedCloudIds = new java.util.HashSet<>();
+            int cloudShown = 0;
+            int lanShown = 0;
             for (int i = 0; i < cloudPeers.length(); i++) {
                 JSONObject peer = cloudPeers.optJSONObject(i);
                 if (peer == null) continue;
                 String id = peer.optString("deviceId");
-                if (id.isEmpty() || !shown.add(id)) continue;
+                if (id.isEmpty() || !trustedCloudIds.add(id)) continue;
+                allIds.add(id);
                 String name = peer.optString("name", id);
                 boolean online = peer.optBoolean("online");
-                addDeviceRow(name, !refreshError.isEmpty() ? "云端状态待确认" : online ? "云端在线" : "当前离线",
-                        refreshError.isEmpty() && online, id);
+                addDeviceRow(cloudDeviceList, name, !refreshError.isEmpty() ? "云端状态待确认" : online ? "云端在线 · 点按连接" : "云端离线",
+                        refreshError.isEmpty() && online, id, "cloud");
+                cloudShown++;
             }
-            if (shown.isEmpty()) {
-                LinearLayout empty = new LinearLayout(this);
-                empty.setOrientation(LinearLayout.HORIZONTAL);
-                empty.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                empty.setPadding(dp(14), dp(16), dp(14), dp(16));
-                empty.setBackground(round(Color.rgb(248, 250, 252), 10, 0));
-                TextView emptyIcon = text("⌁", 23, BLUE, true);
-                emptyIcon.setGravity(android.view.Gravity.CENTER);
-                emptyIcon.setBackground(round(Color.WHITE, 10, BORDER));
-                empty.addView(emptyIcon, new LinearLayout.LayoutParams(dp(45), dp(45)));
-                LinearLayout copy = new LinearLayout(this);
-                copy.setOrientation(LinearLayout.VERTICAL);
-                LinearLayout.LayoutParams copyParams = new LinearLayout.LayoutParams(0, -2, 1);
-                copyParams.leftMargin = dp(12);
-                empty.addView(copy, copyParams);
-                copy.addView(text("还没有连接的设备", 13, INK, true));
-                TextView help = text("从下方选择一种连接方式", 11, MUTED, false);
-                LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(-1, -2);
-                helpParams.topMargin = dp(4);
-                copy.addView(help, helpParams);
-                deviceList.addView(empty);
+            for (int i = 0; i < rememberedCloudPeers.length(); i++) {
+                JSONObject peer = rememberedCloudPeers.optJSONObject(i);
+                if (peer == null) continue;
+                String id = peer.optString("deviceId");
+                if (id.isEmpty() || trustedCloudIds.contains(id)) continue;
+                allIds.add(id);
+                addDeviceRow(cloudDeviceList, peer.optString("name", id), "已保存 · 连接时验证授权", true, id, "cloud", true);
+                cloudShown++;
             }
-            deviceCount.setText(shown.size() + " 台" + (refreshError.isEmpty() ? "" : " · 上次发现"));
-            status.setText(refreshError.isEmpty() ? (shown.isEmpty() ? "等待连接 · 添加设备后即可开始" : "已发现 " + shown.size() + " 台设备 · 点击进入") :
-                    "云端刷新失败，已保留局域网设备：" + friendlyMessage(refreshError));
+            for (int i = 0; i < lanPeers.length(); i++) {
+                JSONObject peer = lanPeers.optJSONObject(i);
+                if (peer == null) continue;
+                String id = peer.optString("remoteDeviceId", peer.optString("deviceId"));
+                if (id.isEmpty() || !lanIds.add(id)) continue;
+                allIds.add(id);
+                String name = peer.optString("name", id);
+                addDeviceRow(lanDeviceList, name, "已配对 · 点按尝试局域网直连", true, id, "lan");
+                lanShown++;
+            }
+            for (int i = 0; i < nearbyPeers.length(); i++) {
+                JSONObject found = nearbyPeers.optJSONObject(i);
+                if (found == null) continue;
+                String id = found.optString("remoteDeviceId");
+                if (id.isEmpty() || !trustedCloudIds.contains(id) || !lanIds.add(id)) continue;
+                for (int j = 0; j < cloudPeers.length(); j++) {
+                    JSONObject peer = cloudPeers.optJSONObject(j);
+                    if (peer == null || !id.equals(peer.optString("deviceId"))) continue;
+                    addDeviceRow(lanDeviceList, peer.optString("name", id), "附近已发现 · 点按验证后直连", true, id, "lan");
+                    lanShown++;
+                    break;
+                }
+            }
+            if (cloudShown == 0) cloudDeviceList.addView(text("同邮箱设备及已连接的其他账号设备会显示在这里；也可用下方入口手动连接。", 12, MUTED, false));
+            if (lanShown == 0) lanDeviceList.addView(text("同一局域网内的已配对或同邮箱设备会显示在这里。", 12, MUTED, false));
+            cloudDeviceCount.setText(cloudShown + " 台 · 经交换中心连接" + (refreshError.isEmpty() ? "" : " · 状态待确认"));
+            lanDeviceCount.setText(lanShown + " 台 · 不经过云端中转");
+            deviceCount.setText(allIds.size() + " 台设备");
+            status.setText(refreshError.isEmpty() ? (allIds.isEmpty() ? "等待连接 · 添加设备后即可开始" : "已发现 " + allIds.size() + " 台设备 · 选择连接方式") :
+                    "云端刷新失败；局域网设备仍可尝试连接：" + friendlyMessage(refreshError));
         });
     }
 
-    private void openDevice(String id, String name) {
+    private void openDevice(String id, String mode) {
         target.setText(id);
-        // Device-list entries are already discovered/paired identities. A stale manual code
-        // must never turn this into a fresh pair-ticket request for another device.
-        openRemote(id, "", true);
+        // Discovered devices never reuse a stale manual pairing code.
+        openRemote(id, "", mode);
     }
 
-    private void openRemote(String id, String code, boolean preferLan) {
+    private void openRemote(String id, String code, String mode) {
         if (client == null || id == null || !id.matches("[a-z0-9][a-z0-9-]{1,58}")) {
             show("设备身份尚未就绪或设备号无效。");
             return;
         }
+        if (taskTarget != null) taskTarget.setText(id);
         Intent intent = new Intent(this, RemoteActivity.class);
         intent.putExtra("device-id", id);
         intent.putExtra("connect", true);
-        intent.putExtra("prefer-lan", preferLan);
+        intent.putExtra("connection-mode", mode);
         for (int index = 0; index < cachedCloudPeers.length(); index++) {
             JSONObject peer = cachedCloudPeers.optJSONObject(index);
             if (peer != null && id.equals(peer.optString("deviceId"))) {
@@ -559,8 +652,8 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (result != null) {
                 advancedCard.setVisibility(View.VISIBLE);
-                advancedToggle.setText("收起手动连接与设置  ↑");
-                advancedToggle.setContentDescription("收起手动连接、远程任务与本机设置");
+                advancedToggle.setText("收起远程任务与设置  ↑");
+                advancedToggle.setContentDescription("收起远程任务与本机设置");
                 result.setText(message);
                 result.setVisibility(View.VISIBLE);
                 scroller.post(() -> {
@@ -658,7 +751,10 @@ public final class MainActivity extends Activity {
             tile.setSelected(i == selected);
         }
     }
-    private void addDeviceRow(String name, String route, boolean online, String id) {
+    private void addDeviceRow(LinearLayout list, String name, String route, boolean online, String id, String mode) {
+        addDeviceRow(list, name, route, online, id, mode, false);
+    }
+    private void addDeviceRow(LinearLayout list, String name, String route, boolean online, String id, String mode, boolean removableCloud) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -666,7 +762,7 @@ public final class MainActivity extends Activity {
         row.setBackground(round(Color.WHITE, 10, BORDER));
         LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
         rowParams.bottomMargin = dp(8);
-        deviceList.addView(row, rowParams);
+        list.addView(row, rowParams);
         TextView icon = text("▣", 19, BLUE, true);
         icon.setGravity(android.view.Gravity.CENTER);
         icon.setBackground(round(Color.rgb(239, 246, 255), 9, 0));
@@ -683,8 +779,20 @@ public final class MainActivity extends Activity {
         copy.addView(subtitle, subtitleParams);
         if (online) {
             row.addView(text("›", 24, MUTED, false));
-            row.setOnClickListener(view -> openDevice(id, name));
-            row.setContentDescription("打开设备 " + name + "，" + route);
+            if (removableCloud) {
+                TextView remove = text("移除", 11, MUTED, false);
+                remove.setGravity(android.view.Gravity.CENTER);
+                remove.setMinHeight(dp(48));
+                remove.setPadding(dp(7), 0, 0, 0);
+                remove.setContentDescription("从本机列表移除 " + name + "，不撤销桌面端授权");
+                remove.setOnClickListener(view -> {
+                    client.forgetCloudPeer(id);
+                    worker.execute(() -> { try { refreshPeers(); } catch (Exception error) { show("刷新设备列表失败：" + error.getMessage()); } });
+                });
+                row.addView(remove);
+            }
+            row.setOnClickListener(view -> openDevice(id, mode));
+            row.setContentDescription("通过" + ("cloud".equals(mode) ? "云端" : "局域网") + "打开设备 " + name + "，" + route);
             row.setFocusable(true);
         } else {
             row.setAlpha(.65f);

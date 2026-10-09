@@ -10,9 +10,12 @@ const root = path.resolve(import.meta.dirname, '..')
 const directory = path.join(root, '安装包', '当前')
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
 const repo = process.argv.find((arg) => arg.startsWith('--repo='))?.slice(7) || ''
+const notesFile = process.argv.find((arg) => arg.startsWith('--notes-file='))?.slice('--notes-file='.length) || ''
 const publish = process.argv.includes('--publish')
 if (repo && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new Error('仓库格式应为 owner/repo')
 if (publish && !repo) throw new Error('发布时必须指定 --repo=owner/repo')
+const releaseNotes = notesFile ? fs.readFileSync(path.resolve(root, notesFile), 'utf8').trim() : `ZSense ${version} 安装包。`
+if (!releaseNotes || releaseNotes.length > 32_000) throw new Error('更新说明为空或超过 32,000 字符')
 
 function runGh(args) {
   const result = spawnSync('gh', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -88,7 +91,7 @@ if (publish) {
   const existing = spawnSync('gh', ['release', 'view', tag, '-R', repo], { encoding: 'utf8', stdio: 'ignore' })
   if (existing.status === 0) throw new Error(`${repo} 已有 ${tag} Release；请递增版本号，不覆盖旧版本`)
   const assets = assetNames.map((name) => path.join(directory, name))
-  const notes = [`ZSense ${version} 安装包。`, '', 'SHA-256 校验值：', ...assetNames.map((name) => `- ${name}: ${checksumByName.get(name)}`)].join('\n')
+  const notes = [releaseNotes, '', 'SHA-256 校验值：', ...assetNames.map((name) => `- ${name}: ${checksumByName.get(name)}`)].join('\n')
   runGh(['release', 'create', tag, ...assets, '-R', repo, '--target', info.defaultBranchRef.name,
     '--title', `ZSense ${version}`, '--notes', notes])
   console.log(`发布完成：https://github.com/${repo}/releases/tag/${tag}`)
