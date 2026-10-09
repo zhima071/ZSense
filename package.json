@@ -4,7 +4,7 @@
   "description": "内置 ZSense Agent Core 的多 Bot 桌面工作台",
   "author": "ZSense",
   "private": true,
-  "version": "0.26.9",
+  "version": "0.26.10",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -14,6 +14,7 @@
     "test:fast": "node scripts/run-all-tests.mjs --concurrency 6",
     "test:device-link": "node scripts/device-link-smoke.mjs",
     "test:android-companion": "node scripts/android-companion-desktop-smoke.mjs",
+    "test:android-update": "node scripts/android-update-smoke.mjs",
     "android:preview": "node scripts/android-companion-preview.mjs",
     "test:device-link-hub": "node scripts/device-link-hub-smoke.mjs",
     "test:device-link-cloud-agent": "node scripts/device-link-cloud-agent-smoke.mjs",

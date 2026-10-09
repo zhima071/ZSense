@@ -268,7 +268,9 @@ final class AndroidUpdateManager {
             connection.setConnectTimeout(10_000);
             connection.setReadTimeout(20_000);
             connection.setRequestProperty("User-Agent", "ZSense-Android-Updater/" + BuildConfig.VERSION_NAME);
-            connection.setRequestProperty("Accept", "application/octet-stream");
+            // GitHub's JSON API returns HTTP 415 when asked for an octet stream.
+            // Release assets use a separate download request and may redirect to its CDN.
+            connection.setRequestProperty("Accept", download ? "application/octet-stream" : "application/vnd.github+json");
             connection.setRequestProperty("Accept-Encoding", "identity");
             if (range != null) connection.setRequestProperty("Range", range);
             int status = connection.getResponseCode();
