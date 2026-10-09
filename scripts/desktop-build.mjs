@@ -20,8 +20,6 @@ function run(entry, args = []) {
   if (result.status !== 0) process.exit(result.status ?? 1)
 }
 
-run('node_modules/typescript/bin/tsc', ['-b'])
-run('node_modules/vite/bin/vite.js', ['build'])
 const builderArguments = process.argv.slice(2)
 if (!builderArguments.some((argument) => argument === '--publish' || argument.startsWith('--publish='))) {
   builderArguments.push('--publish', 'never')
@@ -38,10 +36,18 @@ const requestedArch = builderArguments.includes('--x64') ? 'x64'
         : builderArguments.includes('--universal') ? 'universal'
       : process.arch
 if (requestedPlatform === 'win32') {
+  if (process.platform !== 'win32') {
+    console.error('Windows NSIS 安装包必须在原生 Windows 环境构建并完成安装验证；macOS 交叉构建的安装程序可能启动即崩溃。请使用 GitHub Actions 的 Build Windows Installer 工作流。')
+    process.exit(1)
+  }
   if (requestedArch !== 'x64') {
     console.error(`当前 Windows 完整离线包只支持 x64，收到的架构为 ${requestedArch}。`)
     process.exit(1)
   }
+}
+run('node_modules/typescript/bin/tsc', ['-b'])
+run('node_modules/vite/bin/vite.js', ['build'])
+if (requestedPlatform === 'win32') {
   run('scripts/verify-windows-offline-tools.mjs')
 }
 const localElectronDist = path.join(projectDirectory, 'node_modules', 'electron', 'dist')

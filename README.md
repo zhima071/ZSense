@@ -81,7 +81,7 @@ npm run tools:verify:win
 npm run desktop:build:win
 ```
 
-macOS 与 Windows 产物都位于 `release/`。Windows 安装包内置固定版本并经过 SHA-256 校验的 OfficeCLI、dws、kdocs-cli、Whisper STT、MOSS-TTS 以及 VC++ 离线运行库；安装时不下载 Python、Node.js、Git 或单独 Runtime。GitHub Actions 会在真正的 Windows x64 环境中执行工具测试后再发布安装包。
+macOS 与 Windows 产物都位于 `release/`。Windows NSIS 安装包必须在原生 Windows x64 环境构建；在 macOS 上执行 `desktop:build:win` 会直接停止，避免产生归档完整却启动即崩溃的交叉构建包。Windows 安装包内置固定版本并经过 SHA-256 校验的 OfficeCLI、dws、kdocs-cli、Whisper STT、MOSS-TTS 以及 VC++ 离线运行库；安装时不下载 Python、Node.js、Git 或单独 Runtime。GitHub Actions 构建后会在真正的 Windows x64 环境中安装产物，再上传供发布使用。
 
 单项测试仍可单独运行，例如 `npm run test:agent-core`、`npm run test:gateway`；完整清单见 `package.json` 的 `test:*` 脚本。任务执行效率的度量方法与基线数字见 `docs/efficiency.md`。
 

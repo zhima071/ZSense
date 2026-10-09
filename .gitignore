@@ -4,6 +4,7 @@ release/
 release-*/
 安装包/当前/
 安装包/历史版本/
+安装包/故障备份/
 .vite/
 runtime-bundles/*/hermes-runtime.tar.gz
 # 由 npm run tools:prepare:win / 打包流程生成的约 1.3 GB 外部工具，不进版本库
