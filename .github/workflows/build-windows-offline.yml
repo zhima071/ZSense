@@ -12,8 +12,44 @@ permissions:
   contents: read
 
 jobs:
+  seed-build-inputs:
+    name: Read verified official build input from draft
+    if: ${{ inputs.resourceDraftTag != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Draft releases require push access to read. Keep this token away from
+    # checkout, dependency installation, application tests and build scripts.
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch pinned official kdocs archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZSENSE_BUILD_RESOURCE_TAG: ${{ inputs.resourceDraftTag }}
+        run: |
+          if [[ ! "$ZSENSE_BUILD_RESOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '%s\n' 'Invalid build draft tag.' >&2
+            exit 1
+          fi
+          mkdir -p build-inputs
+          gh release download "$ZSENSE_BUILD_RESOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'kdocs-cli-2.5.7-windows-amd64.zip' --dir build-inputs
+          actual="$(sha256sum build-inputs/kdocs-cli-2.5.7-windows-amd64.zip | cut -d ' ' -f 1)"
+          if [[ "$actual" != 'e9a7e152d38db9766a60cc207e9d79d8d9c449c4e38ec8c2b19ed10765780b81' ]]; then
+            printf '%s\n' 'Official kdocs archive hash mismatch.' >&2
+            exit 1
+          fi
+      - name: Hand verified archive to read-only build job
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-windows-build-input
+          path: build-inputs/kdocs-cli-2.5.7-windows-amd64.zip
+          if-no-files-found: error
+          retention-days: 1
+
   windows-x64:
     name: Windows x64 with ZSense Agent Core
+    needs: seed-build-inputs
+    if: ${{ !cancelled() && (needs.seed-build-inputs.result == 'success' || needs.seed-build-inputs.result == 'skipped') }}
     runs-on: windows-2022
     timeout-minutes: 60
     env:
@@ -46,17 +82,17 @@ jobs:
           path: .cache/voice-assets
           key: zsense-voice-v1-${{ hashFiles('scripts/voice-assets.mjs') }}
 
-      - name: Seed optional official kdocs archive from build draft
+      - name: Receive optional verified official kdocs archive
+        if: ${{ inputs.resourceDraftTag != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-windows-build-input
+          path: .cache/windows-offline-assets
+
+      - name: Verify seeded official kdocs archive
         if: ${{ inputs.resourceDraftTag != '' }}
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ZSENSE_BUILD_RESOURCE_TAG: ${{ inputs.resourceDraftTag }}
         run: |
-          if ($env:ZSENSE_BUILD_RESOURCE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid build draft tag.' }
-          New-Item -ItemType Directory -Path '.cache/windows-offline-assets' -Force | Out-Null
-          gh release download $env:ZSENSE_BUILD_RESOURCE_TAG --repo $env:GITHUB_REPOSITORY --pattern 'kdocs-cli-2.5.7-windows-amd64.zip' --dir '.cache/windows-offline-assets' --clobber
-          if ($LASTEXITCODE -ne 0) { throw 'Official kdocs build input download failed.' }
           $hash = (Get-FileHash '.cache/windows-offline-assets/kdocs-cli-2.5.7-windows-amd64.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($hash -ne 'e9a7e152d38db9766a60cc207e9d79d8d9c449c4e38ec8c2b19ed10765780b81') { throw 'Official kdocs archive hash mismatch.' }
 
