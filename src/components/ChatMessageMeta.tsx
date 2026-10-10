@@ -1,4 +1,4 @@
-import { Check, Clock3, Copy, Cpu, Gauge, Quote, RefreshCw, Square, Timer, Trash2, Volume2, X } from 'lucide-react'
+import { Check, Clock3, Copy, Cpu, Gauge, GitBranch, Quote, RefreshCw, Square, Timer, Trash2, Volume2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { writeTextToClipboard } from '../services/clipboard'
@@ -24,6 +24,8 @@ interface ChatMessageMetaProps {
   onQuote?: () => void
   onRegenerate?: () => void
   regenerateDisabled?: boolean
+  onBranch?: () => Promise<void>
+  branchDisabled?: boolean
   onDelete?: () => Promise<void>
   deleteDisabled?: boolean
   deleteDescription?: string
@@ -68,11 +70,13 @@ export function createChatQuote(source: string, createdAt: string, content: stri
   return `> 引用 ${source} · ${formatChatMessageTimestamp(createdAt)}\n${quoteLines}`
 }
 
-export function ChatMessageMeta({ messageId, content, createdAt, model = '', showModel = false, durationMs = null, outputTokens = null, copyDescription, quoteDescription, quoteDisabled = false, speechLanguage = 'auto', speechVoice = 'Xiaoyu', speechSpeed = 1, onQuote, onRegenerate, regenerateDisabled = false, onDelete, deleteDisabled = false, deleteDescription = '这条消息', onError }: ChatMessageMetaProps) {
+export function ChatMessageMeta({ messageId, content, createdAt, model = '', showModel = false, durationMs = null, outputTokens = null, copyDescription, quoteDescription, quoteDisabled = false, speechLanguage = 'auto', speechVoice = 'melo-zh', speechSpeed = 1, onQuote, onRegenerate, regenerateDisabled = false, onBranch, branchDisabled = false, onDelete, deleteDisabled = false, deleteDescription = '这条消息', onError }: ChatMessageMetaProps) {
   const [copied, setCopied] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [branching, setBranching] = useState(false)
+  const branchInFlightRef = useRef(false)
   const copyFeedbackTimerRef = useRef<number>()
 
   useEffect(() => () => {
@@ -87,6 +91,18 @@ export function ChatMessageMeta({ messageId, content, createdAt, model = '', sho
   const dateTime = normalizedMessageDate(createdAt)?.toISOString()
   const modelLabel = model || (showModel ? '模型未记录' : '')
   const tokenSpeed = outputTokens != null && durationMs != null ? formatTokenSpeed(outputTokens, durationMs) : ''
+
+  const branchMessage = async () => {
+    if (!onBranch || branchDisabled || branchInFlightRef.current) return
+    branchInFlightRef.current = true
+    setBranching(true)
+    try { await onBranch() }
+    catch (reason) { onError(`创建分支失败：${errorMessage(reason)}`) }
+    finally {
+      branchInFlightRef.current = false
+      setBranching(false)
+    }
+  }
 
   const copyMessage = async () => {
     try {
@@ -138,11 +154,12 @@ export function ChatMessageMeta({ messageId, content, createdAt, model = '', sho
     <footer className="chat-message-meta" data-message-id={messageId}>
       <span className="chat-message-facts">
         <time dateTime={dateTime}><Clock3 size={12} aria-hidden="true" />{timestamp}</time>
-        {modelLabel && <span className="chat-message-model" title={modelLabel}><Cpu size={12} aria-hidden="true" />{modelLabel}</span>}
+        {modelLabel && <span className="chat-message-model" title={modelLabel}><Cpu size={12} aria-hidden="true" /><span className="chat-message-model-name">{modelLabel}</span></span>}
         {durationMs != null && <span><Timer size={12} aria-hidden="true" />耗时 {formatResponseDuration(durationMs)}</span>}
         {showModel && <span title={tokenSpeed ? `输出 ${outputTokens} tokens ÷ ${formatResponseDuration(durationMs || 0)}` : '旧消息没有保存输出 Token 数，无法计算生成速度'}><Gauge size={12} aria-hidden="true" />{tokenSpeed ? `${tokenSpeed} tokens/秒` : '速度未记录'}</span>}
       </span>
       <span className="chat-message-actions">
+        {onBranch && <button type="button" onClick={() => void branchMessage()} disabled={branchDisabled || branching} aria-busy={branching || undefined} aria-label={branching ? '正在创建分支聊天' : '分支到新聊天'} title={branching ? '正在创建分支聊天…' : '分支到新聊天'}><GitBranch size={13} aria-hidden="true" /><span>{branching ? '正在创建…' : '分支到新聊天'}</span></button>}
         {onRegenerate && <button type="button" onClick={onRegenerate} disabled={regenerateDisabled} aria-label="再次提交对应问题并生成新回复" title="重新提交对应问题"><RefreshCw size={13} aria-hidden="true" /><span>再次提交</span></button>}
         {showModel && <button type="button" className={speaking ? 'speaking' : ''} onClick={() => void toggleSpeech()} aria-label={speaking ? '停止播报这条 AI 回复' : '播报这条 AI 回复'} title={speaking ? '停止播报' : '播报这条回复'} aria-pressed={speaking}>
           {speaking ? <Square size={12} aria-hidden="true" /> : <Volume2 size={13} aria-hidden="true" />}

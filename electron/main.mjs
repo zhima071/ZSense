@@ -1,13 +1,14 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, Notification, Tray, nativeImage, net, powerMonitor, powerSaveBlocker, protocol, safeStorage, session, shell, systemPreferences } from 'electron'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { registerIpcHandlers } from './ipc.mjs'
 import { installSafeConsole } from './services/safe-console.mjs'
 import { createLazyService } from './services/lazy-service.mjs'
-import { ZSenseDatabase } from './services/database.mjs'
+import { cloneForRenderer, ZSenseDatabase } from './services/database.mjs'
 import { LocalMemoryService } from './services/local-memory-service.mjs'
+import { MemoryUpgradeService } from './services/memory-upgrade-service.mjs'
 import { OfficeTaskService } from './services/office-task-service.mjs'
 import { AuthService } from './services/auth-service.mjs'
 import { GATEWAY_HEALTH_CHECK_INTERVAL_MS, ZSenseGatewayService } from './services/zsense-gateway-service.mjs'
@@ -96,9 +97,6 @@ protocol.registerSchemesAsPrivileged([{
   scheme: 'zsense-office',
   privileges: { standard: true, secure: true, supportFetchAPI: false, corsEnabled: false, stream: true },
 }, {
-  scheme: 'zsense-tts',
-  privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
-}, {
   scheme: 'zsense-canvas',
   privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
 }])
@@ -154,42 +152,6 @@ function bundledToolsDirectory() {
     : path.join(projectDirectory, 'bundled-tools', `${process.platform}-${process.arch}`)
 }
 
-function mossTtsModelDirectory() {
-  return app.isPackaged
-    ? path.join(process.resourcesPath, 'bundled-tools', 'tts', 'moss', 'models')
-    : path.join(projectDirectory, 'bundled-tools', 'shared', 'tts', 'moss', 'models')
-}
-
-async function mossTtsAssetResponse(requestUrl) {
-  try {
-    const url = new URL(requestUrl)
-    if (url.hostname !== 'models') return new Response('Not found', { status: 404 })
-    const rootPath = path.resolve(mossTtsModelDirectory())
-    const relativePath = decodeURIComponent(url.pathname).replace(/^\/+/, '')
-    const filePath = path.resolve(rootPath, relativePath)
-    if (!relativePath || (filePath !== rootPath && !filePath.startsWith(`${rootPath}${path.sep}`))) {
-      return new Response('Forbidden', { status: 403 })
-    }
-    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return new Response('Not found', { status: 404 })
-    const source = await net.fetch(pathToFileURL(filePath).href)
-    const extension = path.extname(filePath).toLowerCase()
-    const contentType = extension === '.json' ? 'application/json; charset=utf-8'
-      : extension === '.model' ? 'application/octet-stream'
-        : 'application/octet-stream'
-    return new Response(source.body, {
-      status: source.status,
-      headers: {
-        'Content-Type': contentType,
-        'Access-Control-Allow-Origin': '*',
-        'Cross-Origin-Resource-Policy': 'cross-origin',
-        'Cache-Control': 'public, max-age=31536000, immutable',
-      },
-    })
-  } catch (error) {
-    return new Response(`MOSS-TTS asset error: ${String(error?.message || error)}`, { status: 500 })
-  }
-}
-
 async function inspectApplicationRuntime() {
   const coreStatus = agentCore ? await agentCore.inspect() : { runnable: false, message: 'ZSense Agent Core 尚未初始化。' }
   return composeAgentRuntimeStatus(coreStatus, gatewayService?.inspect(), voiceService?.inspect(), agentDataRoot)
@@ -223,6 +185,21 @@ function publishWorkspace(workspace = database?.loadWorkspace()) {
   if (!workspace || !mainWindow || mainWindow.webContents.isDestroyed()) return
   const senderId = mainWindow.webContents.id
   if (auth?.status(senderId).authenticated) mainWindow.webContents.send('zsense:data:changed', workspace)
+}
+
+function publishMemoryChange(botId, result = {}) {
+  if (!database) return
+  // 保护、遗忘与世代失效是预期跳过，不把后台状态当错误反复打扰用户。
+  const quietReasons = new Set(['manual-protected','previously-forgotten','stale-version','stale-generation'])
+  const reasonMessage = result.reason === 'maintenance-failed'
+    ? '后台记忆整理未完成，已有记忆和原回复不受影响。'
+    : quietReasons.has(result.reason) ? '' : /^[\p{Script=Han}]/u.test(String(result.reason || '')) ? String(result.reason).slice(0,200) : ''
+  const status = result.capacityReached
+    ? { capacityReached:true,message:'自动记忆已达容量上限，请整理记忆或调整容量；人工记忆不会被自动删除。' }
+    : reasonMessage ? { message:reasonMessage } : undefined
+  const payload = cloneForRenderer(database.memorySnapshot(botId,status))
+  if (mainWindow && !mainWindow.webContents.isDestroyed() && auth?.status(mainWindow.webContents.id).authenticated) mainWindow.webContents.send('zsense:workspace:memory-changed',payload)
+  webBridgeService?.publishMemoryChanged(payload)
 }
 
 function applyRunWhileLocked(enabled) {
@@ -591,7 +568,10 @@ app.whenReady().then(async () => {
   try { deployBundledAgentResources() }
   catch (error) { console.error('ZSense 内置技能初始化失败：', error) }
   database = new ZSenseDatabase(userDataDirectory, skillManager)
-  memoryService = new LocalMemoryService({ database })
+  // 旧设备先做一次纯本地召回整理；事务失败留待下次启动，不阻断应用或触发额外授权。
+  try { await new MemoryUpgradeService({ database }).run() }
+  catch { console.warn('旧记忆本地整理未完成，将在下次启动重试。') }
+  memoryService = new LocalMemoryService({ database, onChanged:publishMemoryChange })
   database.memoryService = memoryService
   secrets = new SecretsVault(userDataDirectory, safeStorage)
   const deviceDataProvider = createDeviceDataProvider({ database, localStatusProvider: () => collectLocalDeviceStatus() })
@@ -699,6 +679,7 @@ app.whenReady().then(async () => {
     canvasService,
     runtimeRootPath: agentDataRoot,
   })
+  memoryService.setModelRefiner((options) => agentCore.extractMemories(options))
   voiceService = createLazyService(() => new ZSenseVoiceService({ database, secrets, toolsDirectory: bundledToolsDirectory() }))
   gatewayService = new ZSenseGatewayService({
     database,
@@ -713,7 +694,6 @@ app.whenReady().then(async () => {
     notify: emitUserFeedback,
   })
   protocol.handle('zsense-office', (request) => officeWorkspace.previewResponse(request.url))
-  protocol.handle('zsense-tts', (request) => mossTtsAssetResponse(request.url))
   protocol.handle('zsense-canvas', (request) => canvasService.assetResponse(request.url))
   scheduledTaskRunner = new ScheduledTaskRunner({
     database,
@@ -793,6 +773,7 @@ app.whenReady().then(async () => {
     scheduledTaskRunner,
     notify: emitUserFeedback,
     onWorkspaceChanged: publishWorkspace,
+    onMemoryChanged: publishMemoryChange,
     microphoneAccessStatus,
     requestMicrophoneAccess,
     onVoiceWakeDetected: handleVoiceWakeDetected,
@@ -846,7 +827,7 @@ app.on('before-quit', (event) => {
       await gatewayService?.shutdown()
       await deviceLinkService?.shutdown()
       await webBridgeService?.shutdown()
-      voiceService?.shutdown()
+      await voiceService?.shutdown()
       capabilityService?.shutdown()
       await memoryService?.stop()
     } catch (error) {

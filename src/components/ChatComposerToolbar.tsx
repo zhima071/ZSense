@@ -1,9 +1,10 @@
-import { BrainCircuit, ChevronDown, Code2, Cpu, FileSpreadsheet, FileText, FolderOpen, Gauge, Image as ImageIcon, LoaderCircle, Plus, Presentation, X } from 'lucide-react'
+import { BrainCircuit, ChevronDown, Code2, Cpu, FileSpreadsheet, FileText, FolderOpen, Image as ImageIcon, LoaderCircle, Plus, Presentation, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { mergeChatAttachments } from '../services/chat-attachments'
 import { unwrapDesktop } from '../services/desktop'
 import { isImageDocumentPath, isPreviewableDocumentPath, previewableDocumentPathFromHref } from '../services/office-artifacts'
 import { RemoteWorkspacePicker } from './RemoteWorkspacePicker'
+import { ChatComposerControlTooltip } from './ChatComposerControlTooltip'
 import type { ChatAttachment, ChatUsage, ModelConfiguration, ModelProvider, ReasoningEffort } from '../types'
 
 interface ChatComposerToolbarProps {
@@ -50,7 +51,16 @@ function configurationKey(provider: string, model: string) {
   return `${provider}\u241f${model}`
 }
 
-function compactTokens(value: number) {
+function finiteNonnegative(value?: number) {
+  return Number.isFinite(value) ? Math.max(0, value || 0) : 0
+}
+
+function contextPercent(value?: number) {
+  return Math.min(100, finiteNonnegative(value))
+}
+
+function compactTokens(rawValue: number) {
+  const value = finiteNonnegative(rawValue)
   if (value >= 1_000_000) {
     const millions = value / 1_000_000
     return `${millions.toFixed(Number.isInteger(millions) || value >= 10_000_000 ? 0 : 1)}M`
@@ -61,14 +71,9 @@ function compactTokens(value: number) {
 
 function usageLabel(usage?: ChatUsage) {
   if (!usage) return '等待首次响应'
-  if (usage.contextMax > 0) return `${compactTokens(usage.contextUsed)} / ${compactTokens(usage.contextMax)} · ${Math.round(usage.contextPercent)}%`
+  if (usage.contextMax > 0) return `${compactTokens(usage.contextUsed)} / ${compactTokens(usage.contextMax)} · ${Math.round(contextPercent(usage.contextPercent))}%`
   if (usage.contextUsed > 0) return `约 ${compactTokens(usage.contextUsed)} tokens`
   return '当前会话暂未返回用量'
-}
-
-function compactUsageLabel(usage?: ChatUsage) {
-  const percent = Math.max(0, Math.min(100, usage?.contextPercent || 0))
-  return `${Math.round(percent)}%`
 }
 
 function workspaceName(workspacePath: string) {
@@ -162,21 +167,21 @@ export function ChatComposerToolbar({
   const selectedModelLabel = selectedModelOption ? `${providerNames[selectedModelOption.provider]} · ${selectedModelOption.model}` : '暂无可用模型'
   const selectedModelSummary = selectedModelOption?.model || '暂无模型'
   const effectiveUsage = useMemo<ChatUsage | undefined>(() => {
-    const synchronizedContextMax = selectedModelOption?.contextWindow || 0
+    const synchronizedContextMax = finiteNonnegative(selectedModelOption?.contextWindow)
     if (!usage && !synchronizedContextMax) return undefined
-    const contextUsed = usage?.contextUsed || 0
-    const contextMax = synchronizedContextMax || usage?.contextMax || 0
+    const contextUsed = finiteNonnegative(usage?.contextUsed)
+    const contextMax = synchronizedContextMax || finiteNonnegative(usage?.contextMax)
     return {
       contextUsed,
       contextMax,
-      contextPercent: contextMax > 0 ? Math.max(0, Math.min(100, contextUsed / contextMax * 100)) : usage?.contextPercent || 0,
-      inputTokens: usage?.inputTokens || 0,
-      outputTokens: usage?.outputTokens || 0,
-      totalTokens: usage?.totalTokens || 0,
+      contextPercent: contextMax > 0 ? Math.min(contextUsed, contextMax) / contextMax * 100 : contextPercent(usage?.contextPercent),
+      inputTokens: finiteNonnegative(usage?.inputTokens),
+      outputTokens: finiteNonnegative(usage?.outputTokens),
+      totalTokens: finiteNonnegative(usage?.totalTokens),
     }
   }, [selectedModelOption?.contextWindow, usage])
   const fullUsageLabel = usageLabel(effectiveUsage)
-  const percent = Math.max(0, Math.min(100, effectiveUsage?.contextPercent || 0))
+  const percent = contextPercent(effectiveUsage?.contextPercent)
 
   const pickAttachments = async () => {
     if (attachmentDisabled || picking) return
@@ -210,15 +215,15 @@ export function ChatComposerToolbar({
     <>
     <div className={`chat-composer-toolbar ${layout === 'composer' ? 'composer-layout' : ''}`}>
       <div className="chat-composer-toolbar-main">
-        <button className="chat-attachment-button chat-compact-control" type="button" onClick={() => void pickAttachments()} disabled={attachmentDisabled || picking} aria-label={picking ? '正在选择附件' : `添加附件，当前已选择 ${attachments.length} 个`} title="添加附件">
+        <button className="chat-attachment-button chat-compact-control" type="button" onClick={() => void pickAttachments()} disabled={attachmentDisabled || picking} aria-label={picking ? '正在选择附件' : `添加附件，当前已选择 ${attachments.length} 个`} data-tooltip="off">
           <span className="chat-control-summary attachment-summary" aria-hidden="true">
-            {picking ? <LoaderCircle className="spin" size={15} /> : <Plus size={layout === 'composer' ? 19 : 15} />}
+            {picking ? <LoaderCircle className="spin" size={18} /> : <Plus size={18} />}
           </span>
-          <span className="chat-control-detail chat-attachment-detail" aria-hidden="true">
+          <ChatComposerControlTooltip className="chat-attachment-detail">
             <small>添加附件</small>
             <strong>{picking ? '正在选择…' : attachments.length ? `已选择 ${attachments.length} 个文件` : '图片与文件'}</strong>
             <em>点击添加，单次最多 8 个附件</em>
-          </span>
+          </ChatComposerControlTooltip>
         </button>
 
         <button
@@ -227,38 +232,37 @@ export function ChatComposerToolbar({
           onClick={() => void pickWorkspace()}
           disabled={disabled || pickingWorkspace}
           aria-label={workspacePath ? `更换会话工作区，当前为 ${workspacePath}` : '选择会话工作区'}
-          title={workspacePath || '选择该对话生成文件的唯一保存文件夹'}
+          data-tooltip="off"
         >
           <span className="chat-control-summary" aria-hidden="true">
             {pickingWorkspace ? <LoaderCircle className="spin" size={15} /> : <FolderOpen size={15} />}
             <strong>{pickingWorkspace ? '正在选择…' : workspacePath ? workspaceName(workspacePath) : '选择文件夹'}</strong>
           </span>
-          <span className="chat-control-detail chat-workspace-detail" aria-hidden="true">
+          <ChatComposerControlTooltip className="chat-workspace-detail">
             <small>当前工作区</small>
             <strong>{pickingWorkspace ? '正在选择…' : workspacePath || '尚未指定工作区'}</strong>
             <em>点击可更换此会话的文件保存位置</em>
-          </span>
+          </ChatComposerControlTooltip>
         </button>
 
-        <label className={`chat-toolbar-select chat-reasoning-select chat-compact-control ${disabled ? 'is-disabled' : ''}`} title={`推理强度 · ${reasoningEffort}`}>
+        <label className={`chat-toolbar-select chat-reasoning-select chat-compact-control ${disabled ? 'is-disabled' : ''}`}>
           <span className="chat-control-summary" aria-hidden="true"><BrainCircuit size={14} /><strong>{reasoningEffort}</strong><ChevronDown className="chat-control-chevron" size={12} /></span>
           <select value={reasoningEffort} disabled={disabled} aria-label="设置当前会话推理强度" onChange={(event) => onReasoningEffortChange(event.target.value as ReasoningEffort)}>
             {reasoningOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
-          <span className="chat-control-detail chat-reasoning-detail" aria-hidden="true">
+          <ChatComposerControlTooltip className="chat-reasoning-detail">
             <small>推理强度</small>
             <strong>{reasoningEffort}</strong>
             <em>点击可选择 none / low / high / max</em>
-          </span>
+          </ChatComposerControlTooltip>
         </label>
 
-        <label className={`chat-toolbar-select chat-model-select chat-compact-control ${disabled || !modelOptions.length ? 'is-disabled' : ''}`} title={selectedModelLabel}>
+        <label className={`chat-toolbar-select chat-model-select chat-compact-control ${disabled || !modelOptions.length ? 'is-disabled' : ''}`}>
           <span className="chat-control-summary" aria-hidden="true"><Cpu size={14} /><strong>{selectedModelSummary}</strong><ChevronDown className="chat-control-chevron" size={12} /></span>
           <select
             value={selectedKey}
             disabled={disabled || !modelOptions.length}
             aria-label="快速切换当前会话模型"
-            title={selectedModelLabel}
             onChange={(event) => {
               const selected = modelOptions.find((item) => configurationKey(item.provider, item.model) === event.target.value)
               if (selected) onModelChange(selected.provider, selected.model)
@@ -267,34 +271,41 @@ export function ChatComposerToolbar({
             {!modelOptions.length && <option value="">暂无可用模型</option>}
             {modelOptions.map((item) => <option key={configurationKey(item.provider, item.model)} value={configurationKey(item.provider, item.model)}>{providerNames[item.provider]} · {item.model}</option>)}
           </select>
-          <span className="chat-control-detail chat-model-detail" aria-hidden="true">
+          <ChatComposerControlTooltip className="chat-model-detail">
             <small>当前模型</small>
             <strong>{selectedModelLabel}</strong>
             <em>点击可快速切换此会话使用的模型</em>
-          </span>
+          </ChatComposerControlTooltip>
         </label>
 
-        <div className="chat-context-usage chat-compact-control" title={fullUsageLabel} tabIndex={0} role="progressbar" aria-label="上下文使用量" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)} aria-valuetext={fullUsageLabel}>
-          <span className="chat-control-summary" aria-hidden="true"><Gauge size={14} /><strong>{compactUsageLabel(effectiveUsage)}</strong></span>
-          <span className="chat-control-detail chat-context-detail" aria-hidden="true">
+        <div className="chat-context-usage chat-compact-control" tabIndex={0} role="progressbar" aria-label="上下文使用量" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)} aria-valuetext={fullUsageLabel}>
+          <span className="chat-control-summary" aria-hidden="true">
+            <svg className="chat-context-ring" width={22} height={22} viewBox="0 0 28 28" aria-hidden="true" focusable="false">
+              <circle className="chat-context-ring-track" cx={14} cy={14} r={10} />
+              <circle className="chat-context-ring-value" cx={14} cy={14} r={10} pathLength={100} strokeDasharray={100} strokeDashoffset={100 - percent} opacity={percent > 0 ? 1 : 0} />
+            </svg>
+          </span>
+          <ChatComposerControlTooltip className="chat-context-detail">
             <small>上下文使用量</small>
             <strong>{fullUsageLabel}</strong>
-            <span className="chat-context-track"><i style={{ width: `${percent}%` }} /></span>
-          </span>
+          </ChatComposerControlTooltip>
         </div>
       </div>
 
       {attachments.length > 0 && <div className="chat-attachment-list" aria-label="待发送附件">
-        {attachments.map((attachment) => <span className={`chat-attachment-chip ${imageAttachment(attachment) ? 'image' : ''}`} key={attachment.id}>
-          {isPreviewableDocumentPath(attachment.path || attachment.name) && attachment.path && onOpenAttachment ? <button className="chat-attachment-open" type="button" onClick={() => onOpenAttachment(attachment.path!)} disabled={attachmentDisabled} title={`在右侧打开 ${attachment.name}`} aria-label={`在右侧打开附件 ${attachment.name}`}>
-            {imageAttachment(attachment) ? <ChatImageThumbnail attachment={attachment} /> : <AttachmentIcon attachment={attachment} size={13} />}
-            <span><strong>{attachment.name}</strong>{imageAttachment(attachment) && <small>点击查看大图</small>}</span>
-          </button> : <span className="chat-attachment-label" title={attachment.name}>
-            {imageAttachment(attachment) ? <ChatImageThumbnail attachment={attachment} /> : <AttachmentIcon attachment={attachment} size={13} />}
-            <span>{attachment.name}</span>
-          </span>}
-          <button type="button" onClick={() => onAttachmentsChange(attachments.filter((item) => item.id !== attachment.id))} disabled={attachmentDisabled} aria-label={`移除附件 ${attachment.name}`}><X size={12} /></button>
-        </span>)}
+        {attachments.map((attachment) => {
+          const isImage = imageAttachment(attachment)
+          return <span className={`chat-attachment-chip ${isImage ? 'image' : ''}`} key={attachment.id}>
+            {isPreviewableDocumentPath(attachment.path || attachment.name) && attachment.path && onOpenAttachment ? <button className="chat-attachment-open" type="button" onClick={() => onOpenAttachment(attachment.path!)} disabled={attachmentDisabled} title={isImage ? '查看图片' : `在右侧打开 ${attachment.name}`} aria-label={`在右侧打开附件 ${attachment.name}`}>
+              {isImage ? <ChatImageThumbnail attachment={attachment} /> : <AttachmentIcon attachment={attachment} size={13} />}
+              {!isImage && <span><strong>{attachment.name}</strong></span>}
+            </button> : <span className="chat-attachment-label" title={isImage ? undefined : attachment.name}>
+              {isImage ? <ChatImageThumbnail attachment={attachment} /> : <AttachmentIcon attachment={attachment} size={13} />}
+              {!isImage && <span>{attachment.name}</span>}
+            </span>}
+            <button type="button" onClick={() => onAttachmentsChange(attachments.filter((item) => item.id !== attachment.id))} disabled={attachmentDisabled} aria-label={`移除附件 ${attachment.name}`}><X size={12} /></button>
+          </span>
+        })}
       </div>}
     </div>
     {remoteWorkspaceOpen && <RemoteWorkspacePicker initialPath={workspacePath} onClose={() => setRemoteWorkspaceOpen(false)} onSelect={onWorkspaceChange} />}

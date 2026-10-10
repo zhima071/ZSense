@@ -54,6 +54,7 @@ interface WordSelection {
   path: string
   text: string
   blockText: string
+  range: { start: number; end: number } | null
   rangeSelected: boolean
   characterCount: number
   tag: string
@@ -82,9 +83,11 @@ function workspaceRelativePath(workspacePath: string | undefined, filePath: stri
   return normalizedFile.split('/').pop() || normalizedFile
 }
 
-function WordSelectionAI({ selection, document, workspacePath, style, expanded, onExpandedChange, onAskAI }: {
+function WordSelectionAI({ selection, document, baselineHash, sessionRevision, workspacePath, style, expanded, onExpandedChange, onAskAI }: {
   selection: WordSelection
   document: OfficeDocumentState
+  baselineHash: string
+  sessionRevision?: number
   workspacePath?: string
   style: CSSProperties
   expanded: boolean
@@ -101,6 +104,10 @@ function WordSelectionAI({ selection, document, workspacePath, style, expanded, 
       '请读取并编辑当前 Word 文件。',
       `文件（相对于当前会话工作区）：${workspaceRelativePath(workspacePath, document.filePath)}`,
       `选中位置：${selection.path}`,
+      ...(selection.range ? [`字符范围（UTF-16，起点包含、终点不包含）：${selection.range.start}:${selection.range.end}`] : []),
+      `文件基线版本：${document.modifiedAt}`,
+      `原文件 SHA-256：${baselineHash}`,
+      `编辑会话版本：${sessionRevision ?? '请先读取'}`,
       `选中文字：${selection.text}`,
       '',
       `修改要求：${requirement}`,
@@ -150,19 +157,22 @@ function formatSavedTime(value: string) {
 }
 
 function operationKey(operation: OfficeWordOperation) {
-  if (['setText', 'formatText', 'formatParagraph'].includes(operation.action)) return `${operation.action}:${operation.path || ''}`
+  if (['setText', 'formatText', 'formatParagraph'].includes(operation.action)) return `${operation.action}:${operation.path || ''}:${operation.range ? `${operation.range.start}:${operation.range.end}` : 'block'}`
   return ''
 }
 
 function mergeOperation(operations: OfficeWordOperation[], operation: OfficeWordOperation) {
   const key = operationKey(operation)
   if (!key) return [...operations, operation]
-  const index = operations.findIndex((item) => operationKey(item) === key)
-  if (index < 0) return [...operations, operation]
+  // Merge only consecutive operations. Moving an earlier text operation ahead
+  // of a later range-format operation would invalidate that range's offsets.
+  const index = operations.length - 1
+  if (index < 0 || operationKey(operations[index]) !== key) return [...operations, operation]
   const next = [...operations]
   next[index] = {
     ...next[index],
     ...operation,
+    baseText: next[index].baseText ?? operation.baseText,
     options: operation.options ? { ...(next[index].options || {}), ...operation.options } : next[index].options,
   }
   return next
@@ -175,6 +185,24 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
   const historyIndexRef = useRef(0)
   const stageQueueRef = useRef<Promise<void>>(Promise.resolve())
   const latestStageRef = useRef(0)
+  const generationRef = useRef(0)
+  const baselineHashRef = useRef('')
+  const sessionRevisionRef = useRef<number | undefined>()
+  const previewReadyRef = useRef(false)
+  const appliedPreviewRef = useRef(document.previewUrl)
+  const draftAcknowledgmentRef = useRef<(() => void) | null>(null)
+  const savingRef = useRef(false)
+  const lastStagedOperationsRef = useRef('[]')
+  const externalEventSequenceRef = useRef(0)
+  // iframe input is authoritative before its async postMessage reaches React.
+  const frameEditVersionRef = useRef(0)
+  const documentReadyRef = useRef(false)
+  const localDraftRef = useRef(false)
+  const conflictBlockedRef = useRef(false)
+  const pendingExternalPreviewRef = useRef<{ id: string; session: WordDocumentSession; generation: number; sequence: number; editVersion: number } | null>(null)
+  const [previewSrc, setPreviewSrc] = useState(document.previewUrl)
+  const [conflict, setConflict] = useState('')
+  const [conflictBlocked, setConflictBlocked] = useState(false)
   const [selection, setSelection] = useState<WordSelection | null>(null)
   const [selectionAiExpanded, setSelectionAiExpanded] = useState(false)
   const [historyIndex, setHistoryIndex] = useState(0)
@@ -183,6 +211,7 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
   const [busy, setBusy] = useState<'loading' | 'staging' | 'saving' | 'discarding' | ''>('loading')
   const [savedAt, setSavedAt] = useState(document.modifiedAt)
   const [previewReady, setPreviewReady] = useState(false)
+  const [sessionReady, setSessionReady] = useState(false)
   const [zoom, setZoom] = useState(100)
   const [documentStats, setDocumentStats] = useState<WordDocumentStats>({ pageCount: 1, wordCount: 0, characterCount: 0 })
 
@@ -190,26 +219,83 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
     iframeRef.current?.contentWindow?.postMessage({ channel: 'zsense-word-editor-v1', ...message }, '*')
   }, [])
 
+  const preserveConflictedDraft = useCallback((message: string) => {
+    conflictBlockedRef.current = true
+    setConflictBlocked(true)
+    pendingExternalPreviewRef.current = null
+    latestStageRef.current += 1
+    if (!savingRef.current) setBusy('')
+    setConflict(message)
+    if (localDraftRef.current || operationsRef.current.length) onDirtyChange(true)
+  }, [onDirtyChange])
+
+  const adoptExternalSession = useCallback((session: WordDocumentSession) => {
+    sessionRevisionRef.current = session.sessionRevision
+    baselineHashRef.current = session.baseContentHash
+    operationsRef.current = session.operations
+    lastStagedOperationsRef.current = JSON.stringify(session.operations)
+    historyRef.current = [session.operations]; historyIndexRef.current = 0
+    localDraftRef.current = false
+    conflictBlockedRef.current = Boolean(session.conflict)
+    setConflictBlocked(Boolean(session.conflict))
+    appliedPreviewRef.current = session.document.previewUrl
+    setHistoryIndex(0); setHistoryLength(1); setPendingCount(session.pendingCount)
+    setSavedAt(session.modifiedAt); setConflict(session.conflict?.message || '')
+    onDirtyChange(session.dirty)
+    onDocumentChange(session.document)
+  }, [onDirtyChange, onDocumentChange])
+
+  const applyExternalPreview = useCallback((session: WordDocumentSession, generation: number, sequence: number, editVersion: number) => {
+    if (session.previewHtml && previewReadyRef.current) {
+      // Adopt baseline/history only after the iframe confirms this preview was
+      // applied. Native input can otherwise arrive between this read and the
+      // postMessage, leaving visible old text paired with a newer baseline.
+      const id = crypto.randomUUID()
+      pendingExternalPreviewRef.current = { id, session, generation, sequence, editVersion }
+      sendToPreview({ type: 'update-preview', html: session.previewHtml, revision: session.sessionRevision, expectedEditVersion: editVersion, externalPreviewId: id })
+    } else {
+      adoptExternalSession(session)
+      setPreviewSrc(session.document.previewUrl)
+    }
+  }, [adoptExternalSession, sendToPreview])
+
   const stageSnapshot = useCallback((operations: OfficeWordOperation[], message = '') => {
-    if (!window.zsenseDesktop) return
+    if (!window.zsenseDesktop || conflictBlockedRef.current || !documentReadyRef.current) return
     const stageId = ++latestStageRef.current
-    setBusy('staging')
+    const generation = generationRef.current
+    const editVersion = frameEditVersionRef.current
+    if (!savingRef.current) setBusy('staging')
     stageQueueRef.current = stageQueueRef.current.catch(() => undefined).then(async () => {
-      const result = await unwrapDesktop(window.zsenseDesktop!.office.stageWordOperations({ filePath: document.filePath, operations, clientId }))
-      if (stageId === latestStageRef.current && result.document) {
+      if (stageId !== latestStageRef.current || generation !== generationRef.current || conflictBlockedRef.current) return
+      const result = await unwrapDesktop(window.zsenseDesktop!.office.stageWordOperations({ filePath: document.filePath, operations, clientId, expectedContentHash: baselineHashRef.current, expectedRevision: sessionRevisionRef.current }))
+      if (generation !== generationRef.current || conflictBlockedRef.current) return
+      sessionRevisionRef.current = result.revision
+      lastStagedOperationsRef.current = JSON.stringify(operations)
+      if (result.baseContentHash) baselineHashRef.current = result.baseContentHash
+      if (stageId === latestStageRef.current && editVersion === frameEditVersionRef.current && result.document) {
+        const changedPreview = appliedPreviewRef.current !== result.document.previewUrl
+        appliedPreviewRef.current = result.document.previewUrl
+        if (changedPreview && result.previewHtml && previewReadyRef.current) sendToPreview({ type: 'update-preview', html: result.previewHtml, revision: result.revision, expectedEditVersion: editVersion })
+        else if (changedPreview) setPreviewSrc(result.document.previewUrl)
         onDocumentChange(result.document)
         setPendingCount(result.pendingCount)
         onDirtyChange(result.dirty)
+        setConflict(result.conflict?.message || '')
         if (message) onFeedback({ tone: 'success', message })
       }
     }).catch((reason) => {
-      if (stageId === latestStageRef.current) onFeedback({ tone: 'error', message: `Word 修改失败：${errorMessage(reason)}` })
+      if (stageId === latestStageRef.current) {
+        const message = errorMessage(reason)
+        if (/版本|其他程序|外部修改|原文.*变化/.test(message)) preserveConflictedDraft(message)
+        onFeedback({ tone: 'error', message: `Word 修改失败：${message}` })
+      }
     }).finally(() => {
-      if (stageId === latestStageRef.current) setBusy('')
+      if (stageId === latestStageRef.current && !savingRef.current) setBusy('')
     })
-  }, [document.filePath, onDirtyChange, onDocumentChange, onFeedback])
+  }, [document.filePath, onDirtyChange, onDocumentChange, onFeedback, preserveConflictedDraft, sendToPreview])
 
   const commit = useCallback((operation: OfficeWordOperation, message = '') => {
+    localDraftRef.current = true
     const next = mergeOperation(operationsRef.current, operation)
     operationsRef.current = next
     const history = historyRef.current.slice(0, historyIndexRef.current + 1)
@@ -224,6 +310,7 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
   }, [onDirtyChange, stageSnapshot])
 
   const updateDraft = useCallback((operation: OfficeWordOperation) => {
+    localDraftRef.current = true
     const next = mergeOperation(operationsRef.current, operation)
     operationsRef.current = next
     setPendingCount(next.length)
@@ -244,11 +331,36 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
 
   useEffect(() => {
     let cancelled = false
+    generationRef.current += 1
+    latestStageRef.current += 1
+    baselineHashRef.current = ''
+    sessionRevisionRef.current = undefined
+    frameEditVersionRef.current = 0
+    documentReadyRef.current = false
+    localDraftRef.current = false
+    conflictBlockedRef.current = false
+    pendingExternalPreviewRef.current = null
+    setConflictBlocked(false)
+    setSessionReady(false)
+    appliedPreviewRef.current = document.previewUrl
+    previewReadyRef.current = false
+    setPreviewSrc(document.previewUrl)
+    setPreviewReady(false)
+    setSelection(null)
+    setConflict('')
     setBusy('loading')
     unwrapDesktop(window.zsenseDesktop!.office.getWord({ filePath: document.filePath })).then((session: WordDocumentSession) => {
       if (cancelled) return
       const initial = Array.isArray(session.operations) ? session.operations : []
+      baselineHashRef.current = session.baseContentHash
+      sessionRevisionRef.current = session.sessionRevision
+      appliedPreviewRef.current = session.document.previewUrl
+      if (session.document.previewUrl !== document.previewUrl) setPreviewSrc(session.document.previewUrl)
+      setConflict(session.conflict?.message || '')
+      conflictBlockedRef.current = Boolean(session.conflict)
+      setConflictBlocked(Boolean(session.conflict))
       operationsRef.current = initial
+      lastStagedOperationsRef.current = JSON.stringify(initial)
       historyRef.current = [initial]
       historyIndexRef.current = 0
       setHistoryIndex(0)
@@ -257,6 +369,8 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
       setSavedAt(session.modifiedAt)
       onDirtyChange(session.dirty)
       onDocumentChange(session.document)
+      documentReadyRef.current = true
+      setSessionReady(true)
     }).catch((reason) => {
       if (!cancelled) onFeedback({ tone: 'error', message: `Word 编辑器启动失败：${errorMessage(reason)}` })
     }).finally(() => { if (!cancelled) setBusy('') })
@@ -266,12 +380,59 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
   }, [document.filePath])
 
   useEffect(() => {
+    if (document.previewUrl === appliedPreviewRef.current || !window.zsenseDesktop) return
+    let cancelled = false
+    const generation = generationRef.current
+    const editVersion = frameEditVersionRef.current
+    const sequence = ++externalEventSequenceRef.current
+    const stageSequence = latestStageRef.current
+    const hasLocalTyping = () => localDraftRef.current || JSON.stringify(operationsRef.current) !== lastStagedOperationsRef.current
+    const preserveTyping = () => preserveConflictedDraft('文件预览已更新，当前正在输入的草稿仍保留；旧预览不会覆盖你的输入。版本存在冲突，请先复制所需草稿文字，再放弃本地修改并重新打开文档。')
+    if (hasLocalTyping() || savingRef.current || conflictBlockedRef.current) { preserveTyping(); return }
+    unwrapDesktop(window.zsenseDesktop.office.getWord({ filePath: document.filePath })).then((session) => {
+      if (cancelled || generation !== generationRef.current || sequence !== externalEventSequenceRef.current) return
+      if (hasLocalTyping() || savingRef.current || editVersion !== frameEditVersionRef.current || stageSequence !== latestStageRef.current) { preserveTyping(); return }
+      if (session.sessionRevision < (sessionRevisionRef.current || 0)) return
+      applyExternalPreview(session, generation, sequence, editVersion)
+    }).catch((reason) => { if (!cancelled) onFeedback({ tone: 'error', message: `Word 刷新失败：${errorMessage(reason)}` }) })
+    return () => { cancelled = true }
+  }, [applyExternalPreview, document.filePath, document.previewUrl, onFeedback, preserveConflictedDraft])
+
+  useEffect(() => {
+    if (!window.zsenseDesktop?.office.onSessionChanged) return
+    let cancelled = false
+    const generation = generationRef.current
+    const unsubscribe = window.zsenseDesktop.office.onSessionChanged((event) => {
+      if (event.filePath !== document.filePath || event.sourceClientId === clientId || event.revision <= (sessionRevisionRef.current || 0)) return
+      const sequence = ++externalEventSequenceRef.current
+      const editVersion = frameEditVersionRef.current
+      const hasLocalTyping = () => localDraftRef.current || JSON.stringify(operationsRef.current) !== lastStagedOperationsRef.current
+      const preserveTyping = () => {
+        preserveConflictedDraft('AI 或其他编辑器已更新此文件。当前正在输入的草稿仍保留，不会自动覆盖你的输入。版本存在冲突，请先复制所需草稿文字，再放弃本地修改并重新打开文档。')
+      }
+      if (hasLocalTyping() || savingRef.current || conflictBlockedRef.current) { preserveTyping(); return }
+      void (async () => {
+        let session = await unwrapDesktop(window.zsenseDesktop!.office.getWord({ filePath: document.filePath }))
+        if (session.sessionRevision < event.revision) session = await unwrapDesktop(window.zsenseDesktop!.office.getWord({ filePath: document.filePath }))
+        if (cancelled || generation !== generationRef.current || sequence !== externalEventSequenceRef.current) return
+        if (hasLocalTyping() || savingRef.current || editVersion !== frameEditVersionRef.current) { preserveTyping(); return }
+        if (session.sessionRevision < event.revision || session.sessionRevision < (sessionRevisionRef.current || 0)) return
+        if (appliedPreviewRef.current === session.document.previewUrl) adoptExternalSession(session)
+        else applyExternalPreview(session, generation, sequence, editVersion)
+      })().catch((reason) => { if (!cancelled) onFeedback({ tone: 'error', message: `Word 同步失败：${errorMessage(reason)}` }) })
+    })
+    return () => { cancelled = true; unsubscribe() }
+  }, [adoptExternalSession, applyExternalPreview, document.filePath, onFeedback, preserveConflictedDraft])
+
+  useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       const data = event.data || {}
       if (data.channel !== 'zsense-word-editor-v1' || event.source !== iframeRef.current?.contentWindow) return
       if (data.type === 'ready') {
+        frameEditVersionRef.current = 0
+        previewReadyRef.current = true
         setPreviewReady(true)
-        sendToPreview({ type: 'set-editing', editing })
+        sendToPreview({ type: 'set-editing', editing: editing && documentReadyRef.current && !savingRef.current })
         sendToPreview({ type: 'set-zoom', zoom })
         if (selection?.path) sendToPreview({ type: 'focus-path', path: selection.path })
       } else if (data.type === 'document-stats') {
@@ -285,6 +446,7 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
           path: data.path,
           text: String(data.text || ''),
           blockText: String(data.blockText || data.text || ''),
+          range: data.range && Number.isInteger(data.range.start) && Number.isInteger(data.range.end) ? { start: data.range.start, end: data.range.end } : null,
           rangeSelected: Boolean(data.rangeSelected),
           characterCount: Math.max(0, Number(data.characterCount) || 0),
           tag: String(data.tag || ''),
@@ -300,32 +462,58 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
           popupPlacement: data.popupPlacement === 'top' ? 'top' : 'bottom',
         })
       } else if (data.type === 'text-draft' && typeof data.path === 'string') {
+        if (Number.isSafeInteger(data.editVersion)) frameEditVersionRef.current = Math.max(frameEditVersionRef.current, data.editVersion)
         setSelection((current) => {
           if (!current || current.path !== data.path) return current
-          return { ...current, text: String(data.text || ''), blockText: String(data.text || ''), rangeSelected: false, characterCount: 0, rect: null, popupPlacement: 'bottom' }
+          return { ...current, text: String(data.text || ''), blockText: String(data.text || ''), range: null, rangeSelected: false, characterCount: 0, rect: null, popupPlacement: 'bottom' }
         })
-        updateDraft({ action: 'setText', path: data.path, text: String(data.text || '') })
+        updateDraft({ action: 'setText', path: data.path, text: String(data.text || ''), baseText: typeof data.baseText === 'string' ? data.baseText : undefined })
       } else if (data.type === 'text-change' && typeof data.path === 'string') {
-        commit({ action: 'setText', path: data.path, text: String(data.text || '') })
+        if (Number.isSafeInteger(data.editVersion)) frameEditVersionRef.current = Math.max(frameEditVersionRef.current, data.editVersion)
+        commit({ action: 'setText', path: data.path, text: String(data.text || ''), baseText: typeof data.baseText === 'string' ? data.baseText : undefined })
+      } else if (data.type === 'draft-committed') {
+        if (Number.isSafeInteger(data.editVersion)) frameEditVersionRef.current = Math.max(frameEditVersionRef.current, data.editVersion)
+        draftAcknowledgmentRef.current?.()
+      } else if (data.type === 'preview-update-deferred') {
+        if (data.externalPreviewId) preserveConflictedDraft('旧预览晚于新的本地输入到达，已忽略旧预览；当前草稿仍保留，不会自动覆盖你的输入。版本存在冲突，请先复制所需草稿文字，再放弃本地修改并重新打开文档。')
+      } else if (data.type === 'preview-updated' && data.externalPreviewId) {
+        const pending = pendingExternalPreviewRef.current
+        if (!pending || pending.id !== data.externalPreviewId || pending.generation !== generationRef.current || pending.sequence !== externalEventSequenceRef.current) return
+        pendingExternalPreviewRef.current = null
+        if (localDraftRef.current || pending.editVersion !== frameEditVersionRef.current || conflictBlockedRef.current) {
+          preserveConflictedDraft('预览更新与本地输入发生版本冲突；当前草稿仍保留。请先复制所需草稿文字，再放弃本地修改并重新打开文档。')
+        } else adoptExternalSession(pending.session)
+      } else if (data.type === 'preview-reload-required') {
+        const pending = pendingExternalPreviewRef.current
+        if (pending && data.externalPreviewId && pending.id === data.externalPreviewId) {
+          if (localDraftRef.current || pending.editVersion !== frameEditVersionRef.current || conflictBlockedRef.current) {
+            preserveConflictedDraft('预览需要重新加载，但当前草稿仍保留；请先复制所需草稿文字，再放弃本地修改并重新打开文档。')
+            return
+          }
+          pendingExternalPreviewRef.current = null
+          adoptExternalSession(pending.session)
+        }
+        previewReadyRef.current = false
+        setPreviewSrc(appliedPreviewRef.current)
       }
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
-  }, [commit, editing, selection?.path, sendToPreview, updateDraft, zoom])
+  }, [adoptExternalSession, commit, editing, preserveConflictedDraft, selection?.path, sendToPreview, updateDraft, zoom])
 
   useEffect(() => {
-    if (previewReady) sendToPreview({ type: 'set-editing', editing })
+    if (previewReady) sendToPreview({ type: 'set-editing', editing: editing && sessionReady && !savingRef.current })
     if (!editing) setSelection(null)
-  }, [editing, previewReady, sendToPreview])
+  }, [editing, previewReady, sessionReady, sendToPreview])
 
   useEffect(() => {
     if (previewReady) sendToPreview({ type: 'set-zoom', zoom })
   }, [previewReady, sendToPreview, zoom])
 
-  useEffect(() => { setPreviewReady(false) }, [document.previewUrl])
+  useEffect(() => { previewReadyRef.current = false; setPreviewReady(false) }, [previewSrc])
 
   const selectedPath = selection?.path || ''
-  const canFormat = Boolean(editing && selectedPath && !busy)
+  const canFormat = Boolean(editing && selectedPath && !busy && !conflictBlocked)
   const dirty = pendingCount > 0
   const statusText = busy === 'loading' ? '正在启动编辑器…'
     : busy === 'staging' ? '正在生成预览…'
@@ -335,7 +523,7 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
 
   const formatText = (options: Record<string, string | number | boolean>) => {
     if (!selectedPath) return
-    commit({ action: 'formatText', path: selectedPath, options })
+    commit({ action: 'formatText', path: selectedPath, ...(selection?.rangeSelected && selection.range ? { range: selection.range } : {}), options })
   }
   const formatParagraph = (options: Record<string, string | number | boolean>) => {
     if (!selectedPath) return
@@ -343,17 +531,34 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
   }
 
   const save = async () => {
-    if (!window.zsenseDesktop || busy) return
+    if (!window.zsenseDesktop || savingRef.current || (busy && busy !== 'staging')) return
+    if (conflictBlockedRef.current || !documentReadyRef.current) {
+      onFeedback({ tone: 'error', message: 'Word 保存失败：版本存在冲突，当前草稿仍保留；请先复制所需草稿文字，再放弃本地修改并重新打开文档。' })
+      return
+    }
+    savingRef.current = true
     setBusy('saving')
     try {
-      sendToPreview({ type: 'commit-draft' })
-      await new Promise((resolve) => window.setTimeout(resolve, 40))
+      sendToPreview({ type: 'set-editing', editing: false })
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(() => { draftAcknowledgmentRef.current = null; reject(new Error('Word 编辑预览未响应，请重试保存。')) }, 2_000)
+        draftAcknowledgmentRef.current = () => { window.clearTimeout(timer); draftAcknowledgmentRef.current = null; resolve() }
+        sendToPreview({ type: 'commit-draft' })
+      })
       await stageQueueRef.current
+      if (conflictBlockedRef.current) throw new Error('版本存在冲突，当前草稿仍保留，请先放弃本地修改并重新打开文档。')
       if (operationsRef.current.length) {
-        await unwrapDesktop(window.zsenseDesktop.office.stageWordOperations({ filePath: document.filePath, operations: operationsRef.current, clientId }))
+        const staged = await unwrapDesktop(window.zsenseDesktop.office.stageWordOperations({ filePath: document.filePath, operations: operationsRef.current, clientId, expectedContentHash: baselineHashRef.current, expectedRevision: sessionRevisionRef.current }))
+        sessionRevisionRef.current = staged.revision
       }
-      const result = await unwrapDesktop(window.zsenseDesktop.office.saveWord({ filePath: document.filePath, clientId }))
+      const result = await unwrapDesktop(window.zsenseDesktop.office.saveWord({ filePath: document.filePath, clientId, expectedContentHash: baselineHashRef.current, expectedRevision: sessionRevisionRef.current }))
+      if (conflictBlockedRef.current) throw new Error('保存期间文件版本发生变化，当前草稿仍保留，请检查原文件后重新打开文档。')
+      baselineHashRef.current = result.baseContentHash || result.contentHash || baselineHashRef.current
+      sessionRevisionRef.current = result.revision
+      setConflict('')
+      localDraftRef.current = false
       operationsRef.current = []
+      lastStagedOperationsRef.current = '[]'
       historyRef.current = [[]]
       historyIndexRef.current = 0
       setHistoryIndex(0)
@@ -361,11 +566,37 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
       setPendingCount(0)
       setSavedAt(result.savedAt || new Date().toISOString())
       onDirtyChange(false)
-      if (result.document) onDocumentChange(result.document)
+      if (result.document) {
+        const changedPreview = appliedPreviewRef.current !== result.document.previewUrl
+        appliedPreviewRef.current = result.document.previewUrl
+        if (changedPreview && result.previewHtml && previewReadyRef.current) sendToPreview({ type: 'update-preview', html: result.previewHtml, revision: result.revision, expectedEditVersion: frameEditVersionRef.current })
+        else if (changedPreview) setPreviewSrc(result.document.previewUrl)
+        onDocumentChange(result.document)
+      }
       onFeedback({ tone: 'success', message: result.message })
-    } catch (reason) { onFeedback({ tone: 'error', message: `Word 保存失败：${errorMessage(reason)}` }) }
-    finally { setBusy('') }
+    } catch (reason) {
+      const message = errorMessage(reason)
+      if (/版本|其他程序|外部修改|原文.*变化/.test(message)) preserveConflictedDraft(message)
+      onFeedback({ tone: 'error', message: `Word 保存失败：${message}` })
+    }
+    finally { savingRef.current = false; setBusy(''); sendToPreview({ type: 'set-editing', editing }) }
   }
+
+  useEffect(() => {
+    const onShortcut = (event: MessageEvent) => {
+      const data = event.data || {}
+      if (data.channel !== 'zsense-word-editor-v1' || data.type !== 'shortcut' || event.source !== iframeRef.current?.contentWindow || !editing) return
+      if (data.key === 's') { void save(); return }
+      if (busy) return
+      if (data.key === 'z') restoreHistory(historyIndexRef.current + (data.shiftKey ? 1 : -1))
+      else if (data.key === 'y') restoreHistory(historyIndexRef.current + 1)
+      else if (data.key === 'b') formatText({ bold: selection?.style.fontWeight !== '700' })
+      else if (data.key === 'i') formatText({ italic: selection?.style.fontStyle !== 'italic' })
+      else if (data.key === 'u') formatText({ underline: !selection?.style.textDecorationLine?.includes('underline') })
+    }
+    window.addEventListener('message', onShortcut)
+    return () => window.removeEventListener('message', onShortcut)
+  })
 
   const chooseImage = async () => {
     if (!window.zsenseDesktop || busy) return
@@ -418,6 +649,7 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
     : '像 Word 一样单击定位、拖动选择文字并直接输入', [selection])
 
   return <section className={`word-document-editor ${editing ? 'editing' : ''}`} aria-label="Word 可视化编辑器">
+    {conflict && <div className="office-artifact-feedback error" role="alert">{conflict}</div>}
     {editing && <div className="word-editor-chrome">
       <div className="word-editor-titlebar">
         <div className="word-quick-actions" aria-label="快速访问工具栏">
@@ -482,13 +714,13 @@ export function WordDocumentEditor({ document, workspacePath, editing, onDocumen
       {busy === 'loading' && <div className="word-editor-loading"><LoaderCircle className="spin" size={23} /><span>正在建立本地 Word 编辑会话…</span></div>}
       <iframe
         ref={iframeRef}
-        key={document.previewUrl}
-        src={document.previewUrl}
+        key={document.filePath}
+        src={previewSrc}
         sandbox="allow-scripts"
         title={`${document.name} Word 本地预览`}
-        onLoad={() => { setPreviewReady(true); sendToPreview({ type: 'set-editing', editing }); sendToPreview({ type: 'set-zoom', zoom }); if (selection?.path) sendToPreview({ type: 'focus-path', path: selection.path }) }}
+        onLoad={() => { previewReadyRef.current = true; setPreviewReady(true); sendToPreview({ type: 'set-editing', editing: editing && documentReadyRef.current && !savingRef.current }); sendToPreview({ type: 'set-zoom', zoom }) }}
       />
-      {editing && selection?.rangeSelected && selection.rect && onAskAI && <WordSelectionAI key={`${selection.path}:${selection.text}`} selection={selection} document={document} workspacePath={workspacePath} style={selectionAiStyle} expanded={selectionAiExpanded} onExpandedChange={setSelectionAiExpanded} onAskAI={onAskAI} />}
+      {editing && selection?.rangeSelected && selection.rect && onAskAI && <WordSelectionAI key={`${selection.path}:${selection.text}`} selection={selection} document={document} baselineHash={baselineHashRef.current} sessionRevision={sessionRevisionRef.current} workspacePath={workspacePath} style={selectionAiStyle} expanded={selectionAiExpanded} onExpandedChange={setSelectionAiExpanded} onAskAI={onAskAI} />}
     </div>
 
     <footer className="word-editor-statusbar">

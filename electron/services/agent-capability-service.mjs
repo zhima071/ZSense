@@ -5,6 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { validatedPublicUrl } from './network-safety.mjs'
 import { SubagentService } from './subagent-service.mjs'
+import { agentWriteLocks } from './agent-write-locks.mjs'
+import { createMemoryScope, normalizeMemoryScope } from './memory-scope.mjs'
+import { unsafeAutomaticMemory } from './memory-intelligence.mjs'
 
 const MAX_PROCESS_OUTPUT = 1_000_000
 const MAX_RETAINED_COMPLETED_PROCESSES = 24
@@ -289,19 +292,28 @@ class ManagedProcesses {
 
   #record(child, command, cwd) {
     const id = `process-${Date.now()}-${randomUUID().slice(0, 6)}`
-    const record = { id, command, cwd, pid: child.pid || 0, status: 'running', startedAt: new Date().toISOString(), finishedAt: '', exitCode: null, stdout: '', stderr: '', child }
+    let finishTree
+    const record = { id, command, cwd, pid: child.pid || 0, status: 'running', startedAt: new Date().toISOString(), finishedAt: '', exitCode: null, stdout: '', stderr: '', child, treeCompletion: new Promise((resolve) => { finishTree = resolve }) }
     const append = (key, chunk) => { record[key] = clipped(`${record[key]}${chunk}`, MAX_PROCESS_OUTPUT) }
     child.stdout?.on('data', (chunk) => append('stdout', chunk))
     child.stderr?.on('data', (chunk) => append('stderr', chunk))
-    child.on('error', (error) => { record.status = 'failed'; append('stderr', error.message); record.finishedAt = new Date().toISOString() })
+    child.on('error', (error) => { append('stderr', error.message) })
     child.on('close', (code, signal) => {
-      record.status = signal ? 'terminated' : code === 0 ? 'completed' : 'failed'
       record.exitCode = code
       record.signal = signal || ''
-      record.finishedAt = new Date().toISOString()
-      // 子进程对象携带事件监听器和管道，完成后不应被历史记录永久持有。
-      record.child = null
-      this.#pruneCompleted()
+      const settle = () => {
+        // Unix commands live in a dedicated group: shell exit is not completion while an owned descendant is alive.
+        if (process.platform !== 'win32' && record.pid) {
+          try { process.kill(-record.pid, 0); setTimeout(settle, 25).unref?.(); return }
+          catch (error) { if (error.code === 'EPERM') { setTimeout(settle, 25).unref?.(); return } }
+        }
+        record.status = signal || record.terminateRequested ? 'terminated' : code === 0 ? 'completed' : 'failed'
+        record.finishedAt = new Date().toISOString()
+        record.child = null
+        this.#pruneCompleted()
+        finishTree()
+      }
+      settle()
     })
     this.processes.set(id, record)
     return record
@@ -310,7 +322,7 @@ class ManagedProcesses {
   start(command, cwd) {
     const child = process.platform === 'win32'
       ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { cwd, env: cleanEnvironment(this.environment), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-      : spawn('/bin/zsh', ['-lc', command], { cwd, env: cleanEnvironment(this.environment), stdio: ['pipe', 'pipe', 'pipe'] })
+      : spawn('/bin/zsh', ['-lc', command], { cwd, env: cleanEnvironment(this.environment), detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
     return this.#record(child, command, cwd)
   }
 
@@ -328,16 +340,13 @@ class ManagedProcesses {
 
   async wait(record, timeoutMs) {
     if (record.status !== 'running') return this.public(record)
-    const child = record.child
-    if (!child) return this.public(record)
     await new Promise((resolve) => {
       let timer
       const done = () => {
         if (timer) clearTimeout(timer)
-        child.off('close', done)
         resolve()
       }
-      child.once('close', done)
+      record.treeCompletion.then(done)
       timer = setTimeout(done, Math.max(250, Math.min(300_000, timeoutMs || 30_000)))
       timer.unref?.()
     })
@@ -345,7 +354,29 @@ class ManagedProcesses {
   }
 
   shutdown() {
-    for (const record of this.processes.values()) if (record.status === 'running') record.child?.kill('SIGTERM')
+    for (const record of this.processes.values()) if (record.status === 'running') this.terminate(record, true)
+  }
+
+  terminate(record, force = false) {
+    if (record.status !== 'running' || !record.pid) return
+    record.terminateRequested = true
+    const stop = (forced) => {
+      if (record.status !== 'running') return
+      if (process.platform === 'win32') {
+        // Never target an unvalidated broad process name. /T addresses only this managed PID's descendants.
+        if (!record.child || record.child.pid !== record.pid || record.child.exitCode !== null) return
+        const killer = spawn('taskkill.exe', ['/PID', String(record.pid), '/T', ...(forced ? ['/F'] : [])], { windowsHide: true, stdio: 'ignore' })
+        killer.on('error', () => { try { record.child?.kill(forced ? 'SIGKILL' : 'SIGTERM') } catch { /* Already closed. */ } })
+      } else {
+        try { process.kill(-record.pid, forced ? 'SIGKILL' : 'SIGTERM') } catch { /* Owned group already ended. */ }
+      }
+    }
+    stop(force)
+    if (!force) {
+      const escalation = setTimeout(() => stop(true), 750)
+      escalation.unref?.()
+      record.treeCompletion.then(() => clearTimeout(escalation))
+    }
   }
 }
 
@@ -462,7 +493,7 @@ export class AgentCapabilityService {
       }, 'read'),
       tool('run_task_on_device', '把一段任务交给已配对设备执行，并返回对方的执行结果（对方的 ZSense 会在本机完成，结果原样返回）。适合让另一台机器查文件、跑脚本、读配置。需要对方开启了“允许对方在本机执行任务”，且每次都会请求本机用户确认。', 'devices', { required: ['deviceId', 'prompt'], properties: { deviceId: { type: 'string' }, prompt: { type: 'string', description: '要对方执行的任务，写清目标和想要的结果' }, timeoutMs: { type: 'integer', minimum: 10000, maximum: 600000 } } }, 'write'),
       tool('pair_device', '在局域网按 IP 连接另一台 ZSense。必须由用户提供对方屏幕上显示的完整安全配对码（6 位数字-16 位身份码），端口可省略时使用 39072。', 'devices', { required: ['address', 'code'], properties: { address: { type: 'string', description: '对方设备的局域网地址，例如 192.168.3.5' }, port: { type: 'integer', minimum: 1, maximum: 65535 }, code: { type: 'string', description: '对方设备屏幕上的完整安全配对码，格式 123456-A1B2C3D4E5F60718' } } }, 'write'),
-      tool('delegate_task', '把边界清晰、可独立完成的子任务交给子 Agent；同一轮里可以一次发起多个 delegate_task，它们会并行执行（默认最多 3 个同时运行，每个父级最多 4 个子任务），适合把多文件、多数据源这类互不依赖的工作并行拆开。子 Agent 可继续建立下级任务树，并与当前任务树中的其他 Agent 交换追加消息。', 'delegate', { required: ['task'], properties: { title: { type: 'string' }, task: { type: 'string' } } }, 'write'),
+      tool('delegate_task', '把边界清晰、可独立完成的子任务交给子 Agent；同一轮里可以一次发起多个 delegate_task，它们会并行执行（默认最多 5 个同时运行，每个父级最多 5 个子任务），适合把多文件、多数据源这类互不依赖的工作并行拆开。子 Agent 可继续建立下级任务树，并与当前任务树中的其他 Agent 交换追加消息。', 'delegate', { required: ['task'], properties: { title: { type: 'string' }, task: { type: 'string' } } }, 'write'),
       tool('delegate_status', '查询当前会话的子 Agent 任务树、消息和结果，或等待指定任务发生状态变化。', 'delegate', { properties: { taskId: { type: 'string' }, waitMs: { type: 'integer', minimum: 0, maximum: 60000 } } }),
       tool('delegate_message', '向当前任务树中的父级、子级或同级 Agent 发送追加消息；目标正在运行时会进入它的运行中追加指令通道。', 'delegate', { required: ['message'], properties: { taskId: { type: 'string', description: '目标任务 ID；省略时发送给当前子 Agent 的父级' }, message: { type: 'string', maxLength: 8000 } } }, 'write'),
       tool('delegate_cancel', '取消当前会话中仍在排队或运行的子 Agent 任务。', 'delegate', { required: ['taskId'], properties: { taskId: { type: 'string' } } }, 'write'),
@@ -965,11 +996,14 @@ export class AgentCapabilityService {
   activeState(context) {
     const state = this.state()
     const scope = this.scope(context)
+    const conversationId = String(context.conversationId || '')
+    // 会话提示只注入自己的临时任务；未归属的旧状态保留在全局列表/后台，不自动挂到新分支。
+    const ownsConversation = (item) => !conversationId || String(item.conversationId || '') === conversationId
     return {
-      todos: state.todos?.[scope] || [],
-      goals: (state.goals?.[scope] || []).filter((item) => item.status === 'active'),
-      loops: (state.loops || []).filter((item) => item.scope === scope && item.enabled),
-      heartbeats: (state.heartbeats || []).filter((item) => item.scope === scope && item.enabled),
+      todos: (state.todos?.[scope] || []).filter(ownsConversation),
+      goals: (state.goals?.[scope] || []).filter((item) => item.status === 'active' && ownsConversation(item)),
+      loops: (state.loops || []).filter((item) => item.scope === scope && item.enabled && ownsConversation(item)),
+      heartbeats: (state.heartbeats || []).filter((item) => item.scope === scope && item.enabled && ownsConversation(item)),
     }
   }
 
@@ -1068,6 +1102,7 @@ export class AgentCapabilityService {
   }
 
   async requestApproval(context, { category, label, question, operationKey = '' }) {
+    context.signal?.throwIfAborted()
     const workspaceRoot = path.resolve(context.workspaceRoot || this.rootPath)
     const normalizedCategory = String(category || 'sensitive-operation').slice(0, 180)
     const normalizedLabel = String(label || normalizedCategory).slice(0, 180)
@@ -1092,6 +1127,7 @@ export class AgentCapabilityService {
     // 回退到人工时必须把原因一并带出去：否则用户只看到弹窗，不知道自动审批为什么没生效。
     const autoApprovalAvailable = typeof context?.autoApprover === 'function'
     const autoDecision = await this.#autoApprove(context, { category: normalizedCategory, label: normalizedLabel, question, operationKey })
+    context.signal?.throwIfAborted()
     if (autoDecision) {
       this.#recordAutoApproval(context, { category: normalizedCategory, label: normalizedLabel, question, operationKey, decision: autoDecision })
       if (autoDecision.allow) {
@@ -1108,6 +1144,7 @@ export class AgentCapabilityService {
 
     if (typeof context.ask !== 'function') throw new Error('当前入口无法显示审批界面，操作已拒绝。')
     const answer = await context.ask(question, ['仅允许这一次 (Recommended)', '始终允许此类操作', '拒绝'], { kind: 'approval', category: normalizedCategory, label: normalizedLabel, autoApproval: autoFallback })
+    context.signal?.throwIfAborted()
     if (answer === '仅允许这一次' || answer === '允许执行一次') {
       turnGrants.add(turnKey)
       this.sessionApprovals.set(requestId, turnGrants)
@@ -1210,7 +1247,56 @@ export class AgentCapabilityService {
     return scoped ? collection.filter((item) => item.scope === scope) : collection
   }
 
+  toolWriteResources(name, args = {}, context = {}) {
+    if (['write_file', 'patch_file', 'delete_path', 'make_directory'].includes(name)) return [path.resolve(context.workspaceRoot, String(args.path || '.'))]
+    if (['copy_file', 'move_file'].includes(name)) return [path.resolve(context.workspaceRoot, String(args.source || '.')), path.resolve(context.workspaceRoot, String(args.destination || '.'))]
+    if (name === 'terminal') {
+      const risk = commandRisk(args.command, context.workspaceRoot, { unrestricted: this.unrestrictedAccess() })
+      const trustedRead = risk.category === 'terminal:read' && !risk.mutating
+        && !/\b(?:-exec|-execdir|-delete|--pre|--pre-glob|--ext-diff|--textconv|--output)\b|\bgit\s+branch\s+(?!$)|\bsed\b/i.test(String(args.command || ''))
+      return trustedRead ? [] : ['*']
+    }
+    // Waiting, messaging and cancelling an Agent must never hold a file lock needed by that Agent.
+    if (name.startsWith('delegate_')) return []
+    if (name === 'process_manage') {
+      if (args.action !== 'write') return []
+      return this.processes.get(args.processId).writeLease ? [] : ['*']
+    }
+    if (name === 'checkpoint_manage') return args.action === 'list' ? [] : [path.resolve(context.workspaceRoot)]
+    const entry = this.tools.find((candidate) => candidate.name === name)
+    // Opaque commands/MCP/browser/computer mutations have no trustworthy complete path list.
+    return entry?.risk === 'read' ? [] : ['*']
+  }
+
   async execute(name, args = {}, context = {}) {
+    const release = await agentWriteLocks.acquire(this.toolWriteResources(name, args, context), { signal: context.signal, workspaceRoot: context.workspaceRoot })
+    let retained = false
+    try {
+      if (context.signal?.aborted) throw context.signal.reason || new Error('工具执行已取消。')
+      const result = await this.#executeUnlocked(name, args, context)
+      // A timeout/background response is not process completion. Keep the opaque writer lease until close.
+      if (name === 'terminal' && result?.status === 'running') {
+        const record = this.processes.get(result.id)
+        const child = record.child
+        if (child && record.status === 'running') {
+          retained = true
+          record.writeLease = true
+          const abort = () => this.processes.terminate(record)
+          const finish = () => {
+            record.writeLease = false
+            context.signal?.removeEventListener('abort', abort)
+            release()
+          }
+          record.treeCompletion.then(finish)
+          context.signal?.addEventListener('abort', abort, { once: true })
+          if (context.signal?.aborted) abort()
+        }
+      }
+      return result
+    } finally { if (!retained) release() }
+  }
+
+  async #executeUnlocked(name, args = {}, context = {}) {
     if (!this.definitions(context).some((entry) => entry.name === name)) throw new Error(`工具集已停用或工具不存在：${name}`)
     const unrestricted = this.unrestrictedAccess()
     const workspaceRoot = path.resolve(context.workspaceRoot)
@@ -1261,6 +1347,7 @@ export class AgentCapabilityService {
       const existed = fs.existsSync(target)
       if (existed && !fs.statSync(target).isFile()) throw new Error('写入目标不是文件。')
       await approveExternalWrite(target, existed ? '覆盖文件' : '创建文件')
+      context.signal?.throwIfAborted()
       const checkpoint = existed && !outsideWorkspace(target) ? this.checkpoints.create(context.workspaceRoot, `覆盖 ${args.path} 前`) : null
       fs.mkdirSync(path.dirname(target), { recursive: true })
       const temporary = `${target}.zsense-${process.pid}-${randomUUID()}.tmp`
@@ -1277,6 +1364,7 @@ export class AgentCapabilityService {
       if (!count) throw new Error('文件中没有找到完全一致的 oldText。')
       if (count > 1 && !args.replaceAll) throw new Error(`oldText 在文件中出现 ${count} 次，请提供更完整的上下文或明确 replaceAll。`)
       await approveExternalWrite(target, '修改文件')
+      context.signal?.throwIfAborted()
       const checkpoint = outsideWorkspace(target) ? null : this.checkpoints.create(context.workspaceRoot, `修改 ${args.path} 前`)
       const next = args.replaceAll ? source.split(oldText).join(String(args.newText ?? '')) : source.replace(oldText, String(args.newText ?? ''))
       const temporary = `${target}.zsense-${process.pid}-${randomUUID()}.tmp`
@@ -1319,6 +1407,7 @@ export class AgentCapabilityService {
       if (fs.existsSync(destination) && !args.overwrite) throw new Error('目标已经存在；如确定覆盖，请设置 overwrite。')
       if (outsideWorkspace(destination)) await approveExternalWrite(destination, name === 'move_file' ? '移动文件' : '复制文件')
       else if (name === 'move_file' && outsideWorkspace(source)) await approveExternalWrite(source, '移动工作区外文件')
+      context.signal?.throwIfAborted()
       const checkpoint = outsideWorkspace(source) || outsideWorkspace(destination) ? null : this.checkpoints.create(context.workspaceRoot, `${name === 'move_file' ? '移动' : '复制'} ${args.source} 前`)
       fs.mkdirSync(path.dirname(destination), { recursive: true })
       if (fs.existsSync(destination)) fs.rmSync(destination, { recursive: true, force: true })
@@ -1344,6 +1433,7 @@ export class AgentCapabilityService {
     if (name === 'make_directory') {
       const target = resolvePath(args.path, { mustExist: false })
       await approveExternalWrite(target, '创建文件夹')
+      context.signal?.throwIfAborted()
       fs.mkdirSync(target, { recursive: true })
       return { path: args.path, created: true }
     }
@@ -1363,8 +1453,14 @@ export class AgentCapabilityService {
         checkpoint = this.checkpoints.create(context.workspaceRoot, `执行终端命令前：${String(args.command).slice(0, 80)}`)
       }
       const record = this.processes.start(String(args.command), context.workspaceRoot)
+      const child = record.child
+      const abortProcess = () => this.processes.terminate(record)
+      context.signal?.addEventListener('abort', abortProcess, { once: true })
+      record.treeCompletion.then(() => context.signal?.removeEventListener('abort', abortProcess))
+      if (context.signal?.aborted) abortProcess()
       if (args.background) return { ...this.processes.public(record), checkpointId: checkpoint?.id || '' }
       const result = await this.processes.wait(record, Number(args.timeoutMs) || 120_000)
+      context.signal?.throwIfAborted()
       if (result.status === 'running') return { ...result, message: '命令仍在运行，可使用 process_manage 继续等待或终止。', checkpointId: checkpoint?.id || '' }
       return { ...result, checkpointId: checkpoint?.id || '' }
     }
@@ -1374,7 +1470,7 @@ export class AgentCapabilityService {
       if (args.action === 'poll') return this.processes.public(record)
       if (args.action === 'wait') return this.processes.wait(record, Number(args.timeoutMs) || 30_000)
       if (args.action === 'write') { await this.#approval(context, { category: 'terminal:process-input', label: '向后台进程发送输入', operationKey: record.id, question: `即将向后台进程 ${record.id} 写入内容。` }); if (record.status !== 'running') throw new Error('进程已经结束。'); record.child.stdin?.write(String(args.input || '')); return this.processes.public(record) }
-      if (args.action === 'kill') { await this.#approval(context, { category: 'terminal:process-control', label: '终止后台进程', operationKey: record.id, question: `即将终止后台进程 ${record.id}（PID ${record.pid}）。` }); record.child.kill('SIGTERM'); return this.processes.public(record) }
+      if (args.action === 'kill') { await this.#approval(context, { category: 'terminal:process-control', label: '终止后台进程', operationKey: record.id, question: `即将终止后台进程 ${record.id}（PID ${record.pid}）。` }); this.processes.terminate(record); return this.processes.public(record) }
     }
     if (name === 'web_extract') return safeWebExtract(args.url, { signal: context.signal, maximum: args.maximumCharacters, unrestricted })
     const browserKey = context.conversationId || context.requestId || this.scope(context)
@@ -1447,23 +1543,24 @@ export class AgentCapabilityService {
       if (args.action === 'restore') { await this.#approval(context, { category: 'workspace:restore', label: '恢复工作区回滚点', operationKey: String(args.id), question: `恢复回滚点 ${args.id} 会覆盖当前工作区文件，并移除回滚点之后新建的文件。` }); return this.checkpoints.restore(args.id, context.workspaceRoot) }
     }
     if (name === 'session_search') return this.#searchSessions(context, args)
-    if (name === 'memory_search') return this.database.memoryService.searchMemories(this.scope(context), args.query, args.limit)
+    const memoryScope = context.memoryScope ? normalizeMemoryScope(context.memoryScope) : createMemoryScope({workspacePath:context.workspaceRoot || ''})
+    if (name === 'memory_search') return this.database.memoryService.searchMemories(this.scope(context), args.query, args.limit,memoryScope)
     if (name === 'office_knowledge_search') return this.officeTaskService.search({ botId: this.scope(context), query: String(args.query || ''), limit: args.limit })
-    if (name === 'memory_list') return this.database.listMemories(this.scope(context)).slice(0, Math.max(1, Math.min(500, Number(args.limit) || 100)))
+    if (name === 'memory_list') return this.database.listMemories(this.scope(context),memoryScope).slice(0, Math.max(1, Math.min(500, Number(args.limit) || 100)))
     if (name === 'memory_create') {
       const title = String(args.title || '').replace(/\s+/g, ' ').trim().slice(0, 200)
       const excerpt = String(args.excerpt || '').trim().slice(0, 20_000)
       const allowedTypes = new Set(['fact', 'preference', 'episode'])
       if (!title || !excerpt || !allowedTypes.has(args.type)) throw new Error('长期记忆必须包含标题、内容和有效类型。')
-      if (sensitiveMemoryContent(`${title}\n${excerpt}\n${String(args.evidence || '')}`)) throw new Error('长期记忆不能保存密码、密钥、Token、验证码或其他敏感凭证。')
+      if (unsafeAutomaticMemory(`${title}\n${excerpt}\n${String(args.evidence || '')}`) || sensitiveMemoryContent(`${title}\n${excerpt}\n${String(args.evidence || '')}`)) throw new Error('长期记忆不能保存密码、密钥、Token、验证码或其他敏感凭证。')
       const now = new Date().toISOString()
-      const memory = { id: `memory-${randomUUID()}`, title, excerpt, type: args.type, updatedAt: now, source: 'ZSense Agent 手动记忆', confidence: 1, evidence: String(args.evidence || '').trim().slice(0, 1_000), conversationId: context.conversationId || '', createdAt: now }
+      const memory = { ...memoryScope, projectKey:'',id: `memory-${randomUUID()}`, title, excerpt, type: args.type, updatedAt: now, source: 'ZSense Agent 手动记忆',locked:true, confidence: 1, evidence: String(args.evidence || '').trim().slice(0, 1_000), conversationId: context.conversationId || '', createdAt: now }
       await this.database.memoryService.createMemory(this.scope(context), memory)
       return this.database.getMemory(this.scope(context), memory.id)
     }
     if (name === 'memory_update') {
       const scope = this.scope(context)
-      const current = this.database.getMemory(scope, String(args.id || ''))
+      const current = this.database.getMemory(scope, String(args.id || ''),memoryScope)
       if (!current) throw new Error('记忆不存在或不属于当前独立空间。')
       const allowedTypes = new Set(['fact', 'preference', 'episode'])
       const title = (args.title == null ? current.title : String(args.title)).replace(/\s+/g, ' ').trim().slice(0, 200)
@@ -1471,14 +1568,14 @@ export class AgentCapabilityService {
       const type = args.type == null ? current.type : args.type
       const evidence = args.evidence == null ? current.evidence || '' : String(args.evidence).trim().slice(0, 1_000)
       if (!title || !excerpt || !allowedTypes.has(type)) throw new Error('修改后的长期记忆必须包含标题、内容和有效类型。')
-      if (sensitiveMemoryContent(`${title}\n${excerpt}\n${evidence}`)) throw new Error('长期记忆不能保存密码、密钥、Token、验证码或其他敏感凭证。')
-      const memory = { ...current, title, excerpt, type, evidence, updatedAt: new Date().toISOString(), source: 'ZSense Agent 手动记忆' }
+      if (unsafeAutomaticMemory(`${title}\n${excerpt}\n${evidence}`) || sensitiveMemoryContent(`${title}\n${excerpt}\n${evidence}`)) throw new Error('长期记忆不能保存密码、密钥、Token、验证码或其他敏感凭证。')
+      const memory = { ...current, title, excerpt, type, evidence,locked:true, updatedAt: new Date().toISOString(), source: 'ZSense Agent 手动记忆' }
       await this.database.memoryService.updateMemory(scope, memory)
       return this.database.getMemory(scope, memory.id)
     }
     if (name === 'memory_delete') {
       const scope = this.scope(context)
-      const memory = this.database.getMemory(scope, String(args.id || ''))
+      const memory = this.database.getMemory(scope, String(args.id || ''),memoryScope)
       if (!memory) throw new Error('记忆不存在或不属于当前独立空间。')
       await this.#approval(context, { category: 'memory:delete', label: '删除长期记忆', operationKey: memory.id, question: `即将从当前独立记忆空间删除“${memory.title}”。删除后不能从记忆管理中恢复。` })
       await this.database.memoryService.deleteMemory(scope, memory.id)
@@ -1517,7 +1614,7 @@ export class AgentCapabilityService {
     }
     if (name === 'todo_manage') {
       if (args.action === 'add' && !String(args.title || '').trim()) throw new Error('新增 Todo 时必须提供标题。')
-      return this.#updateCollection(context, 'todos', args.action, args, () => ({ id: `todo-${randomUUID().slice(0, 8)}`, title: String(args.title || '').slice(0, 240), detail: String(args.detail || '').slice(0, 4000), status: args.status || 'pending', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }))
+      return this.#updateCollection(context, 'todos', args.action, args, () => ({ id: `todo-${randomUUID().slice(0, 8)}`, conversationId: context.conversationId || '', title: String(args.title || '').slice(0, 240), detail: String(args.detail || '').slice(0, 4000), status: args.status || 'pending', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }))
     }
     if (name === 'goal_manage') {
       if (args.action === 'create' && !String(args.objective || '').trim()) throw new Error('创建 Goal 时必须提供目标内容。')

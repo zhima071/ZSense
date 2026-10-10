@@ -55,14 +55,15 @@ for (const obsolete of ['ZSENSE_HERMES_VERSION', 'hermes-runtime', 'Hermes Agent
 }
 assert(!workflow.includes('runtime-bundles'), 'Windows 构建仍在下载或发布外部 Runtime')
 assert(!workflow.includes('prepare-hermes-runtime-source'), 'Windows 构建仍在准备外部 Runtime')
-assert(workflow.includes('npm run test:independence'))
 assert(workflow.includes('npm run tools:prepare:win'))
-assert(workflow.includes('npm run test:windows-tools'))
-assert(workflow.includes('npm run test:office'))
+for (const check of ['test:independence', 'test:windows-tools', 'test:office']) {
+  assert(workflow.includes(`'${check}'`), `Windows 构建缺少 ${check} 检查`)
+}
+assert(workflow.includes('if ($LASTEXITCODE -ne 0) { throw'), 'Windows 构建没有在检查失败时立即终止')
 assert(workflow.includes('npm run desktop:build:win'))
 assert(desktopBuild.includes("run('scripts/verify-windows-offline-tools.mjs')"), 'Windows 构建没有强制执行完整离线资源检查')
 assert(windowsPrepare.includes("safeCopy(archives.get('cloudflared'), path.join(windowsBundleRoot, 'cloudflared.exe'))"), 'Windows 离线准备没有把校验后的 cloudflared 写入安装资源')
-for (const requiredFile of ['officecli.exe', 'dws.exe', 'kdocs-cli.exe', 'whisper-cli.exe', 'ggml-base.bin', 'VC_redist.x64.exe']) {
+for (const requiredFile of ['officecli.exe', 'dws.exe', 'kdocs-cli.exe', 'whisper-cli.exe', 'ggml-base-q5_1.bin', 'VC_redist.x64.exe']) {
   assert(windowsAssets.includes(`'${requiredFile}'`) || windowsAssets.includes(`/${requiredFile}`), `Windows 完整资源定义缺少：${requiredFile}`)
 }
 

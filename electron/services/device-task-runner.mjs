@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { NATIVE_BOT_ID } from './database.mjs'
+import { createMemoryScope } from './memory-scope.mjs'
 
 const MAX_PROMPT_CHARACTERS = 8_000
 const DEFAULT_TIMEOUT_MS = 5 * 60_000
@@ -84,10 +85,12 @@ export class DeviceTaskRunner {
     const peerName = cleanText(peer.name, 80) || '已配对设备'
     const bot = workspace.bots.find((item) => item.id === NATIVE_BOT_ID) || null
     const settings = workspace.settings
+    const memoryScope = createMemoryScope({channel:'peer',peerId:peerDeviceId,workspacePath})
     const memories = settings.memoryRecallLimit
       ? (await this.database.memoryService.recallMemories(NATIVE_BOT_ID, message, {
+        ...memoryScope,
         limit: settings.memoryRecallLimit,
-        characterBudget: Math.max(8_000, Math.min(24_000, Number(settings.memoryRecallLimit || 24) * 600)),
+        characterBudget: 5_000,
       })).memories
       : []
     // 远程请求只能带显式授予本机对话空间的技能，不能继承其它 Bot 的私有技能。
@@ -135,6 +138,7 @@ export class DeviceTaskRunner {
         runtimeSessionId: '',
         skills,
         memories,
+        memoryScope,
         settings,
         approvalHandler,
         appContext: {

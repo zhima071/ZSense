@@ -1,10 +1,11 @@
-import { AlertTriangle, ArrowUp, Globe2, LoaderCircle, Paintbrush, Settings2, Sparkles, Square } from 'lucide-react'
+import { AlertTriangle, Globe2, LoaderCircle, Paintbrush, Settings2, Sparkles } from 'lucide-react'
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { errorMessage, unwrapDesktop } from '../services/desktop'
 import { mergeChatAttachments, useChatAttachmentDrop, useChatAttachmentPaste } from '../services/chat-attachments'
-import { chatComposerDraftKey, moveChatComposerDraft, useChatComposerDraft } from '../services/chat-composer-drafts'
-import { chatRunKey, getChatRun, insertSteeringTranscript, moveChatRun, removeChatRun, setChatRun, updateChatRun, useChatRun, type ChatTranscriptItem } from '../services/chat-run-store'
+import { chatComposerDraftKey, insertChatDictation, moveChatComposerDraft, useChatComposerDraft } from '../services/chat-composer-drafts'
+import { chatRunKey, settleOrchestrationSnapshot, getChatRun, insertSteeringTranscript, moveChatRun, removeChatRun, setChatRun, updateChatRun, useChatRun, type ChatTranscriptItem } from '../services/chat-run-store'
 import { isCanvasDocumentPath } from '../services/office-artifacts'
+import { registerOfficeNavigationGuard } from '../services/office-navigation-guard'
 import type { AgentLoopStep, AppSettings, Bot, ChatAttachment, ChatClarification, ChatClarificationAnswer, ChatResult, ChatStreamEvent, ChatToolEvent, ChatUsage, Conversation, ModelConfiguration, ModelProvider, ReasoningEffort, RuntimeStatus, Skill, VoiceChatRequest } from '../types'
 import { AgentLoopPanel, AgentLoopTrigger, mergeAgentLoopEvent } from './AgentLoopPanel'
 import { createStreamDeltaBuffer } from '../utils/stream-delta-buffer'
@@ -13,13 +14,16 @@ import { ChatClarificationCard } from './ChatClarificationCard'
 import { ChatComposerToolbar, ChatMessageAttachments } from './ChatComposerToolbar'
 import { ChatComposerResizeHandle } from './ChatComposerResizeHandle'
 import { ChatScrollToBottomButton } from './ChatScrollToBottomButton'
+import { ChatSendActions } from './ChatSendActions'
+import { ChatDictationButton } from './ChatDictationButton'
 import { ChatMessageMeta, createChatQuote } from './ChatMessageMeta'
+import { AgentTaskPlanCard } from './AgentTaskPlanCard'
 import { mergeChatToolEvent } from './ChatToolCalls'
 import { ConversationIdButton } from './ConversationIdButton'
 import { ConversationJumpNav, conversationMessageAnchor } from './ConversationJumpNav'
 import { ZSenseCanvasPane } from './ZSenseCanvasPane'
 import { MarkdownMessage } from './MarkdownMessage'
-import { OfficeArtifactPane } from './OfficeArtifactPane'
+import { OfficeArtifactPane, type OfficeArtifactPaneHandle } from './OfficeArtifactPane'
 import { useDisplaySettings } from './DisplaySettingsContext'
 import { SlashCommandMenu, type SlashCommandItem } from './SlashCommandMenu'
 import { createSlashCommandCatalog, delegatedBotNameFor, findSlashParent, matchingSlashCommands, resolveSlashSubmission } from './slash-command-catalog'
@@ -45,6 +49,8 @@ interface NativeChatPageProps {
   onPickWorkspace: () => Promise<string>
   onSaveWorkspace: (conversationId: string, workspacePath: string) => Promise<void>
   onDeleteMessage: (conversationId: string, messageId: string) => Promise<void>
+  onBookmarkMessage: (conversationId: string, messageId: string, bookmarked: boolean) => Promise<void>
+  onForkMessage: (conversationId: string, messageId: string) => Promise<void>
   onCancel: (requestId: string) => Promise<void>
   onClarify: (requestId: string, clarificationRequestId: string, answers: ChatClarificationAnswer[]) => Promise<void>
   onConversationChange: (conversationId?: string) => void
@@ -67,6 +73,7 @@ function transcript(conversation: Conversation | undefined, defaultModelConfigur
     createdAt: message.createdAt,
     reasoning: message.reasoning,
     agentSteps: message.agentSteps,
+    orchestration: message.agentSteps?.find((step) => step.orchestration)?.orchestration,
     tools: message.toolEvents,
     attachments: message.attachments,
     modelProvider: message.role === 'assistant' ? (message.modelProvider || fallbackProvider) : '',
@@ -77,9 +84,16 @@ function transcript(conversation: Conversation | undefined, defaultModelConfigur
   }))
 }
 
-export function NativeChatPage({ conversations, bots, skills, activeConversationId, resetToken, draftRequest, runtime, savedModelConfigurations, defaultModelConfiguration, defaultWorkspacePath, voiceRequest, speechLanguage, speechVoice, speechSpeed, browserSettings, onSend, onPickAttachments, onPickWorkspace, onSaveWorkspace, onDeleteMessage, onCancel, onClarify, onConversationChange, onOpenSettings, onNewConversation, onVoiceTurnCompleted, onVoiceTurnDelta, onVoiceTurnFailed }: NativeChatPageProps) {
+export function NativeChatPage({ conversations, bots, skills, activeConversationId, resetToken, draftRequest, runtime, savedModelConfigurations, defaultModelConfiguration, defaultWorkspacePath, voiceRequest, speechLanguage, speechVoice, speechSpeed, browserSettings, onSend, onPickAttachments, onPickWorkspace, onSaveWorkspace, onDeleteMessage, onBookmarkMessage, onForkMessage, onCancel, onClarify, onConversationChange, onOpenSettings, onNewConversation, onVoiceTurnCompleted, onVoiceTurnDelta, onVoiceTurnFailed }: NativeChatPageProps) {
   const display = useDisplaySettings()
   const activeConversation = useMemo(() => conversations.find((item) => item.id === activeConversationId), [activeConversationId, conversations])
+  const branchableMessageIds = useMemo(() => new Set((activeConversation?.messages || []).filter((message) => message.role === 'assistant').map((message) => message.id)), [activeConversation?.messages])
+  const bookmarkableMessageIds = useMemo(() => (activeConversation?.messages || []).filter((message) => message.role === 'user').map((message) => message.id), [activeConversation?.messages])
+  const bookmarkedMessageIds = useMemo(() => (activeConversation?.messages || []).filter((message) => message.role === 'user' && message.bookmarked).map((message) => message.id), [activeConversation?.messages])
+  const bookmarkMessage = useCallback((messageId: string, bookmarked: boolean) => {
+    if (!activeConversation?.id) return Promise.reject(new Error('此轮对话尚未保存，请稍后再标记。'))
+    return onBookmarkMessage(activeConversation.id, messageId, bookmarked)
+  }, [activeConversation?.id, onBookmarkMessage])
   const viewRunKey = chatRunKey('native', activeConversationId)
   const activeRun = useChatRun(viewRunKey)
   const conversationTitle = activeConversation?.title.trim() || '新对话'
@@ -95,6 +109,8 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
   const [officeArtifactPath, setOfficeArtifactPath] = useState('')
+  const officePaneRef = useRef<OfficeArtifactPaneHandle>(null)
+  useEffect(() => registerOfficeNavigationGuard('native-office', () => officePaneRef.current?.requestNavigation() ?? true), [])
   const [browserOpen, setBrowserOpen] = useState(false)
   const [canvasOpen, setCanvasOpen] = useState(false)
   const [canvasImportPath, setCanvasImportPath] = useState('')
@@ -142,9 +158,9 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
     setWorkspacePath(activeConversation?.workspacePath || defaultWorkspacePath)
     setUsage(preservedRun?.usage || activeConversation?.usage)
     setError('')
-    setOfficeArtifactPath('')
-    setCanvasOpen(false)
     if (!preservingNewlyCreatedConversation) {
+      setOfficeArtifactPath('')
+      setCanvasOpen(false)
       setBrowserOpen(false)
       setBrowserSessionId(activeConversationId || `native-browser-${crypto.randomUUID()}`)
       setBrowserRequestedUrl('')
@@ -154,19 +170,15 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
   }, [activeConversationId, activeConversation?.updatedAt, resetToken, defaultModelConfiguration.model, defaultModelConfiguration.provider, defaultWorkspacePath, viewRunKey])
 
   useEffect(() => {
-    if (activeRun) {
-      setMessages(activeRun.messages)
-      setUsage(activeRun.usage)
-      setSending(activeRun.sending)
-      setError(activeRun.error || '')
-      requestRef.current = activeRun.sending ? activeRun.requestId : ''
-      return
-    }
-    setMessages(transcript(activeConversation, defaultModelConfiguration))
-    setUsage(activeConversation?.usage)
-    setSending(false)
-    requestRef.current = ''
-  }, [activeRun, activeConversation, defaultModelConfiguration])
+    // Successful sends reconcile persisted IDs below. Expiring a cancelled or
+    // failed run must not replace its unsaved partial reply with older history.
+    if (!activeRun) return
+    setMessages(activeRun.messages)
+    setUsage(activeRun.usage)
+    setSending(activeRun.sending)
+    setError(activeRun.error || '')
+    requestRef.current = activeRun.sending ? activeRun.requestId : ''
+  }, [activeRun])
 
   useEffect(() => {
     if (!activeConversationId && !sending) {
@@ -325,6 +337,7 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
       }
       updateChatRun(currentRunKey, (run) => ({ ...run, messages: (streamEvent.type === 'steering' && streamEvent.phase === 'queued' && streamEvent.source === 'user' ? insertSteeringTranscript(run.messages, responseId, streamEvent) : run.messages).map((item) => {
         if (item.id !== responseId) return item
+        if (streamEvent.type === 'orchestration') return { ...item, orchestration: { planId: streamEvent.planId, phase: streamEvent.phase, tasks: streamEvent.tasks, message: streamEvent.message } }
         if (streamEvent.type === 'agent-step') return { ...item, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), content: streamEvent.phase === 'started' && streamEvent.step > 1 ? '' : item.content, status: streamEvent.phase === 'started' ? `Agent 正在执行第 ${streamEvent.step} 轮…` : item.status }
         if (streamEvent.type === 'answer') return display.streamingResponse ? { ...item, content: `${item.content}${streamEvent.delta}`, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), status: '正在生成回答…' } : { ...item, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), status: '正在生成完整回答…' }
         if (streamEvent.type === 'reasoning') return display.streamingResponse ? { ...item, reasoning: streamEvent.replace ? streamEvent.delta : `${item.reasoning || ''}${streamEvent.delta}`, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), status: streamEvent.summary ? '已生成推理摘要' : '正在推理…' } : { ...item, agentSteps: mergeAgentLoopEvent(item.agentSteps || [], streamEvent), status: 'ZSense 正在推理…' }
@@ -374,13 +387,20 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
           onConversationChange(result.conversationId)
         }
       }
-      updateChatRun(currentRunKey, (run) => ({ ...run, usage: result.usage || run.usage, messages: run.messages.map((item) => item.id === responseId ? { ...item, content: result.message || item.content, agentSteps: result.agentSteps || item.agentSteps, attachments: result.attachments, modelProvider: result.modelProvider, model: result.model, durationMs: result.durationMs, outputTokens: result.usage?.outputTokens ?? null, status: '', streaming: false } : item) }))
+      const savedConversation = result.workspace.conversations.find((item) => item.id === result.conversationId)
+      const savedMessages = savedConversation?.messagesLoaded !== false && savedConversation?.messages.length
+        ? transcript(savedConversation, defaultModelConfiguration) : undefined
+      updateChatRun(currentRunKey, (run) => ({ ...run, usage: result.usage || run.usage, messages: savedMessages || run.messages.map((item) => item.id === responseId ? { ...item, content: result.message || item.content, agentSteps: result.agentSteps || item.agentSteps, attachments: result.attachments, modelProvider: result.modelProvider, model: result.model, durationMs: result.durationMs, outputTokens: result.usage?.outputTokens ?? null, status: '', streaming: false } : item) }))
+      if (savedMessages && activeViewKeyRef.current === currentRunKey) {
+        const savedResponseId = [...savedMessages].reverse().find((item) => item.role === 'assistant')?.id
+        if (savedResponseId) setLoopPanelMessageId((current) => current === responseId ? savedResponseId : current)
+      }
       if (voiceRequestId) void onVoiceTurnCompleted?.(voiceRequestId, result.message)
     } catch (reason) {
       const message = errorMessage(reason)
       updateChatRun(currentRunKey, (run) => ({ ...run, error: message === '已停止生成。' ? '' : message, messages: message === '已停止生成。'
-        ? run.messages.filter((item) => item.id !== responseId || Boolean(item.content || item.reasoning || item.agentSteps?.length || item.tools?.length)).map((item) => item.id === responseId ? { ...item, streaming: false, status: '已停止', clarification: undefined } : item)
-        : run.messages.map((item) => item.id === responseId ? { ...item, content: item.content || message, streaming: false, status: '', error: true, clarification: undefined } : item) }))
+        ? run.messages.filter((item) => item.id !== responseId || Boolean(item.content || item.reasoning || item.agentSteps?.length || item.tools?.length || item.orchestration)).map((item) => item.id === responseId ? { ...item, orchestration: settleOrchestrationSnapshot(item.orchestration, true), streaming: false, status: '已停止', clarification: undefined } : item)
+        : run.messages.map((item) => item.id === responseId ? { ...item, orchestration: settleOrchestrationSnapshot(item.orchestration, false), content: item.content || message, streaming: false, status: '', error: true, clarification: undefined } : item) }))
       if (voiceRequestId) onVoiceTurnFailed?.(voiceRequestId, message)
     } finally {
       flushStreamDeltas()
@@ -420,18 +440,49 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
     void submit(undefined, voiceRequest.text, voiceRequest.id)
   }, [voiceRequest?.id])
 
+  const openCanvas = useCallback(async (filePath = '') => {
+    if (!workspacePath) { setError('请先为这个对话选择工作区文件夹。'); return }
+    if (officePaneRef.current && !await officePaneRef.current.requestNavigation()) return
+    setBrowserOpen(false)
+    setOfficeArtifactPath('')
+    setCanvasImportPath(filePath)
+    if (filePath) setCanvasImportRequestKey((current) => current + 1)
+    setCanvasOpen(true)
+  }, [workspacePath])
+
+  const openBrowserUrl = useCallback(async (url?: string) => {
+    if (!browserSettings.browserEnabled) { setError('内置浏览器已关闭，可在设置 → 浏览器中重新开启。'); return }
+    if (url) {
+      let isLocal = false
+      try { isLocal = ['localhost', 'localhost.localdomain', '127.0.0.1', '::1'].includes(new URL(url).hostname.toLowerCase()) } catch { /* Search text stays in ZSense. */ }
+      const destination = isLocal ? browserSettings.browserLocalUrlTarget : browserSettings.browserWebLinkTarget
+      if (destination === 'system' && /^https?:\/\//i.test(url) && window.zsenseDesktop?.browser) {
+        void unwrapDesktop(window.zsenseDesktop.browser.openExternal(url)).catch((reason) => setError(errorMessage(reason)))
+        return
+      }
+    }
+    if (officePaneRef.current && !await officePaneRef.current.requestNavigation()) return
+    setOfficeArtifactPath('')
+    setCanvasOpen(false)
+    if (url) {
+      setBrowserRequestedUrl(url)
+      setBrowserRequestKey((current) => current + 1)
+    }
+    setBrowserOpen(true)
+  }, [browserSettings])
+
   const slashCommands = useMemo<SlashCommandItem[]>(() => {
     const applicationCommands: SlashCommandItem[] = [
     { id: 'new', command: 'new', title: '新对话', description: '新建一个独立 AI 对话', keywords: '新建 清空 conversation', run: onNewConversation },
     { id: 'settings', command: 'settings', title: '打开设置', description: '进入 ZSense 设置页面', keywords: '设置 preferences', run: onOpenSettings },
-    { id: 'browser', command: 'browser', title: '打开浏览器', description: '在右侧打开会话浏览器', keywords: '网页 web', run: () => { setOfficeArtifactPath(''); setCanvasOpen(false); setBrowserOpen(true) } },
-    { id: 'canvas', command: 'canvas', title: '打开画布', description: '在右侧打开 ZSense 画布', keywords: '画布 canvas', run: () => { if (!workspacePath) return setError('请先为这个对话选择工作区文件夹。'); setBrowserOpen(false); setOfficeArtifactPath(''); setCanvasOpen(true) } },
+    { id: 'browser', command: 'browser', title: '打开浏览器', description: '在右侧打开会话浏览器', keywords: '网页 web', run: () => openBrowserUrl() },
+    { id: 'canvas', command: 'canvas', title: '打开画布', description: '在右侧打开 ZSense 画布', keywords: '画布 canvas', run: () => openCanvas() },
     { id: 'clear', command: 'clear', title: '清空输入', description: '清空当前草稿和未发送附件', keywords: '清除 draft', run: () => { setDraft(''); setAttachments([]); setError('') } },
     { id: 'skills', command: 'skills', title: '浏览技能目录', description: '搜索并选择当前可用技能', keywords: '技能 skill catalog', run: () => setDraft('/skill ') },
     { id: 'help', command: 'help', title: '查看快捷指令', description: '重新显示全部斜杠命令', keywords: '帮助 commands', run: () => setDraft('/') },
     ]
     return createSlashCommandCatalog({ applicationCommands, bots, skills: skills.filter((skill) => skill.enabled), setDraft })
-  }, [bots, onNewConversation, onOpenSettings, skills, workspacePath])
+  }, [bots, onNewConversation, onOpenSettings, skills, openBrowserUrl, openCanvas])
   const visibleSlashCommands = matchingSlashCommands(draft, slashCommands)
   // 「/bot 名字 指令」的回复：显示成那个 Bot 回的（内存标记优先，其次看「@名字 」标记，刷新后也一致）
   const delegatedAuthorByMessageId = useMemo(() => {
@@ -572,41 +623,14 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
 
   const loopPanelMessage = messages.find((item) => item.id === loopPanelMessageId)
 
-  const openCanvas = useCallback((filePath = '') => {
-    if (!workspacePath) { setError('请先为这个对话选择工作区文件夹。'); return }
-    setBrowserOpen(false)
-    setOfficeArtifactPath('')
-    setCanvasImportPath(filePath)
-    if (filePath) setCanvasImportRequestKey((current) => current + 1)
-    setCanvasOpen(true)
-  }, [workspacePath])
-
   const openOfficeArtifact = useCallback(async (filePath: string) => {
-    if (isCanvasDocumentPath(filePath)) { openCanvas(filePath); return }
+    if (isCanvasDocumentPath(filePath)) { await openCanvas(filePath); return }
+    if (officeArtifactPath === filePath) return
+    if (officePaneRef.current && !await officePaneRef.current.requestNavigation()) return
     setBrowserOpen(false)
     setCanvasOpen(false)
     setOfficeArtifactPath(filePath)
-  }, [openCanvas])
-
-  const openBrowserUrl = useCallback((url?: string) => {
-    if (!browserSettings.browserEnabled) { setError('内置浏览器已关闭，可在设置 → 浏览器中重新开启。'); return }
-    if (url) {
-      let isLocal = false
-      try { isLocal = ['localhost', 'localhost.localdomain', '127.0.0.1', '::1'].includes(new URL(url).hostname.toLowerCase()) } catch { /* Search text stays in ZSense. */ }
-      const destination = isLocal ? browserSettings.browserLocalUrlTarget : browserSettings.browserWebLinkTarget
-      if (destination === 'system' && /^https?:\/\//i.test(url) && window.zsenseDesktop?.browser) {
-        void unwrapDesktop(window.zsenseDesktop.browser.openExternal(url)).catch((reason) => setError(errorMessage(reason)))
-        return
-      }
-    }
-    setOfficeArtifactPath('')
-    setCanvasOpen(false)
-    if (url) {
-      setBrowserRequestedUrl(url)
-      setBrowserRequestKey((current) => current + 1)
-    }
-    setBrowserOpen(true)
-  }, [browserSettings])
+  }, [openCanvas, officeArtifactPath])
 
   const hideBrowser = useCallback(() => setBrowserOpen(false), [])
   const closeBrowser = useCallback(async () => {
@@ -640,14 +664,14 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
           <header><span className="native-chat-avatar"><Sparkles size={19} /></span><span className="native-chat-title"><strong title={conversationTitle}>{conversationTitle}</strong></span><span className="chat-header-actions"><button type="button" className={`icon-button chat-canvas-toggle ${canvasOpen ? 'active' : ''}`} onClick={() => canvasOpen ? setCanvasOpen(false) : openCanvas()} aria-label={canvasOpen ? '关闭 ZSense 画布' : '打开 ZSense 画布'} title={canvasOpen ? '关闭 ZSense 画布' : '打开 ZSense 画布'} aria-pressed={canvasOpen}><Paintbrush size={17} /></button><button type="button" className={`icon-button chat-browser-toggle ${browserOpen ? 'active' : ''}`} onClick={() => browserOpen ? void closeBrowser() : openBrowserUrl()} aria-label={browserOpen ? '关闭会话浏览器' : '打开会话浏览器'} title={browserOpen ? '关闭浏览器' : '打开会话浏览器'} aria-pressed={browserOpen}><Globe2 size={17} /></button><ConversationIdButton conversationId={activeConversationId} onError={setError} /></span></header>
           <div className={`chat-transcript-stage ${loopPanelOpen && loopPanelMessage ? 'has-agent-loop-panel' : ''}`}>
           <div className="native-chat-transcript" ref={transcriptRef} aria-live="polite">
-            {!runtime.runnable ? <div className="chat-runtime-blocked"><span><AlertTriangle size={24} /></span><strong>ZSense Agent Core 尚未就绪</strong><p>{runtime.message}</p><button className="button primary" onClick={onOpenSettings}><Settings2 size={16} />前往核心服务设置</button></div> : !messages.length ? <div className="chat-welcome"><span className="chat-welcome-icon"><Sparkles size={25} /></span><strong>开始一次 AI 对话</strong><p>这里使用全局模型、共享技能和独立长期记忆；每次提问都会读取 ZSense 当前的 Bot 与网关状态，所有处理都在 ZSense 自己的隔离空间完成。</p><div><button onClick={() => setDraft('介绍一下你能为我做什么。')}>了解能力</button><button onClick={() => setDraft('当前 ZSense 一共有几个 Bot？请列出名称和状态。')}>查看当前 Bot</button></div></div> : <div className="chat-transcript-layout"><ConversationJumpNav messages={visibleMessages} anchorPrefix="native" roundOffset={hiddenRoundCount} /><div className="chat-message-list">{visibleMessages.map((message, index) => <article id={conversationMessageAnchor('native', message.id)} data-message-id={message.id} tabIndex={-1} className={`chat-message ${message.role} ${message.streaming ? 'streaming' : ''} ${message.error ? 'error' : ''}`} key={message.id}><span>{message.role === 'user' ? '你' : message.role === 'system' ? '!' : 'AI'}</span><div>{message.role === 'assistant' ? <div className="chat-message-author"><small>{delegatedAuthorByMessageId.get(message.id) ? `${delegatedAuthorByMessageId.get(message.id)}（/bot 指令）` : 'ZSense Agent'}</small><AgentLoopTrigger source={message} onClick={() => { setLoopPanelMessageId(message.id); setLoopPanelOpen(true) }} /></div> : <small>{message.role === 'user' ? '你' : '会话错误'}</small>}<ChatMessageAttachments attachments={message.attachments} workspacePath={workspacePath} onOpenAttachment={openOfficeArtifact} />{message.clarification && <div className="chat-clarification-placeholder" role="status">{message.clarificationExpired ? '选择已超时' : '正在等待你的选择，请在输入框上方回答。'}</div>}{message.content && (message.error ? <div className="chat-inline-error" role="alert"><AlertTriangle size={15} /><span>{message.content}</span></div> : <MarkdownMessage content={message.content} workspacePath={workspacePath} onOpenOfficeFile={openOfficeArtifact} onOpenBrowserUrl={openBrowserUrl} />)}{message.streaming && !message.clarification && <div className="chat-stream-status"><LoaderCircle className="spin" size={14} />{message.status || 'ZSense Agent Core 正在处理…'}</div>}<ChatMessageMeta messageId={message.id} content={message.content} createdAt={message.createdAt} modelProvider={message.role === 'assistant' ? message.modelProvider : ''} model={message.role === 'assistant' ? message.model : ''} showModel={message.role === 'assistant'} durationMs={message.role === 'assistant' ? message.durationMs : null} outputTokens={message.role === 'assistant' ? message.outputTokens : null} copyDescription={message.role === 'user' ? '你的消息' : message.role === 'assistant' ? 'ZSense Agent 的回复' : '会话错误'} quoteDescription={message.role === 'assistant' ? '引用 ZSense Agent 的回复' : undefined} quoteDisabled={sending} speechLanguage={speechLanguage} speechVoice={speechVoice} speechSpeed={speechSpeed} onQuote={message.role === 'assistant' ? () => quoteMessage(message) : undefined} onRegenerate={message.role === 'assistant' && firstUserIndex >= 0 && firstUserIndex < index + hiddenMessageCount ? () => regenerateMessage(index + hiddenMessageCount) : undefined} regenerateDisabled={sending || message.streaming} onDelete={() => deleteMessage(message.id)} deleteDisabled={sending || Boolean(message.streaming) || /^(native|local)-(user|assistant)-/.test(message.id)} deleteDescription={message.role === 'user' ? '你的消息' : message.role === 'assistant' ? '这条 AI 回复' : '这条会话错误'} onError={setError} /></div></article>)}</div></div>}
+            {!runtime.runnable ? <div className="chat-runtime-blocked"><span><AlertTriangle size={24} /></span><strong>ZSense Agent Core 尚未就绪</strong><p>{runtime.message}</p><button className="button primary" onClick={onOpenSettings}><Settings2 size={16} />前往核心服务设置</button></div> : !messages.length ? <div className="chat-welcome"><span className="chat-welcome-icon"><Sparkles size={25} /></span><strong>开始一次 AI 对话</strong><p>这里使用全局模型、共享技能和独立长期记忆；每次提问都会读取 ZSense 当前的 Bot 与网关状态，所有处理都在 ZSense 自己的隔离空间完成。</p><div><button onClick={() => setDraft('介绍一下你能为我做什么。')}>了解能力</button><button onClick={() => setDraft('当前 ZSense 一共有几个 Bot？请列出名称和状态。')}>查看当前 Bot</button></div></div> : <div className="chat-transcript-layout"><ConversationJumpNav messages={visibleMessages} anchorPrefix="native" roundOffset={hiddenRoundCount} conversationId={activeConversation?.id} bookmarkedMessageIds={bookmarkedMessageIds} bookmarkableMessageIds={bookmarkableMessageIds} onBookmarkChange={bookmarkMessage} /><div className="chat-message-list">{visibleMessages.map((message, index) => <article id={conversationMessageAnchor('native', message.id)} data-message-id={message.id} tabIndex={-1} className={`chat-message ${message.role} ${message.streaming ? 'streaming' : ''} ${message.error ? 'error' : ''}`} key={message.id}><span>{message.role === 'user' ? '你' : message.role === 'system' ? '!' : 'AI'}</span><div>{message.role === 'assistant' ? <div className="chat-message-author"><small>{delegatedAuthorByMessageId.get(message.id) ? `${delegatedAuthorByMessageId.get(message.id)}（/bot 指令）` : 'ZSense Agent'}</small><AgentLoopTrigger source={message} onClick={() => { setLoopPanelMessageId(message.id); setLoopPanelOpen(true) }} /></div> : <small>{message.role === 'user' ? '你' : '会话错误'}</small>}<ChatMessageAttachments attachments={message.attachments} workspacePath={workspacePath} onOpenAttachment={openOfficeArtifact} />{message.clarification && <div className="chat-clarification-placeholder" role="status">{message.clarificationExpired ? '选择已超时' : '正在等待你的选择，请在输入框上方回答。'}</div>}{message.role === 'assistant' && <AgentTaskPlanCard plan={message.orchestration || message.agentSteps?.find((step) => step.orchestration)?.orchestration} />}{message.content && (message.error ? <div className="chat-inline-error" role="alert"><AlertTriangle size={15} /><span>{message.content}</span></div> : <MarkdownMessage content={message.content} workspacePath={workspacePath} onOpenOfficeFile={openOfficeArtifact} onOpenBrowserUrl={openBrowserUrl} />)}{message.streaming && !message.clarification && <div className="chat-stream-status"><LoaderCircle className="spin" size={14} />{message.status || 'ZSense Agent Core 正在处理…'}</div>}<ChatMessageMeta messageId={message.id} content={message.content} createdAt={message.createdAt} modelProvider={message.role === 'assistant' ? message.modelProvider : ''} model={message.role === 'assistant' ? message.model : ''} showModel={message.role === 'assistant'} durationMs={message.role === 'assistant' ? message.durationMs : null} outputTokens={message.role === 'assistant' ? message.outputTokens : null} copyDescription={message.role === 'user' ? '你的消息' : message.role === 'assistant' ? 'ZSense Agent 的回复' : '会话错误'} quoteDescription={message.role === 'assistant' ? '引用 ZSense Agent 的回复' : undefined} quoteDisabled={sending} speechLanguage={speechLanguage} speechVoice={speechVoice} speechSpeed={speechSpeed} onQuote={message.role === 'assistant' ? () => quoteMessage(message) : undefined} onRegenerate={message.role === 'assistant' && firstUserIndex >= 0 && firstUserIndex < index + hiddenMessageCount ? () => regenerateMessage(index + hiddenMessageCount) : undefined} regenerateDisabled={sending || message.streaming} onBranch={message.role === 'assistant' ? () => activeConversation?.id ? onForkMessage(activeConversation.id, message.id) : Promise.reject(new Error('此回复尚未保存，请稍后再创建分支。')) : undefined} branchDisabled={Boolean(message.streaming) || !branchableMessageIds.has(message.id)} onDelete={() => deleteMessage(message.id)} deleteDisabled={sending || Boolean(message.streaming) || /^(native|local)-(user|assistant)-/.test(message.id)} deleteDescription={message.role === 'user' ? '你的消息' : message.role === 'assistant' ? '这条 AI 回复' : '这条会话错误'} onError={setError} /></div></article>)}</div></div>}
           </div>
           <ChatScrollToBottomButton scrollRef={transcriptRef} sidePanelOpen={loopPanelOpen && Boolean(loopPanelMessage)} />
           <AgentLoopPanel source={loopPanelMessage} open={loopPanelOpen} showReasoning={display.showReasoning} onClose={() => setLoopPanelOpen(false)} />
           </div>
           {pendingClarificationMessage?.clarification && <div className="chat-clarification-dock" role="region" aria-label="当前待回答的选择"><ChatClarificationCard key={pendingClarificationMessage.clarification.requestId} clarification={pendingClarificationMessage.clarification} expired={pendingClarificationMessage.clarificationExpired} onRespond={(answers) => onClarify(pendingClarificationMessage.requestId || requestRef.current, pendingClarificationMessage.clarification!.requestId, answers)} /></div>}
           {error && <div className="chat-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError('')}>关闭</button></div>}
-          <form ref={composerContainerRef} className="chat-composer native unified-composer" onSubmit={submitComposer}>
+          <form ref={composerContainerRef} className={`chat-composer native unified-composer ${sending ? 'is-running' : ''}`} onSubmit={submitComposer}>
             <ChatComposerResizeHandle composerRef={composerContainerRef} transcriptRef={transcriptRef} resetKey={`${activeConversationId || 'new'}:${resetToken}`} />
             <SlashCommandMenu commands={visibleSlashCommands} selectedIndex={slashCommandIndex} onSelect={executeSlashCommand} prefix={activeSlashGroup?.command || ''} hint={activeSlashGroup?.argument?.hint} />
             <textarea ref={composerRef} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} onPaste={onPasteAttachments} aria-label="向 ZSense Agent 输入消息" placeholder={!runtime.runnable ? 'ZSense Agent Core 尚未就绪' : sending ? '输入调整要求，Enter 提交到当前轮…' : workspacePath ? '直接向 AI 发送消息…（Enter 发送，Shift + Enter 换行，可直接粘贴图片）' : '请先选择会话工作区'} rows={4} disabled={!runtime.runnable} />
@@ -675,10 +699,21 @@ export function NativeChatPage({ conversations, bots, skills, activeConversation
                             onError={setError}
               onOpenAttachment={openOfficeArtifact}
             />
-            <div className="chat-composer-footer"><small>{sending ? '调整要求将作用于当前轮次' : '输入 / 使用快捷指令 · Enter 发送 · Shift + Enter 换行'}</small><span className="chat-send-actions">{sending && <button className="chat-send stop" type="button" onClick={() => void cancel()} aria-label="停止当前轮次"><Square size={14} /></button>}<button className={`chat-send ${sending ? 'steer' : ''}`} type="submit" disabled={(!draft.trim() && !attachments.length) || !runtime.runnable || !workspacePath} aria-label={sending ? '调整本轮' : '发送消息'} title={sending ? '调整本轮' : '发送消息'}><ArrowUp size={18} /></button></span></div>
+            <div className="chat-composer-footer has-dictation"><small>{sending ? '调整要求将作用于当前轮次' : '输入 / 使用快捷指令 · Enter 发送 · Shift + Enter 换行'}</small><ChatDictationButton contextKey={composerDraftKey} shortcut={display.chatDictationShortcut} disabled={!runtime.runnable} onError={setError} onTranscript={(text) => {
+              const input = composerRef.current
+              const snapshot = input?.value ?? draft
+              let insertion = insertChatDictation(snapshot, text, input?.selectionStart, input?.selectionEnd)
+              setDraft((current) => {
+                if (current !== snapshot) insertion = insertChatDictation(current, text)
+                return insertion.text
+              })
+              window.requestAnimationFrame(() => {
+                if (input && composerRef.current === input && input.value === insertion.text) { input.focus({ preventScroll: true }); input.setSelectionRange(insertion.caret, insertion.caret) }
+              })
+            }} /><ChatSendActions sending={sending} disabled={(!draft.trim() && !attachments.length) || !runtime.runnable || !workspacePath} onStop={() => void cancel()} /></div>
           </form>
         </section>
-        {officeArtifactPath && <OfficeArtifactPane filePath={officeArtifactPath} workspacePath={workspacePath} onClose={() => setOfficeArtifactPath('')} onAskAI={askAIAboutOfficeSelection} onAnnotatedScreenshot={handleAnnotatedScreenshot} />}
+        {officeArtifactPath && <OfficeArtifactPane ref={officePaneRef} filePath={officeArtifactPath} workspacePath={workspacePath} onClose={() => setOfficeArtifactPath('')} onAskAI={askAIAboutOfficeSelection} onAnnotatedScreenshot={handleAnnotatedScreenshot} />}
         {canvasOpen && <ZSenseCanvasPane workspacePath={workspacePath} conversationId={activeConversationId || browserSessionId} importPath={canvasImportPath} importRequestKey={canvasImportRequestKey} onClose={() => setCanvasOpen(false)} onAskAI={askAIAboutOfficeSelection} onAnnotatedScreenshot={handleAnnotatedScreenshot} />}
         <BrowserWorkspacePane key={browserSessionId} sessionId={browserSessionId} visible={browserOpen && !officeArtifactPath && !canvasOpen} requestedUrl={browserRequestedUrl} requestKey={browserRequestKey} showFullUrl={browserSettings.browserShowFullUrl} workspacePath={workspacePath} onOpen={openBrowserUrl} onClose={hideBrowser} onAnnotatedScreenshot={handleAnnotatedScreenshot} />
       </div>

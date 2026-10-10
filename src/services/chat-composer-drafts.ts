@@ -11,6 +11,15 @@ const drafts = new Map<string, ComposerDraft>()
 const listeners = new Map<string, Set<() => void>>()
 const maxRetainedDrafts = 200
 
+/** 听写插入当前光标或选区，保留已有内容和换行。 */
+export function insertChatDictation(text: string, transcript: string, selectionStart = text.length, selectionEnd = selectionStart) {
+  const start = Math.max(0, Math.min(text.length, Number.isFinite(selectionStart) ? Math.trunc(selectionStart) : text.length))
+  const end = Math.max(start, Math.min(text.length, Number.isFinite(selectionEnd) ? Math.trunc(selectionEnd) : start))
+  const insertion = transcript.trim()
+  if (!insertion) return { text, caret: start }
+  return { text: text.slice(0, start) + insertion + text.slice(end), caret: start + insertion.length }
+}
+
 export function chatComposerDraftKey(kind: 'native' | 'bot', conversationId: string | undefined, botId = '', resetToken = 0) {
   return `${kind}:${botId}:${conversationId || `new:${resetToken}`}`
 }

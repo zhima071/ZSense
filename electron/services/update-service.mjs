@@ -90,6 +90,43 @@ async function partialSize(filePath) {
   }
 }
 
+async function readFeedLimited(response) {
+  const announced = Number(response.headers?.get?.('content-length')) || 0
+  if (announced > MAX_FEED_BYTES) throw new Error('更新清单过大。')
+  if (!response.body?.getReader) {
+    const text = await response.text()
+    if (Buffer.byteLength(text) > MAX_FEED_BYTES) throw new Error('更新清单过大。')
+    return text
+  }
+  const reader = response.body.getReader()
+  const chunks = []
+  let bytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      bytes += value.byteLength
+      if (bytes > MAX_FEED_BYTES) throw new Error('更新清单过大。')
+      chunks.push(value)
+    }
+    return Buffer.concat(chunks, bytes).toString('utf8')
+  } finally {
+    await reader.cancel().catch(() => undefined)
+  }
+}
+
+async function matchingPartialSize(partialPath, sha256) {
+  const size = await partialSize(partialPath)
+  if (!size) return 0
+  const recorded = await fs.promises.readFile(`${partialPath}.sha256`, 'utf8').catch(() => '')
+  if (recorded.trim() === sha256) return size
+  await Promise.all([
+    fs.promises.rm(partialPath, { force: true }),
+    fs.promises.rm(`${partialPath}.sha256`, { force: true }),
+  ])
+  return 0
+}
+
 function validContentRange(value, offset, expectedTotal) {
   const match = String(value || '').match(/^bytes (\d+)-(\d+)\/(\d+)$/i)
   if (!match) return false
@@ -213,8 +250,7 @@ export class UpdateService {
         signal: controller.signal,
       })
       if (!response.ok) throw new Error(`更新源返回 HTTP ${response.status}`)
-      const raw = await response.text()
-      const text = raw.slice(0, MAX_FEED_BYTES)
+      const text = await readFeedLimited(response)
       const feed = parseUpdateFeed(text, { feedUrl: url.toString(), platform: this.platform, arch: this.arch })
       if (!feed) throw new Error('更新清单格式无法识别；请指向 electron-builder 生成的 latest*.yml 或包含 version 字段的 JSON。')
       const comparison = compareVersions(feed.version, this.currentVersion)
@@ -240,12 +276,12 @@ export class UpdateService {
         error: '',
       }
       if (comparison > 0 && installSupported) this.available = { ...feed, version: feed.version }
-      if (this.downloaded?.version !== feed.version || this.downloadState.phase !== 'ready') {
+      if (this.downloaded?.version !== feed.version || this.downloaded?.sha256 !== feed.sha256 || this.downloadState.phase !== 'ready') {
         this.downloaded = null
         const name = feed.downloadUrl ? decodeURIComponent(new URL(feed.downloadUrl).pathname.split('/').pop() || '') : ''
         this.partialPath = comparison > 0 && installSupported && name && this.downloadDirectory
           ? path.join(this.downloadDirectory, `${name}.part`) : ''
-        const cachedBytes = this.partialPath ? await partialSize(this.partialPath) : 0
+        const cachedBytes = this.partialPath ? await matchingPartialSize(this.partialPath, feed.sha256) : 0
         this.setDownloadState({ phase: cachedBytes > 0 ? 'paused' : 'idle', version: feed.version,
           receivedBytes: cachedBytes, totalBytes: feed.size, bytesPerSecond: 0, error: '' })
       }
@@ -268,29 +304,36 @@ export class UpdateService {
     await fs.promises.mkdir(this.downloadDirectory, { recursive: true, mode: 0o700 })
     const finalPath = path.join(this.downloadDirectory, name)
     const partialPath = `${finalPath}.part`
+    const checksumPath = `${partialPath}.sha256`
     this.partialPath = partialPath
     if (fs.existsSync(finalPath) && await this.verifyFile(finalPath, update.sha256)) {
+      await Promise.all([partialPath, checksumPath].map((target) => fs.promises.rm(target, { force: true })))
       this.downloaded = { path: finalPath, version: update.version, sha256: update.sha256 }
       const size = fs.statSync(finalPath).size
       return this.setDownloadState({ phase: 'ready', version: update.version, receivedBytes: size,
         totalBytes: update.size || size, bytesPerSecond: 0, error: '' })
     }
     await fs.promises.rm(finalPath, { force: true })
-    let offset = await partialSize(partialPath)
+    let offset = await matchingPartialSize(partialPath, update.sha256)
     if (offset > MAX_DOWNLOAD_BYTES || (update.size && offset > update.size)) {
       await fs.promises.rm(partialPath, { force: true })
+      await fs.promises.rm(checksumPath, { force: true })
       offset = 0
     }
     if (offset && update.size && offset === update.size) {
       if (await this.verifyFile(partialPath, update.sha256)) {
         await fs.promises.rename(partialPath, finalPath)
+        await fs.promises.rm(checksumPath, { force: true })
         this.downloaded = { path: finalPath, version: update.version, sha256: update.sha256 }
         return this.setDownloadState({ phase: 'ready', version: update.version, receivedBytes: offset,
           totalBytes: offset, bytesPerSecond: 0, error: '' })
       }
       await fs.promises.rm(partialPath, { force: true })
+      await fs.promises.rm(checksumPath, { force: true })
       offset = 0
     }
+
+    await fs.promises.writeFile(checksumPath, update.sha256, { mode: 0o600 })
 
     const controller = new AbortController()
     this.controller = controller
@@ -357,17 +400,19 @@ export class UpdateService {
       if (update.size && received !== update.size) throw new Error('安装包大小与发布记录不一致。')
       if (hash.digest('hex') !== update.sha256) {
         await fs.promises.rm(partialPath, { force: true })
+        await fs.promises.rm(checksumPath, { force: true })
         throw new Error('安装包 SHA-256 校验失败，已丢弃下载缓存。')
       }
       if (controller.signal.aborted) throw new Error('下载已中止。')
       await fs.promises.rename(partialPath, finalPath)
+      await fs.promises.rm(checksumPath, { force: true })
       this.downloaded = { path: finalPath, version: update.version, sha256: update.sha256 }
       return this.setDownloadState({ phase: 'ready', receivedBytes: received, totalBytes: received,
         bytesPerSecond: 0, error: '' })
     } catch (error) {
       const intent = this.stopIntent
       if (intent === 'cancel') {
-        await fs.promises.rm(partialPath, { force: true }).catch(() => undefined)
+        await Promise.all([partialPath, checksumPath].map((target) => fs.promises.rm(target, { force: true }).catch(() => undefined)))
         return this.setDownloadState({ phase: 'canceled', receivedBytes: 0, bytesPerSecond: 0, error: '' })
       }
       const cachedBytes = await partialSize(partialPath).catch(() => 0)
@@ -402,7 +447,8 @@ export class UpdateService {
       await this.downloadCompletion
     }
     if (this.downloadState.phase === 'ready') return { ...this.downloadState }
-    if (this.partialPath) await fs.promises.rm(this.partialPath, { force: true })
+    if (this.partialPath) await Promise.all([this.partialPath, `${this.partialPath}.sha256`]
+      .map((target) => fs.promises.rm(target, { force: true })))
     return this.setDownloadState({ phase: 'canceled', receivedBytes: 0, bytesPerSecond: 0, error: '' })
   }
 

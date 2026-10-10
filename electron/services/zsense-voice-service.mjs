@@ -7,36 +7,18 @@ import * as OpenCC from 'opencc-js'
 
 const execFileAsync = promisify(execFile)
 const DEFAULT_PHRASE = '你好 ZSense'
-const LOCAL_STT_PROVIDER = 'whisper.cpp base 多语言模型 · 完全本地'
+const LOCAL_STT_PROVIDER = 'whisper.cpp base Q5_1 多语言模型 · 完全本地'
 const LOCAL_STT_SAMPLE_RATE = 16_000
-const BUNDLED_TTS_PROVIDER = 'ZSense MOSS-TTS-Nano ONNX · 完全本地'
+const BUNDLED_TTS_PROVIDER = 'ZSense MeloTTS 中文 · 原生完全本地'
+const MAX_TTS_TEXT_LENGTH = 2_000
+const MAX_TTS_WAVE_BYTES = 32 * 1024 * 1024
 const traditionalToSimplified = OpenCC.Converter({ from: 't', to: 'cn' })
 const BUNDLED_TTS_VOICES = Object.freeze([
-  { id: 'Junhao', name: 'Junhao · 中文男声', language: 'zh-CN', gender: 'male', engine: 'moss-tts-nano', local: true, bundled: true },
-  { id: 'Zhiming', name: 'Zhiming · 京味男声', language: 'zh-CN', gender: 'male', engine: 'moss-tts-nano', local: true, bundled: true },
-  { id: 'Weiguo', name: 'Weiguo · 说书男声', language: 'zh-CN', gender: 'male', engine: 'moss-tts-nano', local: true, bundled: true },
-  { id: 'Xiaoyu', name: 'Xiaoyu · 中文女声', language: 'zh-CN', gender: 'female', engine: 'moss-tts-nano', local: true, bundled: true },
-  { id: 'Yuewen', name: 'Yuewen · 机车女声', language: 'zh-CN', gender: 'female', engine: 'moss-tts-nano', local: true, bundled: true },
-  { id: 'Lingyu', name: 'Lingyu · 电台女声', language: 'zh-CN', gender: 'female', engine: 'moss-tts-nano', local: true, bundled: true },
+  { id: 'melo-zh', name: 'Melo · 中文', language: 'zh-CN', gender: 'neutral', engine: 'melo-tts', local: true, bundled: true },
 ])
 
-const MOSS_TTS_REQUIRED_FILES = Object.freeze([
-  'MOSS-TTS-Nano-100M-ONNX/browser_poc_manifest.json',
-  'MOSS-TTS-Nano-100M-ONNX/tts_browser_onnx_meta.json',
-  'MOSS-TTS-Nano-100M-ONNX/tokenizer.model',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_prefill.onnx',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_decode_step.onnx',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_local_decoder.onnx',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_local_cached_step.onnx',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_local_fixed_sampled_frame.onnx',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_global_shared.data',
-  'MOSS-TTS-Nano-100M-ONNX/moss_tts_local_shared.data',
-  'MOSS-Audio-Tokenizer-Nano-ONNX/codec_browser_onnx_meta.json',
-  'MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_encode.onnx',
-  'MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_encode.data',
-  'MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_decode_full.onnx',
-  'MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_decode_step.onnx',
-  'MOSS-Audio-Tokenizer-Nano-ONNX/moss_audio_tokenizer_decode_shared.data',
+const MELO_TTS_REQUIRED_FILES = Object.freeze([
+  'model.onnx', 'lexicon.txt', 'tokens.txt', 'date.fst', 'number.fst', 'phone.fst', 'manifest.json',
 ])
 
 export class ZSenseVoiceService {
@@ -46,6 +28,11 @@ export class ZSenseVoiceService {
     this.enabled = false
     this.listening = false
     this.transcriptionQueue = Promise.resolve()
+    this.synthesisQueue = Promise.resolve()
+    this.synthesisJobs = new Set()
+    this.activeSpeech = null
+    this.activeTranscription = null
+    this.closed = false
     this.speechGeneration = 0
     this.configuration = {
       phrase: String(database.loadSettings().voiceWakePhrase || DEFAULT_PHRASE).trim() || DEFAULT_PHRASE,
@@ -82,26 +69,120 @@ export class ZSenseVoiceService {
 
   inspectLocalStt() {
     const executable = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli'
-    const binaryPath = path.join(this.toolsDirectory, 'stt', executable)
-    const modelPath = path.join(this.toolsDirectory, 'stt', 'ggml-base.bin')
+    const binaryPath = path.resolve(this.toolsDirectory, 'stt', executable)
+    const modelPath = path.resolve(this.toolsDirectory, 'stt', 'ggml-base-q5_1.bin')
     const missing = []
-    if (!fs.existsSync(binaryPath)) missing.push('whisper.cpp 推理引擎')
-    if (!fs.existsSync(modelPath)) missing.push('Whisper base 多语言模型')
+    if (!isNonEmptyFile(binaryPath)) missing.push('whisper.cpp 推理引擎')
+    if (!isNonEmptyFile(modelPath)) missing.push('Whisper base Q5_1 多语言模型')
     return { ready: missing.length === 0, binaryPath, modelPath, missing }
   }
 
   inspectBundledTts() {
-    const packagedModelRoot = path.join(this.toolsDirectory, 'tts', 'moss', 'models')
-    const developmentModelRoot = path.join(path.dirname(this.toolsDirectory), 'shared', 'tts', 'moss', 'models')
+    const packagedModelRoot = path.join(this.toolsDirectory, 'tts', 'melo')
+    const developmentModelRoot = path.join(path.dirname(this.toolsDirectory), 'shared', 'tts', 'melo')
     const modelRoot = fs.existsSync(packagedModelRoot) ? packagedModelRoot : developmentModelRoot
-    const missing = MOSS_TTS_REQUIRED_FILES.filter((relativePath) => !fs.existsSync(path.join(modelRoot, relativePath)))
-    return { ready: missing.length === 0, modelRoot, missing }
+    const binaryPath = path.resolve(this.toolsDirectory, 'tts', process.platform === 'win32' ? 'sherpa-onnx-offline-tts.exe' : 'sherpa-onnx-offline-tts')
+    const missing = MELO_TTS_REQUIRED_FILES.filter((relativePath) => !isNonEmptyFile(path.join(modelRoot, relativePath)))
+    if (!isNonEmptyFile(binaryPath)) missing.push('sherpa-onnx 原生 TTS 推理程序')
+    inspectResourceManifest(modelRoot, 'Melo 模型', missing)
+    inspectResourceManifest(path.dirname(binaryPath), '原生 TTS 推理组件', missing)
+    return { ready: missing.length === 0, modelRoot: path.resolve(modelRoot), binaryPath, missing: [...new Set(missing)] }
   }
 
   listVoices() {
     const tts = this.inspectBundledTts()
     if (!tts.ready) throw new Error(`内置 TTS 组件不完整：${tts.missing.join('、')}。`)
     return BUNDLED_TTS_VOICES.map((voice) => ({ ...voice }))
+  }
+
+  synthesize(request = {}) {
+    let text
+    let speed
+    try {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('本地语音播报请求无效。')
+      if (request.language !== undefined && request.language !== 'zh-CN') throw new Error('当前语音播报仅支持简体中文。')
+      if (typeof request.text !== 'string' || !(text = request.text.trim())) throw new Error('没有可播报的文字。')
+      if (request.text.length > MAX_TTS_TEXT_LENGTH) throw new Error(`单次本地播报不能超过 ${MAX_TTS_TEXT_LENGTH} 字符。`)
+      if (/\u0000/u.test(text)) throw new Error('播报文字包含无效字符。')
+      speed = request.speed ?? 1
+      if (typeof speed !== 'number' || !Number.isFinite(speed) || speed < 0.5 || speed > 2) throw new Error('本地播报语速必须在 0.5 到 2 之间。')
+      if (this.closed) throw new Error('本地语音服务已关闭。')
+    } catch (error) {
+      return Promise.reject(error)
+    }
+    const job = { generation: this.speechGeneration, text, speed, startedAt: Date.now(), settled: false }
+    const result = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject })
+    this.synthesisJobs.add(job)
+    const run = async () => {
+      if (job.settled || job.generation !== this.speechGeneration || this.closed) return
+      try {
+        const output = await this.#synthesizeNow(job)
+        if (!job.settled) {
+          job.settled = true
+          job.resolve(output)
+        }
+      } catch (error) {
+        if (!job.settled) {
+          job.settled = true
+          job.reject(error)
+        }
+      } finally {
+        this.synthesisJobs.delete(job)
+      }
+    }
+    this.synthesisQueue = this.synthesisQueue.then(run, run)
+    return result
+  }
+
+  async #synthesizeNow(job) {
+    const tts = this.inspectBundledTts()
+    if (!tts.ready) throw new Error(`内置 TTS 组件不完整：${tts.missing.join('、')}。`)
+    const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'zsense-local-tts-'))
+    const outputPath = path.join(temporaryDirectory, 'output.wav')
+    const controller = new AbortController()
+    let closed = Promise.resolve()
+    try {
+      const args = [
+        `--vits-model=${path.join(tts.modelRoot, 'model.onnx')}`,
+        `--vits-lexicon=${path.join(tts.modelRoot, 'lexicon.txt')}`,
+        `--vits-tokens=${path.join(tts.modelRoot, 'tokens.txt')}`,
+        `--tts-rule-fsts=${['date.fst', 'number.fst', 'phone.fst', 'new_heteronym.fst'].filter((file) => isNonEmptyFile(path.join(tts.modelRoot, file))).map((file) => path.join(tts.modelRoot, file)).join(',')}`,
+        '--sid=0', `--speed=${job.speed}`, '--num-threads=2', '--provider=cpu',
+        // Keep text beginning with "--" from being interpreted as native CLI options.
+        `--output-filename=${outputPath}`, '--', job.text,
+      ]
+      const execution = execFileAsync(tts.binaryPath, args, {
+        cwd: temporaryDirectory,
+        env: nativeVoiceEnvironment(tts.binaryPath),
+        windowsHide: true,
+        shell: false,
+        timeout: 120_000,
+        killSignal: 'SIGKILL',
+        maxBuffer: 4 * 1024 * 1024,
+        signal: controller.signal,
+      })
+      if (execution.child?.pid) closed = new Promise((resolve) => execution.child.once('close', resolve))
+      this.activeSpeech = { job, controller, child: execution.child }
+      await execution
+      if (job.generation !== this.speechGeneration || this.closed) return cancelledSynthesisResult(job.startedAt)
+      const stat = fs.statSync(outputPath)
+      if (!stat.isFile() || stat.size > MAX_TTS_WAVE_BYTES) throw new Error('本地播报音频超过大小上限或格式无效。')
+      const audio = fs.readFileSync(outputPath)
+      inspectVoiceWave(audio)
+      return {
+        ...cancelledSynthesisResult(job.startedAt),
+        cancelled: false,
+        audioBase64: audio.toString('base64'),
+      }
+    } catch (error) {
+      if (job.generation !== this.speechGeneration || this.closed || controller.signal.aborted) return cancelledSynthesisResult(job.startedAt)
+      if (error?.killed) throw new Error('本地语音播报超时，请缩短文字后重试。')
+      throw new Error(`本地语音播报失败：${String(error?.stderr || error?.message || error).trim().slice(0, 500)}`)
+    } finally {
+      await closed
+      if (this.activeSpeech?.job === job) this.activeSpeech = null
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true })
+    }
   }
 
   startWake(configuration = {}) {
@@ -128,7 +209,11 @@ export class ZSenseVoiceService {
   }
 
   transcribe(request = {}) {
-    const run = () => this.#transcribeNow(request)
+    if (this.closed) return Promise.reject(new Error('本地语音服务已关闭。'))
+    const run = () => {
+      if (this.closed) throw new Error('本地语音服务已关闭。')
+      return this.#transcribeNow(request)
+    }
     const pending = this.transcriptionQueue.then(run, run)
     this.transcriptionQueue = pending.catch(() => undefined)
     return pending
@@ -163,6 +248,8 @@ export class ZSenseVoiceService {
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'zsense-local-stt-'))
     const inputPath = path.join(temporaryDirectory, 'input.wav')
     const startedAt = Date.now()
+    const controller = new AbortController()
+    let closed = Promise.resolve()
     try {
       writePcm16Wave(inputPath, pcm, LOCAL_STT_SAMPLE_RATE)
       const languageCode = 'zh'
@@ -180,11 +267,18 @@ export class ZSenseVoiceService {
         '-lpt', fastMode ? '-0.55' : '-0.45',
         '-nth', fastMode ? '0.35' : '0.4',
       ]
-      const { stdout } = await execFileAsync(stt.binaryPath, args, {
+      const execution = execFileAsync(stt.binaryPath, args, {
         timeout: fastMode ? 45_000 : 120_000,
         maxBuffer: 4 * 1024 * 1024,
-        env: { ...process.env, NO_PROXY: '*', no_proxy: '*' },
+        windowsHide: true,
+        shell: false,
+        env: nativeVoiceEnvironment(stt.binaryPath),
+        signal: controller.signal,
+        killSignal: 'SIGKILL',
       })
+      if (execution.child?.pid) closed = new Promise((resolve) => execution.child.once('close', resolve))
+      this.activeTranscription = { controller, child: execution.child }
+      const { stdout } = await execution
       const rawTranscript = cleanTranscript(stdout)
       const transcript = traditionalToSimplified(rawTranscript)
       return {
@@ -196,16 +290,28 @@ export class ZSenseVoiceService {
         offline: true,
       }
     } catch (error) {
+      if (controller.signal.aborted) throw new Error('本地语音服务已关闭，识别已取消。')
       if (error?.killed) throw new Error('本地语音识别超时，请缩短单次说话时间后重试。')
       throw new Error(`本地语音识别失败：${String(error?.stderr || error?.message || error).trim().slice(0, 500)}`)
     } finally {
+      await closed
+      if (this.activeTranscription?.controller === controller) this.activeTranscription = null
       fs.rmSync(temporaryDirectory, { recursive: true, force: true })
     }
   }
 
   stopSpeaking() {
     this.speechGeneration += 1
-    return { stopped: true }
+    const stopped = this.synthesisJobs.size > 0
+    for (const job of this.synthesisJobs) {
+      if (!job.settled) {
+        job.settled = true
+        job.resolve(cancelledSynthesisResult(job.startedAt))
+      }
+    }
+    this.synthesisJobs.clear()
+    this.activeSpeech?.controller.abort()
+    return { stopped }
   }
 
   inspect() {
@@ -218,17 +324,84 @@ export class ZSenseVoiceService {
         : '本地 STT 组件缺失',
       wakePhrase: this.configuration.phrase,
       sttReady: stt.ready,
-      sttModel: stt.ready ? 'Whisper base multilingual' : null,
+      sttModel: stt.ready ? 'Whisper base multilingual Q5_1' : null,
       ttsReady: tts.ready,
-      ttsModel: tts.ready ? 'MOSS-TTS-Nano 100M ONNX + MOSS Audio Tokenizer Nano' : null,
+      ttsModel: tts.ready ? 'MeloTTS Chinese ONNX · sherpa-onnx native CPU' : null,
       networkRequiredAtRuntime: false,
     }
   }
 
   shutdown() {
+    this.closed = true
     this.stopWake()
     this.stopSpeaking()
+    this.activeTranscription?.controller.abort()
+    return Promise.all([this.synthesisQueue, this.transcriptionQueue])
   }
+}
+
+function isNonEmptyFile(filePath) {
+  try { const stat = fs.statSync(filePath); return stat.isFile() && stat.size > 0 } catch { return false }
+}
+
+function inspectResourceManifest(rootPath, label, missing) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(rootPath, 'manifest.json'), 'utf8'))
+    if (!Array.isArray(manifest.files) || !manifest.files.length) throw new Error('Invalid resource manifest')
+    for (const entry of manifest.files) {
+      if (typeof entry?.file !== 'string' || !Number.isSafeInteger(entry.size) || entry.size <= 0) throw new Error('Invalid resource manifest entry')
+      const resolvedPath = path.resolve(rootPath, entry.file)
+      if (!resolvedPath.startsWith(`${path.resolve(rootPath)}${path.sep}`) || !isNonEmptyFile(resolvedPath)) {
+        missing.push(`${label}/${entry.file}`)
+      } else if (fs.statSync(resolvedPath).size !== entry.size) {
+        missing.push(`${label}/${entry.file}（大小不匹配）`)
+      }
+    }
+  } catch {
+    missing.push(`${label}清单缺失或无效`)
+  }
+}
+
+function nativeVoiceEnvironment(binaryPath) {
+  const binaryDirectory = path.dirname(binaryPath)
+  const env = { PATH: [binaryDirectory, path.join(binaryDirectory, 'libs')].join(path.delimiter), NO_PROXY: '*', no_proxy: '*', LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8' }
+  for (const key of ['SystemRoot', 'WINDIR', 'TEMP', 'TMP']) {
+    if (process.env[key]) env[key] = process.env[key]
+  }
+  return env
+}
+
+function cancelledSynthesisResult(startedAt) {
+  return {
+    played: false, cancelled: true, audioBase64: '', audioMimeType: 'audio/wav',
+    provider: BUNDLED_TTS_PROVIDER, language: 'zh-CN', voice: 'melo-zh',
+    offline: true, durationMs: Date.now() - startedAt,
+  }
+}
+
+export function inspectVoiceWave(audio) {
+  if (!Buffer.isBuffer(audio) || audio.length < 44 || audio.length > MAX_TTS_WAVE_BYTES || audio.toString('ascii', 0, 4) !== 'RIFF' || audio.toString('ascii', 8, 12) !== 'WAVE' || audio.readUInt32LE(4) + 8 !== audio.length) throw new Error('本地播报没有生成有效 WAV 音频。')
+  let format = null
+  let pcm = null
+  for (let offset = 12; offset < audio.length;) {
+    if (offset + 8 > audio.length) throw new Error('本地播报 WAV 数据截断。')
+    const chunkName = audio.toString('ascii', offset, offset + 4)
+    const length = audio.readUInt32LE(offset + 4)
+    const start = offset + 8
+    if (start + length > audio.length) throw new Error('本地播报 WAV 数据截断。')
+    if (chunkName === 'fmt ') {
+      if (format || length < 16) throw new Error('本地播报 WAV 格式无效。')
+      format = { encoding: audio.readUInt16LE(start), channels: audio.readUInt16LE(start + 2), sampleRate: audio.readUInt32LE(start + 4), byteRate: audio.readUInt32LE(start + 8), blockAlign: audio.readUInt16LE(start + 12), bits: audio.readUInt16LE(start + 14) }
+    } else if (chunkName === 'data') {
+      if (pcm) throw new Error('本地播报 WAV 包含重复音频数据。')
+      pcm = audio.subarray(start, start + length)
+    }
+    offset = start + length + (length % 2)
+    if (offset > audio.length) throw new Error('本地播报 WAV 数据截断。')
+  }
+  if (!format || !pcm?.length || format.encoding !== 1 || format.bits !== 16 || ![1, 2].includes(format.channels) || format.sampleRate < 8_000 || format.sampleRate > 96_000 || format.blockAlign !== format.channels * 2 || format.byteRate !== format.sampleRate * format.blockAlign || pcm.length % format.blockAlign !== 0) throw new Error('本地播报 WAV 必须为有效 PCM16 音频。')
+  if (!pcm.some((value) => value !== 0)) throw new Error('本地播报生成了空白音频。')
+  return { pcm, sampleRate: format.sampleRate, channels: format.channels, durationSeconds: pcm.length / format.byteRate }
 }
 
 function pcm16SignalMetrics(pcm) {

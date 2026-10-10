@@ -1,5 +1,69 @@
 # ZSense 开发交接
 
+## 2026-10-10 旧设备首次记忆整理与 0.26.11 发行
+
+- `MemoryUpgradeService` 在 SQLite 初始化之后、LocalMemoryService/SecretsVault 初始化之前运行；schema 44 新增召回准入列，`local-memory-quality-v1` 完成标记和整理同事务。新设备零扫描写 `new-device`，失败回滚且下次启动重试，不阻断启动、不新增弹窗、不调用模型或联网。
+- 只暂停明确旧自动噪声的上下文注入，不删除/改写旧原文、证据、归属、保护或修订历史；人工/未知/疑似人工策展来源保守保留，敏感自动内容优先排除。管理与显式搜索仍可见，详情说明原因，手动保存可恢复当前归属内召回。
+- 补充审查修复：可信新原话纠正未保护旧事实后重新判断准入（无原话不能自动恢复）；schema 44 补齐 schema 43 漏掉的历史 Hermes 自动来源，未证明用户的外部渠道旧 local 项隔离为 `legacy-unattributed`，不改已绑定归属。
+- 新增 `test:memory-upgrade`，包验收检查升级服务及标记，原生 Windows workflow 增加记忆回归但本轮不触发远端 CI。所有迁移测试只用临时库，不读取真实用户数据。
+- 用户追加明确要求发布 Mac/Windows 新版，版本提升至 `0.26.11`，允许同步源码与原生 Windows CI 构建。工作流外部存储上传已禁用；安装包验证后才发布到 GitHub。本轮使用独立 staging 构建，不覆盖正在运行的本机 `.app`。固定本机签名不等于 Apple Developer ID 或公证；Windows 仍需原生构建与实际安装验收。
+- 安装包与最终测试结果将在完成验证后补入本节。
+
+## 2026-10-10 自动记忆流程优化（0.26.10，本机固定签名更新）
+
+- 默认保留安装即用的本地规则记忆，无 Hindsight/嵌入模型下载。`memoryModelRefinement` 与 `autoDistillSkills` 独立且默认关闭；云端外发范围在设置中明确说明。
+- 可信入口生成用户和工作区归属，聊天、网关、定时/自主/远程任务、子 Agent 及记忆工具传递同一作用域。旧渠道来源不明自动条目隔离为 `legacy-unattributed`；旧记录默认保护，不批量删除或擅自解除保护。
+- 短身份、长期偏好保守抽取；稳定事实键支持纠正、遗忘和最多五次修订历史。人工修改默认保护，来源保持审计用途；删除正文和历史后仅留哈希/事实键遗忘标记。自动来源才计容量，锁定自动条目仍计，人工条目不计且不会自动淘汰。
+- 召回使用有界分词缓存与按 Bot/归属/版本的倒排索引，最多 5,000 字符；首次仍有建索引成本。记忆增量通知不替换会话和输入草稿；模型精炼/技能沉淀不阻塞回复完成。周期本地维护仅重试近期有界候选。
+- 回合开始捕获记忆版本与维护世代，关闭、手改、删除后迟到结果作废。定时摘要使用任务 revision 和运行归属/成功状态 CAS，防清空或删除后复活。
+- 新回归：`test:memory-maintenance`、`test:memory-integration`、`test:memory-ui-model`、`test:memory-entrypoints`、`test:scheduled-memory-races`；合成检索基准 `bench:memory`。测试只使用临时库和模拟模型，不读取用户真实凭据或记忆库。
+- 最终全套 **95/95 通过**（并行度 3，166.1 秒，日志 `/var/folders/kz/_gqp13jj7zlfz29pkc2tk3w40000gn/T/zsense-tests-VN9mKu`）；typecheck、git diff --check、构建、包校验通过。之前一次并行度 6 的聊天提示气泡边界测试偶发失败，独立复测及最终全套均通过，未因此修改该生产功能。需要真实屏幕/辅助权限的 `test:computer-use` 仍默认跳过。
+- 用户确认无正在运行任务后，退出应用并同卷替换 `release/mac-arm64/ZSense.app`，193 个运行文件逐字节匹配；ASAR SHA-256 为 `9964ab07b59787c3449b88d3fddb16b8a72893383a27d9fc0b60a6965e288c17`。32 个代码对象固定签名校验通过，新旧顶层指定要求相同。旧应用可从 `/Volumes/out1/.Trashes/501/ZSense-memory-lvadBC/previous-ZSense.app` 恢复，未删除用户数据。
+- 重开后用户仍看到 Safe Storage 钥匙串授权，并已自行点击“始终允许”；系统界面服务持续超时，未完成授权持久化重开复测和新记忆面板 live 验收，不宣称弹窗已彻底修复。启动读取设备身份会访问 safeStorage，但重复调用不等于必然重复弹窗；旧 ACL 和一次性授权仍需实际区分。没有改动钥匙串 ACL 或录屏权限。不升级版本、不生成安装包、不提交/推送；完整机制见 `docs/local-hindsight-memory.md`。
+
+## 2026-10-10 会话侧栏动画与图片预览精简（0.26.10，本机固定签名更新）
+
+- 会话侧栏折叠与展开使用 260 ms 平滑宽度过渡，主内容同步移动；外层视口裁剪、内层保持宽度，不卸载会话列表，保留搜索、滚动位置和用户选定宽度。收起时立即设置 inert/ARIA，动画结束后隐藏；快速反向点击可自然衔接。拖动宽度期间不启用尺寸动画，遵循系统减少动态效果设置。
+- 两种聊天输入框共用的待发送图片预览只保留缩略图与移除图标，去掉“点击查看大图”等可见文字；点击预览、悬停提示与无障碍名称保留。非图片附件与历史消息名称不变。
+- 真实 React/浏览器侧栏回归 **21/21** 通过，涵盖动画中间帧、反向与连续点击、宽度/搜索/滚动保留、移动端及原有拖拽功能；图片预览、输入草稿、附件粘贴专项、typecheck、git diff --check 通过。
+- 本机应用退出后同卷替换并重开；191 个前端/Electron 运行文件逐字节匹配，包验收通过，32 个代码对象继续使用固定本机证书 `1F05BDAA208FECACA5E0FB1359D4320467F65A3D`。签名仍不是 Apple Developer ID 或公证。本次未升级版本、生成安装包、提交或推送。
+- 旧应用可从 `/Volumes/out1/.Trashes/501/ZSense-sidebar-ui-NcE8t6/ZSense.app` 恢复，没有删除用户数据。重开后的系统界面检查服务持续超时，仅确认新主进程已运行；不宣称本轮已完成 live 动画和图片预览复核。
+- 用户反馈重开出现系统授权弹窗，具体类型待截图确认。新旧包的 32 个代码对象证书、指定要求和 entitlements 一致，新版接受旧版顶层要求；这不能证明现有钥匙串 ACL 已持久授权。启动时设备身份读取在主窗口创建前调用 safeStorage，钥匙串请求可能阻塞，但尚不能将它认定为此次弹窗原因。没有改动钥匙串 ACL、重置录屏权限或读取密码。
+
+## 2026-10-10 截图预览与输入框精简（0.26.10，本机更新）
+
+- 原生全局截图编辑器合并为单行 42 px 图标工具栏：画笔、圈选、矩形、箭头、文字、颜色、撤销/重做、下载、置顶、复制和关闭全部保留。移除可见标题和整块底部说明栏；悬停/键盘聚焦显示钳制在窗口内的气泡，窄窗可两行展示。保存/错误只作短暂浮动反馈。
+- 对话输入框的待发送图片不显示文件名，保留缩略图、查看大图和移除，图片卡片最大宽度 176 px。两种聊天布局共用实现；历史消息和非图片文件仍显示名称，ARIA 保留文件识别信息。
+- 侧栏搜索去掉输入框蓝色内轮廓，由外层灰色圆角边框提示焦点；搜索、Tab 和 Escape 行为保留。手机版布局测试加入真实 React 响应式渲染屏障，修复测试在媒体查询生效前关闭弹窗的竞态，没有调整生产逻辑或放宽断言。
+- 默认全套 **84/84 通过**（97.5 秒），日志 `/var/folders/kz/_gqp13jj7zlfz29pkc2tk3w40000gn/T/zsense-tests-9vo9S6`；截图真实 UI 9 场景、侧栏真实 UI 18 场景及两种输入框图片专项通过。默认跳过需要系统屏幕/辅助权限的 `test:computer-use`；隔离截图测试不修改用户剪贴板。
+- 本机 `release/mac-arm64/ZSense.app` 已在退出后同卷原子替换，包含此前 Office 优化与本轮界面修改，190 个前端/Electron 运行文件逐字节匹配。ASAR SHA-256：`569eb583008db05b2c2b4c4178f3cbd23b2564c01aaf2fcfe87a30efc8c980f8`。构建、包校验和本机 ad-hoc 签名校验通过。已重新启动并确认主进程，用户确认正常主界面。系统界面服务持续超时，因此本轮各按钮与视觉的自动验收使用真实生产组件的隔离浏览器测试，不宣称已完成 live 逐按钮复核。
+- 旧应用与 staging 辅助文件可恢复地移至 `/Users/hank/.Trash/ZSense-office-nRtxYW`，未删除用户数据。本轮不升级版本、不生成 DMG/Windows/APK、不提交或推送；本机 ad-hoc 签名不等于 Developer ID 公证发行验收。
+
+## 2026-10-10 Office 三件套优化（0.26.10，本机更新）
+
+- Excel/CSV：合并单元格内容与完整样式差异，撤销到原值不再误判为脏；XLSX 整批修改先验证、在临时副本执行，失败保留原件和草稿，CSV 保留原换行。
+- Word：按 UTF-16 选区做局部 OOXML 修改，保留未选中的富文本和链接；增量草稿、读缓存、同 iframe 预览更新及 Ctrl/Cmd+S 保存确认，避免重复渲染与选区重置。
+- PPT：真实缩略图、幻灯片导航、文字/图片/形状选择、文字和几何编辑、拖动缩放、选区 AI 编辑、手动保存及快捷键。修改只进入工作副本，版本冲突不能覆盖原件。
+- 共享服务：全局最多 3 个 OfficeCLI 进程，同文件串行，禁用隐式常驻；干净缓存有数量和闲置上限，可见、加载中和未保存文件不清理。原始 CLI 导出防来源覆盖、防工作区路径逃逸。
+- Agent：读/改/保存 Word 与 PPT 六工具复用编辑器工作副本；外部文件保存仍经逐次审批。切会话、文件或跳转浏览器/画布前确认未保存编辑。
+- 本轮收尾修复：请求等待期间继续输入、迟到外部预览、保存快捷键与停止 Agent 后的提交边界；CLI 导出和导入参数使用统一解析器检查空格、等号、冒号和附着短参。取消的事务保留原件及草稿，已经原子提交的事务正常完成元数据收尾。
+- 最终源码验收：默认全套 **82/82** 通过（132.9 秒），日志 `/var/folders/kz/_gqp13jj7zlfz29pkc2tk3w40000gn/T/zsense-tests-SBtvv2`；`typecheck`、`git diff --check`、Word/PPT 确定性延迟响应 UI、22 场景取消回归均通过。默认全套不包含需要系统屏幕/辅助权限的 `test:computer-use`。仅修正设备互联注册确认测试的竞态，未修改生产设备互联协议。
+- 本机部署已随上方截图/输入框更新完成：退出后同卷原子替换，132 个 `dist` 文件及 58 个 Electron 运行文件共 190 个逐字节匹配（Finder `.DS_Store` 不打包），当前 ASAR SHA-256 和界面复核边界见上方。旧应用已可恢复地移入废纸篓。
+- 此次不升级版本、不生成 DMG/Windows/APK、不提交或推送。签名为本机 ad-hoc，不是 Developer ID 公证发行验收；生产设备互联协议未改动。
+- 实现和回归入口详见 `docs/office-workflow.md`；这是轻量 Office 编辑器，不是 WPS/Microsoft Office 全量功能。Windows 原生安装和真实大文档跨平台验收未包含在本次 macOS 更新中。
+
+## 2026-10-10 本机开发更新（0.26.10，不出安装包）
+
+- 会话列表默认宽度 216 px（图标轨道另计），支持拖动、键盘微调、双击复位与本机记忆；拖动过程不重渲染整个 App。
+- 助手回复底栏新增“分支到新聊天”。新会话复制至选中回复为止的历史、同 Bot/模型/工作区与附件元数据；外部渠道身份、运行游标、待追加指令与用量不继承。源会话、源附件、正在执行的请求不变。
+- 助手回复的时间、模型 ID、耗时、速度和操作按钮桌面同行；窄屏自然换行，完整按钮名称通过悬停或键盘聚焦显示。
+- 自动编排：复杂任务先结构化规划，独立分支最多 5 路并行（计划总任务仍最多 6 个）；手动 `delegate_task` 默认并发及每父级任务上限均为 5。DAG 依赖及写入范围冲突由调度器控制，真实写工具还需经过进程级资源锁；嵌套等待让位与最深 4 层保留。主 Agent 汇总校验；普通问题跳过规划请求。
+- 任务卡通过 `orchestration` 流事件更新，最终快照存于 `agentSteps[0].orchestration`，沿用现有 JSON 列，无数据库迁移。停止/调整会取消关联任务树，并行询问串行显示且可取消。模型生成的子任务不能代替真实用户原话授权。
+- 专项测试：`test:sidebar-layout`、`test:conversation-fork`、`test:message-footer-ui`、`test:agent-task-scheduler`、`test:agent-orchestration`、`test:agent-task-plan-ui`；运行记录和旧版本交接说明保留在下方。
+- 更新本机 `.app` 先打到独立 staging、校验源码与 ASAR 字节，再在应用退出后同盘原子交换；不得直接覆盖正在运行的 `.app`。不升版本、不提交或推送，不生成 DMG/Windows/APK。
+- 交付验收：全量 67/67 测试通过，本机 `.app` 已完成原子替换并重开；实际包内 129 个 `dist` 文件和 10 个关键 Electron 文件逐字节匹配源码。已确认启动进入主界面及侧栏默认 216 px。系统屏幕捕捉服务间歇报错，真实桌面交互复核未全部完成；Windows 真实进程树终止与安装包验收不包含在本次结果中。
+- 回退：本次交换出来的旧应用包及 staging 辅助文件已可恢复地移至 `/Users/hank/.Trash/ZSense-orchestration-O0mwRm`；未删除用户数据。
+
 本文件给“换账号 / 换会话”后的继任者看：不需要历史对话，读完这一份就能继续开发。更新日期：2026-09-19（当前版本 0.25.4，`release/` 里已有 0.25.4 的 dmg / zip / exe）。
 
 ## 1. 仓库现状
@@ -7,7 +71,7 @@
 - 目录：`/Volumes/out1/ZSense`，分支 `main`，版本 `0.25.4`，`package.json` 里的 `productName` 是 `ZSense`，`appId` 是 `ai.zsense.studio`。标签：`0.24.0`、`0.25.0`、`0.25.1`、`0.25.2`、`0.25.3`、`0.25.4`。
 - 本地 `release/mac-arm64/ZSense.app` 是**可以直接双击运行**的完整应用包（`npm run desktop:pack` 生成），每次改完代码都要重新生成；`release/ZSense-0.25.3-mac-arm64.{dmg,zip}` 与 `release/ZSense-0.25.3-win-x64.exe` 是 0.25.3 的安装包，出包与自检流程见 `docs/desktop.md` 的「打包与校验」。⚠️ 安装包只对应打标签时的代码：0.25.4 已包含「/Bot 名」快捷指令、钉钉表情已读、总览卡片改动、对话分组拖拽，以及「总览无定时任务时隐藏整块区块」「定时任务逐个的总览展示开关」（用户要求沿用同一版本号多次重新出包，标签 `0.25.4` 已指向最后一次打包的提交 `c41b6a5`；`release/` 里的三份 0.25.4 安装包都是覆盖更新的）；之后再改代码只更新应用目录，**不出安装包**，要出包先升版本号（用户要求时才做）。
 - **代码只在本机**：GitHub 上的 `zhima071/ZSense`（私有）与 `zhima071/ChuanhuChatGPT`（旧 fork）已按用户要求删除，`git remote -v` 里的 `origin` 指向已失效地址（推送只会 404、不会误传）。删除前的完整备份在 `/Users/hank/Desktop/ZSense-完整备份-20260919-1810.bundle`（`git bundle create --all`，629 MB，可完整恢复）。
-- `release/`、`dist/`、`node_modules/` 已被 `.gitignore` 忽略；`bundled-tools/`（约 1.3 GB 的 officecli / dws / kdocs-cli / whisper / MOSS-TTS / VC++ 运行库）**故意没有进版本库**，由 `npm run tools:prepare:win` 或安装包构建流程准备。
+- `release/`、`dist/`、`node_modules/` 已被 `.gitignore` 忽略；`bundled-tools/`（officecli / dws / kdocs-cli / Whisper Base Q5 / MeloTTS / 原生语音及 VC++ 运行库）**故意没有进版本库**，由离线工具与语音资源准备脚本生成。
 - 用户明确要求：**不要 reset、不要 clean、不要覆盖未提交改动**；每次改完代码都要重新生成 `release/mac-arm64/ZSense.app`；**安装包只在用户明确要求时打**（0.25.3 是用户点名要的）。改动按功能分批提交并打标签，界面文案 / 注释 / 文档一律中文。
 
 ## 2. 常用命令
@@ -58,7 +122,7 @@ npm run desktop:build:win   # 产出 .exe（NSIS，含 Windows 离线工具链�
 | 功能 | **设备互联按 IP 直连**：组播被路由器隔离（访客网络 / AP 隔离 / 跨网段）时，可按「对方地址 + 端口 + 配对码」直接配对，走单播 HTTP；HTTP 端口默认固定 `39072` 并持久化，占用时回退随机端口。面板新增「搜不到对方？按 IP 直连」区块并显示本机地址与端口；`test:device-link` 新增直连配对、错误配对码/非法地址拒绝、端口稳定与重启保持一致等断言。 | `electron/services/device-link-service.mjs`、`electron/ipc.mjs`、`electron/preload.cjs`、`src/components/DeviceLinkSettingsPanel.tsx`、`scripts/device-link-smoke.mjs` |
 | 文档 | **效率方法论与基线**：`docs/efficiency.md`（怎么量、四个杠杆、已落地/已否决清单、回归保护）；可重复测量脚本 `npm run bench:efficiency` | `docs/efficiency.md`、`scripts/efficiency-bench.mjs` |
 | 优化 | **执行效率体检**：热点查询加表达式索引（messages(conversation_id, datetime(created_at)) 等）、`loadSettings()/loadGatewayConnections()/loadBotIds()` 轻量读取替代整库快照（实测 0.1ms vs 28.8ms）、流式增量按 60ms 合并 + 跳过无变化的会话进度更新、收尾轮空内容自动重试一次、已结束运行只保留末尾 8 步游标；新增 `npm test` 并行测试入口（42 个测试 24s，串行 36s）与 `test:efficiency` 回归。 | `electron/services/database.mjs`、`src/utils/stream-delta-buffer.ts`、`scripts/run-all-tests.mjs`、`scripts/efficiency-smoke.mjs` |
-| 优化 | **并行执行**：并行机制本来就在（同轮多个只读工具并发执行、子 Agent 默认 3 并发），但模型不会用。现在系统提示词新增「并行执行规则」（先规划→互不依赖的同轮一起发/一次发多个 delegate_task；写同一文件或有依赖的必须串行；派发后用一次 delegate_status 等待），`delegate_task` 描述也说明了可以一轮并发派发。`test:subagents` 新增计时断言：3 条支线并行总耗时 < 700ms（串行会是 ~900ms） | `electron/services/zsense-agent-core.mjs`、`electron/services/agent-capability-service.mjs`、`scripts/subagent-service-smoke.mjs` |
+| 优化 | **并行执行**：同轮多个只读工具并发执行；子 Agent 默认 5 并发、每父级默认最多 5 个，自动计划总任务仍最多 6 个。系统提示词要求先规划、互不依赖的同轮一起发/一次发多个 `delegate_task`，写同一文件或有依赖的必须串行；派发后用一次 `delegate_status` 等待。`test:subagents` 验证 5 条支线同时运行、第 6 条等待、取消实际结束后才释放槽位；调度器测试保留写锁与依赖回归。 | `electron/services/zsense-agent-core.mjs`、`electron/services/agent-capability-service.mjs`、`scripts/subagent-service-smoke.mjs`、`scripts/agent-task-scheduler-smoke.mjs` |
 | UI | **定时任务改成紧凑卡片网格 + 浮动详情面板**：整行大卡换成 `repeat(auto-fill, minmax(268px, 1fr))` 的矩形小卡（约 273×132，一行两张），只显示图标、状态、名称、频率、下次运行与「立即运行」；点卡片用 `createPortal` 挂到 `document.body` 开 760×496 浮动面板（任务内容 / 运行配置 / 最近一次运行 + 立即运行、编辑、暂停、打开工作区、删除、查看完整对话），✕ / 遮罩 / Esc 关闭；同时删掉列表底部 330px 的空白占位。 | `src/components/ScheduledTasksPage.tsx`、`src/styles.css`、`scripts/scheduled-task-display-smoke.mjs` |
 | UI | **设置导航**：「技能管理」「工具与 MCP」「浏览器」分别独立显示。技能页只保留 SKILL.md 的创建、导入、分配、编辑与更新。 | `src/components/SystemPages.tsx`、`src/components/SkillsPage.tsx`、`src/styles.css` |
 | 修复 | **Web 访问地址优先显示局域网地址**：服务端 `urls` 不再返回 `127.0.0.1`（本机地址单独用 `localUrl` 返回），面板把局域网 https 地址放首位、复制按钮复制的就是它——之前复制到的是 `127.0.0.1`，在别的设备上打不开。 | `electron/services/web-bridge-service.mjs`、`src/components/WebAccessPanel.tsx` |

@@ -1,15 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { promisify } from 'node:util'
 import { extractPdfText, formatPdfExtraction } from './pdf-parser.mjs'
+import { runOfficeCommand } from './office-command-runner.mjs'
 
 const STATES = new Set(['running', 'review', 'delivering', 'completed', 'failed', 'interrupted'])
 const MAX_INDEX_BYTES = 512 * 1024
 const TEXT_EXTENSIONS = new Set(['.txt', '.md', '.csv', '.tsv', '.json', '.html', '.htm', '.xml', '.log'])
 const OFFICE_EXTENSIONS = new Set(['.docx', '.xlsx', '.pptx'])
-const execFileAsync = promisify(execFile)
 const iso = () => new Date().toISOString()
 const json = (value, fallback) => { try { return JSON.parse(value) } catch { return fallback } }
 const bounded = (value, limit) => String(value ?? '').slice(0, limit)
@@ -223,10 +221,7 @@ export class OfficeTaskService {
         try { return fs.statSync(candidate).isFile() } catch { return false }
       })
       if (!tool) return null
-      const result = await execFileAsync(tool, ['view', resolved, 'text'], {
-        timeout: 90_000, maxBuffer: 2 * 1024 * 1024, windowsHide: true,
-        env: { ...process.env, OFFICECLI_NO_AUTO_RESIDENT: '1' },
-      })
+      const result = await runOfficeCommand(tool, ['view', resolved, 'text'], { timeout: 90_000, maxBuffer: 2 * 1024 * 1024 })
       body = String(result.stdout || '').slice(0, 120_000)
     }
     else return null

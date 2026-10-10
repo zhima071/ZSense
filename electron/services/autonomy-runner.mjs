@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { NATIVE_BOT_ID } from './database.mjs'
+import { createMemoryScope } from './memory-scope.mjs'
 
 const POLL_INTERVAL_MS = 15_000
 
@@ -90,7 +91,7 @@ export class AutonomyRunner {
     const startedAt = Date.now()
     try {
       const workspace = this.database.loadWorkspace()
-      const bot = task.scope === NATIVE_BOT_ID ? nativeIdentity(workspace) : this.database.getBot(task.scope)
+      const bot = task.scope === NATIVE_BOT_ID ? nativeIdentity(workspace) : workspace.bots.find((item) => item.id === task.scope)
       if (!bot) throw new Error('持续任务所属 Bot 已被删除。')
       if (task.scope !== NATIVE_BOT_ID && bot.status === 'paused') {
         this.capabilityService.updateAutonomyItem(task.kind, task.id, { nextRunAt: new Date(Date.now() + 5 * 60_000).toISOString(), lastError: '所属 Bot 已暂停。' })
@@ -115,7 +116,8 @@ export class AutonomyRunner {
       }
       const prompt = this.#prompt(task)
       const legacyMessages = conversation.messages || []
-      const memories = (await this.database.memoryService.recallMemories(task.scope, prompt, { limit: workspace.settings.memoryRecallLimit, characterBudget: 16_000 })).memories
+      const memoryScope = createMemoryScope({workspacePath})
+      const memories = (await this.database.memoryService.recallMemories(task.scope, prompt, { ...memoryScope,limit: workspace.settings.memoryRecallLimit, characterBudget: 5_000 })).memories
       const skills = workspace.skills.filter((skill) => task.scope === NATIVE_BOT_ID ? skill.assignedBotIds.length > 0 : skill.assignedBotIds.includes(task.scope))
       const requestId = `autonomy-${randomUUID()}`
       const result = await this.agentCore.chatStream({
@@ -133,6 +135,7 @@ export class AutonomyRunner {
         legacyMessages,
         skills,
         memories,
+        memoryScope,
         settings: workspace.settings,
         appContext: {
           automation: { id: task.id, kind: task.kind },

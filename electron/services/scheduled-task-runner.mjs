@@ -4,6 +4,7 @@ import path from 'node:path'
 import { NATIVE_BOT_ID } from './database.mjs'
 import { redactSensitiveText } from './redaction.mjs'
 import { nativeWorkspaceIdentity } from './workspace-context.mjs'
+import { createMemoryScope } from './memory-scope.mjs'
 
 const CHECK_INTERVAL_MS = 15_000
 
@@ -236,13 +237,26 @@ export class ScheduledTaskRunner {
     try { this.onChanged(workspace) } catch { /* a closed renderer must not stop scheduled work */ }
   }
 
-  #queueMemorySummaryRefresh({ task, modelConfiguration, apiKey, output }) {
+  #memorySummaryContext(taskId, sourceRunId, expectedRevision) {
+    const currentTask = this.database.getScheduledTask(taskId)
+    if (!currentTask?.memoryEnabled) return { reason: '任务已删除或任务记忆已关闭' }
+    if (Number(currentTask.memoryRevision || 0) !== expectedRevision) return { reason: '任务记忆已被清空、编辑或重新配置' }
+    const sourceRun = this.database.getScheduledTaskRun(sourceRunId)
+    if (!sourceRun || sourceRun.taskId !== taskId || sourceRun.status !== 'success') return { reason: '来源成功运行已删除或失效' }
+    return { task: currentTask }
+  }
+
+  #queueMemorySummaryRefresh({ task, sourceRunId, expectedRevision, modelConfiguration, apiKey, output }) {
     if (!task.memoryEnabled || !output.trim() || typeof this.agentCore?.summarizeScheduledTaskMemory !== 'function') return
+    const cancelled = (reason) => {
+      console.info('ZSense 定时任务滚动摘要已取消：', { taskId: task.id, sourceRunId, reason })
+    }
     const previous = this.memorySummaryPromises.get(task.id)
     const pipeline = (async () => {
       if (previous) await previous.catch(() => undefined)
-      const currentTask = this.database.getScheduledTask(task.id)
-      if (!currentTask?.memoryEnabled) return
+      const current = this.#memorySummaryContext(task.id, sourceRunId, expectedRevision)
+      if (!current.task) { cancelled(current.reason); return }
+      const currentTask = current.task
       const summary = await this.agentCore.summarizeScheduledTaskMemory({
         taskName: currentTask.name,
         taskPrompt: currentTask.prompt,
@@ -254,11 +268,13 @@ export class ScheduledTaskRunner {
         baseUrl: modelConfiguration.baseUrl || '',
       })
       if (!summary.trim()) return
-      const latestTask = this.database.getScheduledTask(task.id)
-      if (!latestTask?.memoryEnabled || latestTask.prompt !== currentTask.prompt) return
-      this.#emit(this.database.updateScheduledTaskMemorySummary(task.id, summary))
+      const latest = this.#memorySummaryContext(task.id, sourceRunId, expectedRevision)
+      if (!latest.task || latest.task.prompt !== currentTask.prompt) { cancelled(latest.reason || '任务提示已更改'); return }
+      const workspace = this.database.updateScheduledTaskMemorySummary(task.id, summary, { expectedRevision, sourceRunId })
+      if (!workspace) { cancelled('提交前任务记忆或来源运行已失效'); return }
+      this.#emit(workspace)
     })().catch((error) => {
-      console.warn('ZSense 定时任务滚动摘要更新失败：', error instanceof Error ? error.message : error)
+      console.warn('ZSense 定时任务滚动摘要更新失败：', redactSensitiveText(error instanceof Error ? error.message : String(error)))
     })
     const tracked = pipeline.finally(() => {
       if (this.memorySummaryPromises.get(task.id) === tracked) this.memorySummaryPromises.delete(task.id)
@@ -267,6 +283,8 @@ export class ScheduledTaskRunner {
   }
 
   async #execute(task) {
+    task = this.database.getScheduledTask(task.id) || task
+    const memoryRevision = Number(task.memoryRevision || 0)
     this.runningTaskIds.add(task.id)
     const startedAt = new Date()
     const runId = `task-run-${randomUUID()}`
@@ -314,8 +332,9 @@ export class ScheduledTaskRunner {
       const memoryLimit = workspace.settings.memoryRecallLimit
       const recalledMemories = task.memoryEnabled
         ? (await this.database.memoryService.recallMemories(NATIVE_BOT_ID, task.prompt, {
+          ...createMemoryScope({ workspacePath: task.workspacePath }),
           limit: memoryLimit,
-          characterBudget: Math.max(8_000, Math.min(24_000, Number(memoryLimit || 24) * 600)),
+          characterBudget: 5_000,
         })).memories
         : []
       const taskRunMemories = task.memoryEnabled
@@ -334,6 +353,7 @@ export class ScheduledTaskRunner {
         baseUrl: modelConfiguration.baseUrl || '',
         skills: selectedSkills,
         memories: [...recalledMemories, ...taskRunMemories],
+        memoryScope: createMemoryScope({ workspacePath: task.workspacePath }),
         settings: workspace.settings,
         appContext: {
           scheduledTask: { id: task.id, name: task.name, workspacePath: task.workspacePath, memoryEnabled: task.memoryEnabled, recalledTaskRuns: taskRunMemories.length },
@@ -390,7 +410,7 @@ export class ScheduledTaskRunner {
         output,
       })
       this.#emit(nextWorkspace)
-      this.#queueMemorySummaryRefresh({ task, modelConfiguration, apiKey, output })
+      this.#queueMemorySummaryRefresh({ task, sourceRunId: runId, expectedRevision: memoryRevision, modelConfiguration, apiKey, output })
       this.notify('completion', `定时任务已完成：${task.name}`, '执行结果已写入运行历史，滚动记忆摘要将在后台更新。')
       return nextWorkspace
     } catch (error) {

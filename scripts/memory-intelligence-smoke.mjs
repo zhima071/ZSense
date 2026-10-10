@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createMemoryMaintenanceQueue, findSimilarMemory, isAutomaticMemory, memorySimilarity, memoryTerms, scoreMemoryForQuery, selectCurationMemories, selectRelevantMemories, shouldExtractMemory, unsafeAutomaticMemory } from '../electron/services/memory-intelligence.mjs'
+import { createMemoryMaintenanceQueue, createMemoryRetrievalIndex, findSimilarMemory, isAutomaticMemory, memorySimilarity, memoryTerms, scoreMemoryForQuery, searchRelevantMemories, selectCurationMemories, selectRelevantMemories, shouldExtractMemory, unsafeAutomaticMemory } from '../electron/services/memory-intelligence.mjs'
 
 const NOW = Date.parse('2026-09-18T10:00:00.000Z')
 const memory = (overrides) => ({ id: 'memory-1', title: '', excerpt: '', type: 'fact', source: '用户手动', confidence: 1, updatedAt: '2026-09-17T10:00:00.000Z', ...overrides })
@@ -13,6 +13,11 @@ assert(memoryTerms('部署 a 到 ZSense').has('部署'), '中英混排没有保�
 assert(!memoryTerms('部署 a 到 ZSense').has('a'), '单字母英文词不应进入词表')
 assert(memoryTerms('确认').has('确') || memoryTerms('确认').has('确认'), '单字或双字中文没有被收录')
 assert.equal(memoryTerms('').size, 0, '空文本不应该产生词项')
+assert(memoryTerms('使用TypeScript开发ZSense').has('typescript'), '无空格中英混排必须保留英文词')
+assert(memoryTerms('使用TypeScript开发ZSense').has('zsense'), '无空格中英混排必须保留尾部英文词')
+const mutableTerms = memoryTerms('数据库TypeScript')
+mutableTerms.clear()
+assert(memoryTerms('数据库TypeScript').has('typescript'), '调用方不能修改缓存中的词表')
 
 // 打分：标题命中优先于正文命中，偏好与人工记忆有额外权重，时间越新分越高。
 const titleHit = scoreMemoryForQuery(memory({ title: '数据库迁移方案', excerpt: '无关内容' }), '数据库迁移方案', NOW)
@@ -96,6 +101,23 @@ assert.equal(shouldExtractMemory('你能不能告诉我现在几点？'), false,
 assert.equal(shouldExtractMemory('我叫小王'), true, '短身份事实不能被漏掉')
 assert.equal(shouldExtractMemory('以后都用简体中文回答我'), true, '明确长期偏好必须进入提取器')
 assert.equal(shouldExtractMemory('我更喜欢把任务按周安排'), true, '长期偏好必须进入提取器')
+for (const rejected of ['以后默认用英文吗？', '以后默认用英文吗', '请翻译：我叫小王', '他说“我叫小王”', '> 以后使用英文回答', '这次默认用英文回答', '今天我是医生', '我叫小王，密码是abc123', '假设我是一名医生']) {
+  assert.equal(shouldExtractMemory(rejected), false, `问句、引用、临时要求或敏感信息不能变成记忆：${rejected}`)
+}
+for (const rejected of ['请记住我的密码是abc123', '登录口令为hunter2', 'my password is hunter2', 'access token is abc123456', '我的Token是abcd1234', '密码设成abc123', 'Authorization: Bearer abc1234', '验证码123456', 'https://user:secret@example.com', 'postgres://user:secret@example.com']) {
+  assert.equal(unsafeAutomaticMemory(rejected), true, `自然语言凭据不能入库：${rejected}`)
+}
+assert.equal(unsafeAutomaticMemory('我是一名密码工程师'), false, '密码相关职业不能被误判为凭据')
+
+const largeIndex = createMemoryRetrievalIndex([
+  memory({ id: 'typescript-hit', title: '使用TypeScript开发', excerpt: '类型检查规范', source: 'ZSense 自动记忆' }),
+  ...Array.from({ length: 2_000 }, (_, index) => memory({ id: `finance-${index}`, title: `财务清单${index}`, excerpt: '资产核对', source: 'ZSense 自动记忆' })),
+])
+const indexedSelection = selectRelevantMemories(largeIndex, 'TypeScript', { now: NOW })
+assert.equal(indexedSelection.totalCandidates, 2_001)
+assert.equal(indexedSelection.scoredCandidates, 1, '倒排词项只为匹配候选打分')
+assert.equal(indexedSelection.memories[0]?.id, 'typescript-hit')
+assert.deepEqual(searchRelevantMemories(largeIndex, 'TypeScript').map((item) => item.id), ['typescript-hit'])
 
 const curation = selectCurationMemories([
   memory({ id: 'relevant', title: '输出语言', excerpt: '以后都用中文回复', type: 'preference' }),

@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
-  FilePenLine,
   FileCode2,
   FileSpreadsheet,
   FileText,
@@ -13,17 +12,20 @@ import {
   PanelRightOpen,
   Presentation,
   RefreshCw,
-  Save,
   X,
 } from 'lucide-react'
-import { FormEvent, KeyboardEvent as ReactKeyboardEvent, lazy, PointerEvent as ReactPointerEvent, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { forwardRef, KeyboardEvent as ReactKeyboardEvent, lazy, PointerEvent as ReactPointerEvent, Suspense, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { errorMessage, unwrapDesktop } from '../services/desktop'
 import type { ChatAttachment, OfficeDocumentKind, OfficeDocumentState } from '../types'
 import { HtmlArtifactEditor } from './HtmlArtifactEditor'
+import './OfficeArtifactPane.css'
 
 const SpreadsheetEditor = lazy(() => import('./SpreadsheetEditor').then((module) => ({ default: module.SpreadsheetEditor })))
 const WordDocumentEditor = lazy(() => import('./WordDocumentEditor').then((module) => ({ default: module.WordDocumentEditor })))
 const PdfDocumentEditor = lazy(() => import('./PdfDocumentEditor').then((module) => ({ default: module.PdfDocumentEditor })))
+const PowerPointDocumentEditor = lazy(() => import('./PowerPointDocumentEditor').then((module) => ({ default: module.PowerPointDocumentEditor })))
+
+export interface OfficeArtifactPaneHandle { requestNavigation: () => Promise<boolean> }
 
 interface OfficeArtifactPaneProps {
   filePath: string
@@ -57,15 +59,23 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-export function OfficeArtifactPane({ filePath, workspacePath, onClose, onAskAI, onAnnotatedScreenshot }: OfficeArtifactPaneProps) {
+export const OfficeArtifactPane = forwardRef<OfficeArtifactPaneHandle, OfficeArtifactPaneProps>(function OfficeArtifactPane({ filePath, workspacePath, onClose, onAskAI, onAnnotatedScreenshot }, ref) {
   const paneRef = useRef<HTMLElement>(null)
+  const currentPath = useRef(filePath)
+  currentPath.current = filePath
+  const lifecycle = useRef(0)
+  const mounted = useRef(true)
+  const busyRef = useRef('open')
   const [document, setDocument] = useState<OfficeDocumentState | null>(null)
   const [busy, setBusy] = useState('open')
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [editorOpen, setEditorOpen] = useState(false)
-  const [findText, setFindText] = useState('')
-  const [replaceText, setReplaceText] = useState('')
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+  const dirtyRef = useRef(false)
+  dirtyRef.current = hasUnsavedChanges
+  const documentRef = useRef(document)
+  const openedPathRef = useRef(filePath)
+  documentRef.current = document
   const [pdfRefreshKey, setPdfRefreshKey] = useState(0)
   const [panePercent, setPanePercent] = useState(() => {
     const stored = Number(window.localStorage.getItem('zsense.officePaneWidthPercent'))
@@ -101,44 +111,66 @@ export function OfficeArtifactPane({ filePath, workspacePath, onClose, onAskAI, 
     setPanePercent((current) => Math.min(75, Math.max(38, current + (event.key === 'ArrowLeft' ? 2 : -2))))
   }
 
-  const requestClose = useCallback(async () => {
-    const dirtyKind = document?.kind === 'html' ? ' HTML' : document?.kind === 'word' ? ' Word' : document?.kind === 'pdf' ? ' PDF' : ' Excel'
-    if (hasUnsavedChanges && !window.confirm(`这个${dirtyKind}文件还有未保存的修改，确定放弃修改并关闭吗？`)) return
-    if (hasUnsavedChanges && window.zsenseDesktop && document?.kind === 'html') {
-      try { await unwrapDesktop(window.zsenseDesktop.office.discardHtml({ filePath: document.filePath, clientId: 'office-pane' })) }
-      catch (reason) { setFeedback({ tone: 'error', message: `放弃 HTML 修改失败：${errorMessage(reason)}` }); return }
+  const requestNavigation = useCallback(async () => {
+    const opened = documentRef.current
+    const pathAtStart = currentPath.current, generation = lifecycle.current
+    const isCurrent = () => mounted.current && currentPath.current === pathAtStart && lifecycle.current === generation
+    if (!dirtyRef.current) return true
+    if (!window.confirm(`这个 ${opened ? kindLabels[opened.kind] : ''} 文件还有未保存的修改，确定放弃修改并离开吗？`)) return false
+    try {
+      if (opened && window.zsenseDesktop) {
+        const request = { filePath: opened.filePath, clientId: 'office-pane' }
+        if (opened.kind === 'html') await unwrapDesktop(window.zsenseDesktop.office.discardHtml(request))
+        if (opened.kind === 'word') await unwrapDesktop(window.zsenseDesktop.office.discardWord(request))
+        if (opened.kind === 'excel') await unwrapDesktop(window.zsenseDesktop.office.discardWorkbook(request))
+        if (opened.kind === 'powerpoint') await unwrapDesktop(window.zsenseDesktop.office.discardPresentation(request))
+      }
+      if (!isCurrent()) return false
+      dirtyRef.current = false; setHasUnsavedChanges(false)
+      return true
+    } catch (reason) {
+      if (isCurrent()) setFeedback({ tone: 'error', message: `放弃修改失败：${errorMessage(reason)}` })
+      return false
     }
-    if (hasUnsavedChanges && window.zsenseDesktop && document?.kind === 'word') {
-      try { await unwrapDesktop(window.zsenseDesktop.office.discardWord({ filePath: document.filePath, clientId: 'office-pane' })) }
-      catch (reason) { setFeedback({ tone: 'error', message: `放弃 Word 修改失败：${errorMessage(reason)}` }); return }
-    }
-    onClose()
-  }, [document, hasUnsavedChanges, onClose])
+  }, [])
+  useImperativeHandle(ref, () => ({ requestNavigation }), [requestNavigation])
+  const requestClose = useCallback(async () => { if (await requestNavigation()) onClose() }, [requestNavigation, onClose])
+
+  useEffect(() => {
+    mounted.current = true
+    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirtyRef.current) { event.preventDefault(); event.returnValue = '' } }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => { mounted.current = false; lifecycle.current += 1; window.removeEventListener('beforeunload', beforeUnload) }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
+    const requestId = `office-open-${crypto.randomUUID()}`
+    lifecycle.current += 1
     setDocument(null)
     setBusy('open')
+    busyRef.current = 'open'
     setFeedback(null)
     setEditorOpen(false)
-    setFindText('')
-    setReplaceText('')
     setHasUnsavedChanges(false)
+    dirtyRef.current = false
     setPdfRefreshKey((current) => current + 1)
     if (!window.zsenseDesktop) {
       setBusy('')
+      busyRef.current = ''
       setFeedback({ tone: 'error', message: '本地文件只能在 ZSense 桌面应用中打开。' })
       return () => { cancelled = true }
     }
-    unwrapDesktop(window.zsenseDesktop.office.open(filePath)).then((nextDocument) => {
+    unwrapDesktop(window.zsenseDesktop.office.open(filePath, { requestId })).then((nextDocument) => {
       if (cancelled) return
+      openedPathRef.current = filePath
       setDocument(nextDocument)
     }).catch((reason) => {
       if (!cancelled) setFeedback({ tone: 'error', message: errorMessage(reason) })
     }).finally(() => {
-      if (!cancelled) setBusy('')
+      if (!cancelled) { setBusy(''); busyRef.current = '' }
     })
-    return () => { cancelled = true }
+    return () => { cancelled = true; void window.zsenseDesktop?.office.cancelOpen?.(requestId).catch(() => undefined) }
   }, [filePath])
 
   useEffect(() => {
@@ -151,34 +183,24 @@ export function OfficeArtifactPane({ filePath, workspacePath, onClose, onAskAI, 
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [editorOpen, requestClose])
 
-  const run = async (key: string, action: () => Promise<void>) => {
-    if (busy) return
+  const run = async (key: string, action: (isCurrent: () => boolean) => Promise<void>) => {
+    if (busyRef.current) return
+    const pathAtStart = filePath, generation = lifecycle.current
+    const isCurrent = () => mounted.current && currentPath.current === pathAtStart && lifecycle.current === generation
+    busyRef.current = key
     setBusy(key)
     setFeedback(null)
-    try { await action() }
-    catch (reason) { setFeedback({ tone: 'error', message: errorMessage(reason) }) }
-    finally { setBusy('') }
+    try { await action(isCurrent) }
+    catch (reason) { if (isCurrent()) setFeedback({ tone: 'error', message: errorMessage(reason) }) }
+    finally { if (isCurrent()) { busyRef.current = ''; setBusy('') } }
   }
 
-  const refresh = () => run('refresh', async () => {
+  const refresh = () => run('refresh', async (isCurrent) => {
     if (!window.zsenseDesktop || !document) return
-    if (document.kind === 'pdf' && hasUnsavedChanges && !window.confirm('重新读取会放弃当前未保存的 PDF 修改，确定继续吗？')) return
-    if (document.kind === 'excel' && hasUnsavedChanges) {
-      if (!window.confirm('重新读取会放弃当前未保存的修改，确定继续吗？')) return
-      await unwrapDesktop(window.zsenseDesktop.office.discardWorkbook({ filePath: document.filePath, clientId: 'office-pane' }))
-      setHasUnsavedChanges(false)
-    }
-    if (document.kind === 'html' && hasUnsavedChanges) {
-      if (!window.confirm('重新读取会放弃当前未保存的 HTML 修改，确定继续吗？')) return
-      await unwrapDesktop(window.zsenseDesktop.office.discardHtml({ filePath: document.filePath, clientId: 'office-pane' }))
-      setHasUnsavedChanges(false)
-    }
-    if (document.kind === 'word' && hasUnsavedChanges) {
-      if (!window.confirm('重新读取会放弃当前未保存的 Word 修改，确定继续吗？')) return
-      await unwrapDesktop(window.zsenseDesktop.office.discardWord({ filePath: document.filePath, clientId: 'office-pane' }))
-      setHasUnsavedChanges(false)
-    }
-    setDocument(await unwrapDesktop(window.zsenseDesktop.office.refresh(document.filePath)))
+    if (!(await requestNavigation()) || !isCurrent()) return
+    const nextDocument = await unwrapDesktop(window.zsenseDesktop.office.refresh(document.filePath))
+    if (!isCurrent()) return
+    setDocument(nextDocument)
     if (document.kind === 'pdf') { setHasUnsavedChanges(false); setPdfRefreshKey((current) => current + 1) }
     setFeedback({ tone: 'success', message: '已从磁盘重新读取最新内容。' })
   })
@@ -193,25 +215,20 @@ export function OfficeArtifactPane({ filePath, workspacePath, onClose, onAskAI, 
     await unwrapDesktop(window.zsenseDesktop.office.openExternally(document.filePath))
   })
 
-  const submitReplacement = (event: FormEvent) => {
-    event.preventDefault()
-    void run('replace', async () => {
-      if (!window.zsenseDesktop || !document) return
-      const result = await unwrapDesktop(window.zsenseDesktop.office.replaceText({ filePath: document.filePath, find: findText, replace: replaceText }))
-      setDocument(result.document)
-      setFeedback({ tone: 'success', message: result.message })
-    })
-  }
-
   const showEditToggle = Boolean(document?.editable && document.kind !== 'excel')
-  const showDocumentEditDrawer = Boolean(document?.editable && document.kind !== 'excel' && document.kind !== 'html' && document.kind !== 'word' && document.kind !== 'pdf')
+  const childPath = openedPathRef.current
+  const childGeneration = lifecycle.current
+  const childIsCurrent = useCallback(() => mounted.current && currentPath.current === childPath && lifecycle.current === childGeneration, [childPath, childGeneration])
+  const childDocumentChange = useCallback((next: OfficeDocumentState) => { if (childIsCurrent() && next.filePath === documentRef.current?.filePath) setDocument(next) }, [childIsCurrent])
+  const childFeedback = useCallback((next: { tone: 'success' | 'error'; message: string } | null) => { if (childIsCurrent()) setFeedback(next) }, [childIsCurrent])
+  const childDirtyChange = useCallback((next: boolean) => { if (childIsCurrent()) { dirtyRef.current = next; setHasUnsavedChanges(next) } }, [childIsCurrent])
   const externalOpenLabel = document?.kind === 'image' ? '使用系统图片查看器打开' : document?.kind === 'pdf' ? '使用系统默认 PDF 应用打开' : '使用 Office / WPS 打开'
   const documentDescription = document?.kind === 'image'
     ? `${kindLabels.image} · ${formatBytes(document.size)} · 本地预览`
     : document ? `${kindLabels[document.kind]} · ${formatBytes(document.size)} · ${document.editable ? '本地可编辑' : '需要转换格式'}` : ''
 
   return (
-    <aside ref={paneRef} className={`office-artifact-pane ${editorOpen ? 'editor-open' : ''}`} aria-label="对话文件查看与编辑器">
+    <aside ref={paneRef} className={`office-artifact-pane ${editorOpen ? 'editor-open' : ''} ${feedback && document ? 'has-feedback' : ''}`} aria-label="对话文件查看与编辑器">
       <div
         className="office-artifact-resize-handle"
         role="separator"
@@ -245,42 +262,28 @@ export function OfficeArtifactPane({ filePath, workspacePath, onClose, onAskAI, 
         </div>
       </header>
 
+      {feedback && document && <div className={`office-artifact-feedback ${feedback.tone}`} role={feedback.tone === 'error' ? 'alert' : 'status'}>{feedback.tone === 'success' ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span>{feedback.message}</span><button type="button" onClick={() => setFeedback(null)} aria-label="关闭提示"><X size={13} /></button></div>}
+
       <div className="office-artifact-body">
         {busy && !document && <div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>{busy === 'retry' ? '正在重新读取文件' : '正在打开文件'}</strong><span>ZSense 正在本机读取内容…</span></div>}
-        {!busy && feedback?.tone === 'error' && !document && <div className="office-artifact-state error" role="alert"><AlertTriangle size={25} /><strong>无法打开这个文件</strong><span>{feedback.message}</span><button className="button secondary small" type="button" onClick={() => void run('retry', async () => { if (!window.zsenseDesktop) return; const nextDocument = await unwrapDesktop(window.zsenseDesktop.office.open(filePath)); setDocument(nextDocument); setFeedback({ tone: 'success', message: '文件已重新读取。' }) })}>重试</button></div>}
+        {!busy && feedback?.tone === 'error' && !document && <div className="office-artifact-state error" role="alert"><AlertTriangle size={25} /><strong>无法打开这个文件</strong><span>{feedback.message}</span><button className="button secondary small" type="button" onClick={() => void run('retry', async (isCurrent) => { if (!window.zsenseDesktop) return; const nextDocument = await unwrapDesktop(window.zsenseDesktop.office.open(filePath)); if (!isCurrent()) return; openedPathRef.current = filePath; setDocument(nextDocument); setFeedback({ tone: 'success', message: '文件已重新读取。' }) })}>重试</button></div>}
 
-        {document?.editable && document.kind === 'excel' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动表格引擎</strong><span>首次打开需要加载本地编辑组件…</span></div>}><SpreadsheetEditor document={document} workspacePath={workspacePath} onDocumentChange={setDocument} onFeedback={setFeedback} onDirtyChange={setHasUnsavedChanges} onAskAI={onAskAI} /></Suspense>}
+        {document?.editable && document.kind === 'excel' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动表格引擎</strong><span>首次打开需要加载本地编辑组件…</span></div>}><SpreadsheetEditor key={document.filePath} document={document} workspacePath={workspacePath} onDocumentChange={childDocumentChange} onFeedback={childFeedback} onDirtyChange={childDirtyChange} onAskAI={onAskAI} /></Suspense>}
 
-        {document?.editable && document.kind === 'html' && <HtmlArtifactEditor document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={setDocument} onFeedback={setFeedback} onDirtyChange={setHasUnsavedChanges} onAskAI={onAskAI} />}
+        {document?.editable && document.kind === 'html' && <HtmlArtifactEditor key={document.filePath} document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={childDocumentChange} onFeedback={childFeedback} onDirtyChange={childDirtyChange} onAskAI={onAskAI} />}
 
-        {document?.editable && document.kind === 'word' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动 Word 编辑器</strong><span>正在建立本地手动保存会话…</span></div>}><WordDocumentEditor document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={setDocument} onFeedback={setFeedback} onDirtyChange={setHasUnsavedChanges} onAskAI={onAskAI} /></Suspense>}
+        {document?.editable && document.kind === 'word' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动 Word 编辑器</strong><span>正在建立本地手动保存会话…</span></div>}><WordDocumentEditor key={document.filePath} document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={childDocumentChange} onFeedback={childFeedback} onDirtyChange={childDirtyChange} onAskAI={onAskAI} /></Suspense>}
 
-        {document?.editable && document.kind === 'pdf' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动 PDF 编辑器</strong></div>}><PdfDocumentEditor key={pdfRefreshKey} document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={setDocument} onFeedback={setFeedback} onDirtyChange={setHasUnsavedChanges} onAskAI={onAskAI} onAnnotatedScreenshot={onAnnotatedScreenshot} /></Suspense>}
+        {document?.editable && document.kind === 'pdf' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动 PDF 编辑器</strong></div>}><PdfDocumentEditor key={`${document.filePath}-${pdfRefreshKey}`} document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={childDocumentChange} onFeedback={childFeedback} onDirtyChange={childDirtyChange} onAskAI={onAskAI} onAnnotatedScreenshot={onAnnotatedScreenshot} /></Suspense>}
+
+        {document?.editable && document.kind === 'powerpoint' && <Suspense fallback={<div className="office-artifact-state"><LoaderCircle className="spin" size={24} /><strong>正在启动 PowerPoint 编辑器</strong></div>}><PowerPointDocumentEditor key={document.filePath} document={document} workspacePath={workspacePath} editing={editorOpen} onDocumentChange={childDocumentChange} onFeedback={childFeedback} onDirtyChange={childDirtyChange} onAskAI={onAskAI} /></Suspense>}
 
         {document?.kind === 'image' && <section className="office-artifact-image-preview" aria-label={`${document.name} 大图预览`}>
           <img key={document.previewUrl} src={document.previewUrl} alt={document.name} draggable={false} onError={() => setFeedback({ tone: 'error', message: '图片解码失败，可尝试使用系统图片查看器打开。' })} />
         </section>}
 
-        {document?.editable && document.kind !== 'excel' && document.kind !== 'html' && document.kind !== 'word' && document.kind !== 'pdf' && <section className="office-artifact-preview" aria-label={`${document.name} 预览`}>
-          <iframe key={document.previewUrl} src={document.previewUrl} sandbox="allow-scripts" title={`${document.name} 本地预览`} />
-        </section>}
-
-        {feedback && document && <div className={`office-artifact-feedback ${feedback.tone}`} role={feedback.tone === 'error' ? 'alert' : 'status'}>{feedback.tone === 'success' ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}<span>{feedback.message}</span><button type="button" onClick={() => setFeedback(null)} aria-label="关闭提示"><X size={13} /></button></div>}
-
-        {showDocumentEditDrawer && editorOpen && <aside className="office-artifact-editor" aria-label="Office 编辑工具">
-          <header><div><strong>编辑工具</strong><small>查找文字并写回原文件</small></div><button type="button" onClick={() => setEditorOpen(false)} aria-label="收起编辑工具"><X size={15} /></button></header>
-          <div className="office-edit-note"><CheckCircle2 size={16} /><span><strong>点击操作后才会保存</strong><small>所有处理均在本机完成，不会上传文件。</small></span></div>
-
-          <form className="office-edit-card" onSubmit={submitReplacement}>
-            <header><FilePenLine size={17} /><span><strong>查找与替换</strong><small>保留版式并修改匹配文字</small></span></header>
-            <label><span>查找文字</span><textarea value={findText} onChange={(event) => setFindText(event.target.value)} required rows={3} placeholder="输入原来的文字" /></label>
-            <label><span>替换为</span><textarea value={replaceText} onChange={(event) => setReplaceText(event.target.value)} rows={3} placeholder="留空可删除匹配文字" /></label>
-            <button className="button primary" disabled={!findText.trim() || Boolean(busy)}>{busy === 'replace' ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}{busy === 'replace' ? '正在保存…' : '替换并保存'}</button>
-          </form>
-        </aside>}
-
         {document?.kind === 'legacy' && <section className="office-artifact-legacy"><AlertTriangle size={27} /><strong>需要先转换为新版格式</strong><p>{document.message}</p><button className="button primary small" type="button" onClick={() => void openExternally()}><ExternalLink size={15} />使用 Office / WPS 打开</button></section>}
       </div>
     </aside>
   )
-}
+})

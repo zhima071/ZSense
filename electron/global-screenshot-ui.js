@@ -2,6 +2,35 @@ const mode = new URLSearchParams(location.search).get('mode') || 'select'
 document.body.dataset.mode = mode
 const api = window.zsenseShot
 const close = () => { void api.close() }
+const tooltip = document.getElementById('button-tooltip')
+let tooltipButton = null
+function hideTooltip() {
+  tooltip.hidden = true
+  tooltipButton?.removeAttribute('aria-describedby')
+  tooltipButton = null
+}
+function showTooltip(button) {
+  if (button.disabled) return
+  hideTooltip()
+  tooltipButton = button
+  tooltip.textContent = button.dataset.tooltip
+  tooltip.hidden = false
+  button.setAttribute('aria-describedby', tooltip.id)
+  const bounds = button.getBoundingClientRect()
+  const size = tooltip.getBoundingClientRect()
+  const left = Math.max(8, Math.min(innerWidth - size.width - 8, bounds.left + (bounds.width - size.width) / 2))
+  const preferredTop = bounds.bottom + 7
+  const top = preferredTop + size.height <= innerHeight - 8 ? preferredTop : bounds.top - size.height - 7
+  tooltip.style.left = `${left}px`
+  tooltip.style.top = `${Math.max(8, Math.min(innerHeight - size.height - 8, top))}px`
+}
+document.querySelectorAll('button[data-tooltip]').forEach((button) => {
+  button.addEventListener('pointerenter', () => showTooltip(button))
+  button.addEventListener('focus', () => showTooltip(button))
+  for (const event of ['pointerleave', 'blur', 'click']) button.addEventListener(event, hideTooltip)
+})
+window.addEventListener('resize', hideTooltip)
+window.addEventListener('blur', hideTooltip)
 const point = (event, element) => {
   const bounds = element.getBoundingClientRect()
   return { x: Math.max(0, Math.min(bounds.width, event.clientX - bounds.left)), y: Math.max(0, Math.min(bounds.height, event.clientY - bounds.top)) }
@@ -72,10 +101,21 @@ if (mode === 'edit') {
   let color = '#dc2626'
   let busy = false
   let imageReady = false
-  function showStatus(message, error = false) { status.textContent = message; status.classList.toggle('error', error) }
+  let statusTimer = null
+  function clearStatus() { clearTimeout(statusTimer); status.hidden = true; status.textContent = '' }
+  function showStatus(message, error = false) {
+    clearStatus()
+    status.textContent = message
+    status.classList.toggle('error', error)
+    status.hidden = false
+    statusTimer = setTimeout(clearStatus, error ? 6000 : 3500)
+  }
   function fitCanvas() {
     if (!imageReady) return
-    const fit = Math.min(1, (stage.clientWidth - 36) / canvas.width, (stage.clientHeight - 36) / canvas.height)
+    const style = getComputedStyle(stage)
+    const availableWidth = stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+    const availableHeight = stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)
+    const fit = Math.min(1, availableWidth / canvas.width, availableHeight / canvas.height)
     canvas.style.width = `${Math.max(1, Math.round(canvas.width * fit))}px`
     canvas.style.height = `${Math.max(1, Math.round(canvas.height * fit))}px`
   }
@@ -131,7 +171,7 @@ if (mode === 'edit') {
     operations.forEach((operation) => stroke(context, operation))
     if (current) stroke(context, current)
   }
-  function commit(operation) { operations.push(operation); redoStack.length = 0; render(); showStatus(`${operations.length} 个批注 · ✅ 复制最终图片`) }
+  function commit(operation) { operations.push(operation); redoStack.length = 0; render(); clearStatus() }
   api.onInit((payload) => {
     image.onload = () => {
       canvas.width = image.naturalWidth
@@ -145,19 +185,20 @@ if (mode === 'edit') {
   })
   window.addEventListener('resize', fitCanvas)
   document.getElementById('editor-close').addEventListener('click', close)
-  document.querySelectorAll('[data-tool]').forEach((button) => button.addEventListener('click', () => {
+  document.querySelectorAll('button[data-tool]').forEach((button) => button.addEventListener('click', () => {
     tool = button.dataset.tool
     canvas.dataset.tool = tool
-    document.querySelectorAll('[data-tool]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)))
+    document.querySelectorAll('button[data-tool]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)))
     labelWrap.classList.toggle('visible', tool === 'text')
+    fitCanvas()
     if (tool === 'text') labelText.focus()
   }))
   document.querySelectorAll('[data-color]').forEach((button) => button.addEventListener('click', () => {
     color = button.dataset.color
     document.querySelectorAll('[data-color]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)))
   }))
-  function undo() { if (operations.length) { redoStack.push(operations.pop()); render(); showStatus(`${operations.length} 个批注`) } }
-  function redo() { if (redoStack.length) { operations.push(redoStack.pop()); render(); showStatus(`${operations.length} 个批注`) } }
+  function undo() { if (operations.length) { redoStack.push(operations.pop()); render(); clearStatus() } }
+  function redo() { if (redoStack.length) { operations.push(redoStack.pop()); render(); clearStatus() } }
   document.getElementById('undo').addEventListener('click', undo)
   document.getElementById('redo').addEventListener('click', redo)
   canvas.addEventListener('pointerdown', (event) => {
@@ -195,16 +236,16 @@ if (mode === 'edit') {
   async function output(action) {
     if (busy || !imageReady) return
     busy = true
-    document.querySelectorAll('.editor-footer button').forEach((button) => { button.disabled = true })
+    document.querySelectorAll('#download, #pin, #copy').forEach((button) => { button.disabled = true })
     try {
       render()
       const result = await api.output(action, canvas.toDataURL('image/png'))
-      if (result?.saved) showStatus(`已下载到 ${result.path}`)
-      else if (result?.canceled) showStatus('已取消下载，截图仍可继续编辑。')
+      if (result?.saved) showStatus('已保存截图')
+      else if (result?.canceled) showStatus('已取消保存')
     } catch (error) { showStatus(String(error?.message || '操作失败，请重试。'), true) }
     finally {
       busy = false
-      document.querySelectorAll('.editor-footer button').forEach((button) => { button.disabled = false })
+      document.querySelectorAll('#download, #pin, #copy').forEach((button) => { button.disabled = false })
     }
   }
   document.getElementById('download').addEventListener('click', () => { void output('download') })
@@ -212,6 +253,7 @@ if (mode === 'edit') {
   document.getElementById('copy').addEventListener('click', () => { void output('copy') })
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') { close(); return }
+    if (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]')) return
     if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return
     event.preventDefault()
     if (event.shiftKey) redo()

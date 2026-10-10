@@ -35,56 +35,36 @@ jobs:
           path: .cache/windows-offline-assets
           key: zsense-windows-offline-v1-${{ hashFiles('scripts/windows-offline-assets.mjs') }}
 
-      - name: Restore pinned speech models from previous release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $previous = '.cache\previous-release'
-          New-Item -ItemType Directory -Force $previous | Out-Null
-          gh release download v0.26.6 -R zhima071/ZSense --pattern 'ZSense-0.26.6-win-x64.exe' --dir $previous
-          if ($LASTEXITCODE -ne 0) { throw '无法下载已固定的上一版 Windows 安装包。' }
-          $installer = Join-Path $previous 'ZSense-0.26.6-win-x64.exe'
-          $digest = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($digest -ne '7a7046ae33cdfcbd434e0b7ad9c2db93fa84adc977b360bb3ca28813e7005f6a') {
-            throw '上一版 Windows 安装包 SHA-256 不匹配。'
-          }
-          $extracted = Join-Path $previous 'extracted'
-          New-Item -ItemType Directory -Force $extracted | Out-Null
-          $sevenZip = 'C:\Program Files\7-Zip\7z.exe'
-          if (-not (Test-Path $sevenZip -PathType Leaf)) { throw 'Windows 构建机缺少 7-Zip，无法解包上一版安装包。' }
-          & $sevenZip x -y "-o$extracted" $installer '$PLUGINSDIR/app-64.7z' | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw '无法提取上一版安装包的内层归档。' }
-          $payload = Join-Path $previous 'payload'
-          New-Item -ItemType Directory -Force $payload | Out-Null
-          & $sevenZip x -y "-o$payload" (Join-Path $extracted '$PLUGINSDIR/app-64.7z') | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw '无法读取上一版安装包中的语音资源。' }
-          $tools = Join-Path $payload 'resources/bundled-tools'
-          New-Item -ItemType Directory -Force 'bundled-tools/shared/tts', 'bundled-tools/darwin-arm64/stt', 'bundled-tools/darwin-arm64/licenses' | Out-Null
-          Copy-Item -Recurse -Force (Join-Path $tools 'tts/moss') 'bundled-tools/shared/tts/moss'
-          Copy-Item -Force (Join-Path $tools 'stt/ggml-base.bin') 'bundled-tools/darwin-arm64/stt/ggml-base.bin'
-          Copy-Item -Force (Join-Path $tools 'stt/LICENSE.whisper.cpp') 'bundled-tools/darwin-arm64/stt/LICENSE.whisper.cpp'
-          Copy-Item -Force (Join-Path $tools 'stt/LICENSE.openai-whisper') 'bundled-tools/darwin-arm64/stt/LICENSE.openai-whisper'
-          Copy-Item -Force (Join-Path $tools 'licenses/LICENSE.lark-cli') 'bundled-tools/darwin-arm64/licenses/LICENSE.lark-cli'
+      - name: Restore pinned offline speech cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/voice-assets
+          key: zsense-voice-v1-${{ hashFiles('scripts/voice-assets.mjs') }}
 
       - name: Prepare pinned Windows offline tools
         shell: pwsh
         env:
           ZSENSE_WINDOWS_ASSET_CACHE: ${{ github.workspace }}\.cache\windows-offline-assets
           ZSENSE_WINDOWS_TOOLS_MIRROR: ${{ vars.ZSENSE_WINDOWS_TOOLS_MIRROR }}
-        run: npm run tools:prepare:win
+          ZSENSE_VOICE_ASSET_CACHE: ${{ github.workspace }}\.cache\voice-assets
+          ZSENSE_VOICE_ASSET_MIRROR: ${{ vars.ZSENSE_VOICE_ASSET_MIRROR }}
+        run: |
+          npm run tools:prepare:win
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Windows offline resource preparation failed.' }
 
       - name: Run application checks
+        shell: pwsh
         run: |
-          npm run typecheck
-          npm run test:runtime
-          npm run test:windows-installer
-          npm run test:windows-tools
-          npm run test:office
-          npm run test:scheduled-display
-          npm run test:chat
-          npm run test:voice
-          npm run test:independence
+          $checks = @(
+            'typecheck', 'test:runtime', 'test:windows-installer', 'test:windows-tools',
+            'test:memory-upgrade', 'test:memory-entrypoints', 'test:memory-ui-model', 'test:scheduled-memory-races',
+            'test:office', 'test:scheduled-display', 'test:chat', 'test:voice', 'test:voice-backend',
+            'test:voice-playback', 'test:voice-conversation', 'test:independence'
+          )
+          foreach ($check in $checks) {
+            npm run $check
+            if ($LASTEXITCODE -ne 0) { throw "Application check failed: $check (exit $LASTEXITCODE)" }
+          }
 
       - name: Build Windows installer
         run: npm run desktop:build:win
@@ -104,14 +84,29 @@ jobs:
             "$resources\bundled-tools\dws.exe",
             "$resources\bundled-tools\kdocs-cli.exe",
             "$resources\bundled-tools\stt\whisper-cli.exe",
-            "$resources\bundled-tools\stt\ggml-base.bin",
+            "$resources\bundled-tools\stt\ggml-base-q5_1.bin",
             "$resources\bundled-tools\redist\VC_redist.x64.exe",
-            "$resources\bundled-tools\tts\moss\manifest.json"
+            "$resources\bundled-tools\tts\sherpa-onnx-offline-tts.exe",
+            "$resources\bundled-tools\tts\onnxruntime.dll",
+            "$resources\bundled-tools\tts\onnxruntime_providers_shared.dll",
+            "$resources\bundled-tools\tts\manifest.json",
+            "$resources\bundled-tools\tts\melo\manifest.json"
           )
           foreach ($file in $required) {
             if (-not (Test-Path $file -PathType Leaf)) { throw "Windows 完整离线包缺少 $file" }
           }
-          node scripts/verify-windows-offline-tools.mjs "$resources\bundled-tools" "$resources\bundled-tools\tts\moss"
+          if (Test-Path "$resources\bundled-tools\tts\moss") { throw 'Legacy MOSS resources must not ship.' }
+          if (Test-Path "$resources\bundled-tools\stt\ggml-base.bin") { throw 'Unquantized Whisper base must not ship.' }
+          node scripts/verify-windows-offline-tools.mjs "$resources\bundled-tools" "$resources\bundled-tools\tts\melo"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged Windows offline resources failed verification.' }
+          node scripts/verify-packaged-app.mjs "$resources\app.asar"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged application feature verification failed.' }
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          try {
+            $asar = (Resolve-Path "$resources\app.asar").Path
+            & 'release\win-unpacked\ZSense.exe' 'scripts\memory-upgrade-smoke.mjs' "--app-asar=$asar"
+            if ($LASTEXITCODE -ne 0) { throw 'Packaged memory upgrade verification failed.' }
+          } finally { Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue }
 
       - name: Install the built Windows package
         shell: pwsh
@@ -130,6 +125,7 @@ jobs:
           Write-Host "Installed app exists: $installed"
 
       - name: Publish installer to optional China object storage
+        if: ${{ false }}
         shell: pwsh
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.ZSENSE_OBJECT_STORAGE_ACCESS_KEY_ID }}
@@ -156,5 +152,6 @@ jobs:
           path: |
             release/ZSense-*-win-x64.exe
             release/ZSense-*-win-x64.exe.blockmap
+            release/latest.yml
           if-no-files-found: error
           retention-days: 14

@@ -1,11 +1,12 @@
 import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
+import { AsyncLocalStorage } from 'node:async_hooks'
+import { runOfficeCommand as executeOfficeCommand, officeCommandFile, officeCommandInputFile, officeCommandOutputFiles, isOfficeMutation, normalizeOfficeCommandArgs } from './office-command-runner.mjs'
+import { PresentationWorkspace } from './presentation-workspace.mjs'
+import { wordTextReplacementCommand } from './office-word-edit.mjs'
 
-const execFileAsync = promisify(execFile)
 const MODERN_EXTENSIONS = new Map([
   ['.docx', 'word'],
   ['.xlsx', 'excel'],
@@ -46,6 +47,8 @@ const EXCEL_COLUMN_BUFFER = 5
 const EXCEL_MAX_CHANGES = 20_000
 const EXCEL_MAX_OPERATIONS = 500
 const EXCEL_BATCH_SIZE = 200
+const OFFICE_CACHE_LIMIT = 12
+const OFFICE_CACHE_IDLE_MS = 20 * 60_000
 const DISCOVERY_IGNORED_DIRECTORIES = new Set(['.git', '.hg', '.svn', 'node_modules', '__pycache__', '.venv', 'venv'])
 const OFFICE_THEME_COLORS = new Set(['DK1', 'LT1', 'DK2', 'LT2', 'ACCENT1', 'ACCENT2', 'ACCENT3', 'ACCENT4', 'ACCENT5', 'ACCENT6', 'HLINK', 'FOLHLINK', 'HYPERLINK', 'FOLLOWEDHYPERLINK'])
 
@@ -294,7 +297,7 @@ function normalizeWorkbookOperation(value) {
 function safeWordPath(value, { allowBody = false } = {}) {
   const wordPath = safeText(value, 'Word 内容路径', { maximum: 320 }).trim()
   if (allowBody && wordPath === '/body') return wordPath
-  if (!/^\/body\/(?:p|tbl)\[[1-9]\d*\](?:\/(?:p|r|hyperlink|picture|tbl|row|cell)\[[1-9]\d*\])*$/.test(wordPath)) {
+  if (!/^\/body\/(?:p\[(?:[1-9]\d*|@paraId=[A-Fa-f0-9]{8})\]|tbl\[[1-9]\d*\])(?:\/(?:p\[(?:[1-9]\d*|@paraId=[A-Fa-f0-9]{8})\]|(?:r|hyperlink|picture|tbl|row|cell|tr|tc)\[[1-9]\d*\]))*$/.test(wordPath)) {
     throw new Error('Word 内容路径无效，请重新选择正文内容。')
   }
   return wordPath
@@ -305,7 +308,10 @@ function normalizeWordOperation(value) {
   const action = safeText(value.action, 'Word 操作名称', { maximum: 80 }).trim()
   const options = value.options && typeof value.options === 'object' && !Array.isArray(value.options) ? value.options : {}
   const pathValue = value.path === undefined ? '' : safeWordPath(value.path)
-  const textValue = typeof value.text === 'string' ? value.text.slice(0, MAX_TEXT_BYTES) : ''
+  const textValue = typeof value.text === 'string' ? safeText(value.text, 'Word 修改文字', { allowEmpty: true }) : ''
+  const range = value.range ? { start: safeInteger(value.range.start, '选区起点', 0, MAX_TEXT_BYTES), end: safeInteger(value.range.end, '选区终点', 0, MAX_TEXT_BYTES) } : undefined
+  if (range && range.end < range.start) throw new Error('Word 选区范围无效。')
+  const baseText = typeof value.baseText === 'string' ? safeText(value.baseText, 'Word 原始文字', { allowEmpty: true }) : undefined
   let command
 
   if (action === 'setText') {
@@ -318,13 +324,17 @@ function normalizeWordOperation(value) {
     if (typeof options.size === 'string' && /^(?:[6-9]|[1-8]\d|9[0-6])(?:\.\d+)?pt$/.test(options.size)) props.size = options.size
     if (typeof options.bold === 'boolean') props.bold = options.bold
     if (typeof options.italic === 'boolean') props.italic = options.italic
-    if (typeof options.underline === 'boolean') props.underline = options.underline
+    if (typeof options.underline === 'boolean') props.underline = options.underline ? 'single' : 'none'
     if (typeof options.strike === 'boolean') props.strike = options.strike
     const color = normalizeColor(options.color)
     if (color) props.color = color
     const highlight = normalizeColor(options.highlight)
     if (highlight) props.highlight = highlight
     if (!Object.keys(props).length) throw new Error('没有可应用的文字格式。')
+    if (range) {
+      if (range.end === range.start) throw new Error('请先选中需要设置格式的文字。')
+      props.range = `${range.start}:${range.end}`
+    }
     command = { command: 'set', path: pathValue, props }
   } else if (action === 'formatParagraph') {
     if (!pathValue) throw new Error('请先选择要设置格式的 Word 段落。')
@@ -374,7 +384,9 @@ function normalizeWordOperation(value) {
   return {
     action,
     ...(pathValue ? { path: pathValue } : {}),
-    ...(textValue ? { text: textValue } : {}),
+    ...(typeof value.text === 'string' ? { text: textValue } : {}),
+    ...(range ? { range } : {}),
+    ...(baseText !== undefined ? { baseText } : {}),
     ...(typeof value.filePath === 'string' ? { filePath: value.filePath } : {}),
     ...(typeof value.url === 'string' ? { url: value.url } : {}),
     ...(Object.keys(options).length ? { options } : {}),
@@ -517,6 +529,7 @@ function normalizeCellChange(change) {
     formula,
     contentChanged: change.contentChanged !== false,
     style: normalizeCellStyle(change.style),
+    styleSnapshot: change.styleSnapshot === true,
   }
   if (!cellChangeToBatchCommand(normalized)) throw new Error(`${sheet}!${cell} 没有可应用的修改。`)
   return normalized
@@ -538,8 +551,33 @@ function sessionCellFromChange(existing, change) {
     next.formula = formula
     next.dataType = formula ? 'formula' : typeof change.value
   }
-  if (change.style) next.style = { ...(next.style || {}), ...change.style }
+  if (change.styleSnapshot) next.style = change.style ? { ...change.style } : undefined
+  else if (change.style) next.style = { ...(next.style || {}), ...change.style }
   return next
+}
+
+const CELL_STYLE_DEFAULTS = { fontName: 'Calibri', fontSize: 11, bold: false, italic: false, underline: 'none', strike: false, fontColor: '#000000', fill: 'none', numberFormat: 'General', horizontalAlignment: 'left', verticalAlignment: 'bottom', wrapText: false }
+const canonicalCellStyle = (value, key) => value === undefined || value === null || value === '' ? CELL_STYLE_DEFAULTS[key] : value
+
+function pendingCellDelta(baseline, current, lastChange) {
+  const formula = String(current?.formula || '')
+  const contentChanged = formula !== String(baseline?.formula || '') || (!formula && String(current?.value ?? '') !== String(baseline?.value ?? ''))
+  const style = {}
+  for (const key of Object.keys(CELL_STYLE_DEFAULTS)) {
+    const before = canonicalCellStyle(baseline?.style?.[key], key)
+    const after = canonicalCellStyle(current?.style?.[key], key)
+    if (before !== after) style[key] = after
+  }
+  if (!contentChanged && !Object.keys(style).length) return null
+  const rawValue = current?.value ?? ''
+  const value = current?.dataType === 'number' ? Number(rawValue) : current?.dataType === 'boolean' ? String(rawValue) === 'true' : rawValue
+  return { sheet: lastChange.sheet, cell: lastChange.cell, value, formula, contentChanged, style: Object.keys(style).length ? style : undefined }
+}
+
+async function documentHash(filePath) {
+  const hash = createHash('sha256')
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk)
+  return hash.digest('hex')
 }
 
 function sessionMetadata(session) {
@@ -918,7 +956,15 @@ html { --zsense-word-zoom: 1; }
   let selected = null;
   let dirtyEditor = null;
   let selectionFrame = 0;
+  let localEditVersion = 0;
+  let appliedPreviewRevision = -1;
+  const baselineText = new WeakMap();
   const send = (type, detail = {}) => parent.postMessage({ channel: CHANNEL, type, ...detail }, '*');
+  const readText = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+    if (node.nodeName === 'BR') return '\\n';
+    return [...node.childNodes].map(readText).join('');
+  };
   const reportDocumentStats = () => {
     const text = [...document.querySelectorAll('.page-body')].map((node) => node.innerText || node.textContent || '').join('\\n').trim();
     const compact = text.replace(/\\s+/g, '');
@@ -937,6 +983,7 @@ html { --zsense-word-zoom: 1; }
   const setEditable = (enabled) => {
     document.querySelectorAll('[data-path]').forEach((node) => {
       if (/^(P|H[1-6]|LI|TD|TH)$/.test(node.tagName)) {
+        if (!baselineText.has(node)) baselineText.set(node, readText(node));
         if (enabled) node.setAttribute('contenteditable', 'true');
         else node.removeAttribute('contenteditable');
       }
@@ -946,20 +993,31 @@ html { --zsense-word-zoom: 1; }
     const nativeSelection = getSelection();
     if (!nativeSelection || nativeSelection.rangeCount < 1) return { text: '', rangeSelected: false, characterCount: 0, rect: null, popupPlacement: 'bottom' };
     const text = nativeSelection.isCollapsed ? '' : nativeSelection.toString();
+    const nativeRange = nativeSelection.getRangeAt(0);
+    let offsets = null;
+    if (selected?.contains(nativeRange.startContainer) && selected?.contains(nativeRange.endContainer)) {
+      const prefix = nativeRange.cloneRange();
+      prefix.selectNodeContents(selected); prefix.setEnd(nativeRange.startContainer, nativeRange.startOffset);
+      const start = readText(prefix.cloneContents()).length;
+      offsets = { start, end: start + readText(nativeRange.cloneContents()).length };
+    }
     const rangeRect = nativeSelection.getRangeAt(0).getBoundingClientRect();
     const fallbackRect = selected?.getBoundingClientRect?.();
     const sourceRect = text && rangeRect.width ? rangeRect : fallbackRect;
     const rect = sourceRect ? { left: sourceRect.left, top: sourceRect.top, right: sourceRect.right, bottom: sourceRect.bottom, width: sourceRect.width, height: sourceRect.height } : null;
-    return { text, rangeSelected: Boolean(text), characterCount: [...text].length, rect, popupPlacement: rect && rect.bottom > innerHeight - 84 ? 'top' : 'bottom' };
+    return { text, range: offsets, rangeSelected: Boolean(text && offsets), characterCount: [...text].length, rect, popupPlacement: rect && rect.bottom > innerHeight - 84 ? 'top' : 'bottom' };
   };
   const report = () => {
     if (!selected) return;
-    const style = getComputedStyle(selected);
+    const nativeAnchor = getSelection()?.anchorNode;
+    const styleNode = nativeAnchor?.parentElement && selected.contains(nativeAnchor) ? nativeAnchor.parentElement : selected;
+    const style = getComputedStyle(styleNode);
     const range = selectionDetail();
     send('selection', {
       path: selected.getAttribute('data-path') || '',
-      text: range.text || selected.innerText || selected.textContent || '',
-      blockText: selected.innerText || selected.textContent || '',
+      text: range.text || readText(selected),
+      blockText: readText(selected),
+      range: range.range,
       rangeSelected: range.rangeSelected,
       characterCount: range.characterCount,
       rect: range.rect,
@@ -989,7 +1047,7 @@ html { --zsense-word-zoom: 1; }
   const commitEditor = (target) => {
     if (!target || target !== dirtyEditor) return;
     dirtyEditor = null;
-    send('text-change', { path: target.getAttribute('data-path') || '', text: target.innerText || target.textContent || '' });
+    send('text-change', { path: target.getAttribute('data-path') || '', text: readText(target), baseText: baselineText.get(target), editVersion: localEditVersion });
   };
   document.addEventListener('pointerdown', (event) => {
     if (!editing) return;
@@ -1009,21 +1067,47 @@ html { --zsense-word-zoom: 1; }
     if (!editing) return;
     const target = editableNode(event.target);
     if (!target) return;
+    localEditVersion += 1;
     dirtyEditor = target;
     select(target);
-    send('text-draft', { path: target.getAttribute('data-path') || '', text: target.innerText || target.textContent || '' });
+    send('text-draft', { path: target.getAttribute('data-path') || '', text: readText(target), baseText: baselineText.get(target), editVersion: localEditVersion });
     reportDocumentStats();
   }, true);
   document.addEventListener('focusout', (event) => commitEditor(editableNode(event.target)), true);
   addEventListener('scroll', () => { if (editing && selected) report(); }, true);
   document.addEventListener('keydown', (event) => {
+    if (editing && (event.metaKey || event.ctrlKey) && ['s', 'z', 'y', 'b', 'i', 'u'].includes(event.key.toLowerCase())) {
+      // While typing, retain the browser's native character-level undo stack.
+      if (dirtyEditor && ['z', 'y'].includes(event.key.toLowerCase())) return;
+      event.preventDefault();
+      commitEditor(dirtyEditor);
+      send('shortcut', { key: event.key.toLowerCase(), shiftKey: event.shiftKey });
+      return;
+    }
     if (!editing || event.key !== 'Escape') return;
     const target = editableNode(event.target);
     if (target) { commitEditor(target); target.blur(); }
   }, true);
+  const restoreRange = (target, range) => {
+    if (!target || !range) return;
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, { acceptNode: (node) => node.nodeType === Node.TEXT_NODE || node.nodeName === 'BR' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+    const nodes = []; while (walker.nextNode()) nodes.push(walker.currentNode);
+    const locate = (offset) => {
+      for (const node of nodes) {
+        const length = node.nodeType === Node.TEXT_NODE ? node.length : 1;
+        if (offset <= length) return node.nodeType === Node.TEXT_NODE ? [node, offset] : [node.parentNode, [...node.parentNode.childNodes].indexOf(node) + (offset ? 1 : 0)];
+        offset -= length;
+      }
+      return [target, target.childNodes.length];
+    };
+    const nativeRange = document.createRange();
+    nativeRange.setStart(...locate(range.start)); nativeRange.setEnd(...locate(range.end));
+    target.focus({ preventScroll: true });
+    getSelection().removeAllRanges(); getSelection().addRange(nativeRange);
+  };
   addEventListener('message', (event) => {
     const data = event.data || {};
-    if (data.channel !== CHANNEL) return;
+    if (data.channel !== CHANNEL || event.source !== parent) return;
     if (data.type === 'set-editing') {
       editing = Boolean(data.editing);
       document.documentElement.classList.toggle('zsense-word-editing', editing);
@@ -1042,6 +1126,34 @@ html { --zsense-word-zoom: 1; }
       if (target) { select(target); target.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
     } else if (data.type === 'commit-draft') {
       commitEditor(dirtyEditor);
+      send('draft-committed', { editVersion: localEditVersion });
+    } else if (data.type === 'update-preview' && typeof data.html === 'string') {
+      if (Number.isSafeInteger(data.revision) && data.revision < appliedPreviewRevision) return;
+      // A rendered result can be queued before native input, while the parent
+      // still has not received that input's postMessage. Never replace it here.
+      if (dirtyEditor || (Number.isSafeInteger(data.expectedEditVersion) && data.expectedEditVersion !== localEditVersion)) {
+        send('preview-update-deferred', { revision: data.revision, editVersion: localEditVersion, externalPreviewId: data.externalPreviewId });
+        return;
+      }
+      const bookmark = selected ? { path: selected.getAttribute('data-path'), range: selectionDetail().range } : null;
+      const oldScroll = { x: scrollX, y: scrollY };
+      const next = new DOMParser().parseFromString(data.html, 'text/html');
+      const pages = [...next.querySelectorAll('.page-wrapper')];
+      const existing = [...document.querySelectorAll('.page-wrapper')];
+      if (!pages.length || !existing.length) { send('preview-reload-required', { externalPreviewId: data.externalPreviewId }); return; }
+      const anchor = existing[0];
+      pages.forEach((page) => anchor.parentNode.insertBefore(document.importNode(page, true), anchor));
+      existing.forEach((page) => page.remove());
+      selected = null; dirtyEditor = null;
+      if (Number.isSafeInteger(data.revision)) appliedPreviewRevision = data.revision;
+      setEditable(editing);
+      window._wordPaginate?.();
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const target = bookmark && [...document.querySelectorAll('[data-path]')].find((node) => node.getAttribute('data-path') === bookmark.path);
+        if (target) { select(target); restoreRange(target, bookmark.range); }
+        scrollTo(oldScroll.x, oldScroll.y); reportDocumentStats();
+      }));
+      send('preview-updated', { revision: data.revision, externalPreviewId: data.externalPreviewId });
     }
   });
   send('ready');
@@ -1064,9 +1176,10 @@ function isInsideOrEqual(root, candidate) {
 }
 
 export class OfficeWorkspaceService {
-  constructor({ userDataDirectory, toolPaths = [] }) {
+  constructor({ userDataDirectory, toolPaths = [], commandRunner = executeOfficeCommand }) {
     this.userDataDirectory = userDataDirectory
     this.toolPaths = toolPaths
+    this.commandRunner = commandRunner
     this.previewRoot = path.join(userDataDirectory, 'office-previews')
     this.wordSessionRoot = path.join(userDataDirectory, 'office-word-sessions')
     this.recentFilePath = path.join(userDataDirectory, 'office-recent.json')
@@ -1076,9 +1189,43 @@ export class OfficeWorkspaceService {
     this.htmlSessions = new Map()
     this.wordSessions = new Map()
     this.saveQueues = new Map()
+    this.workbookLoads = new Map()
+    this.wordLoads = new Map()
+    this.renderLoads = new Map()
+    this.renderCache = new Map()
+    this.openRequests = new Map()
+    this.previewLeases = new Map()
+    this.operationContext = new AsyncLocalStorage()
     this.sessionListeners = new Set()
     fs.mkdirSync(this.previewRoot, { recursive: true, mode: 0o700 })
     fs.mkdirSync(this.wordSessionRoot, { recursive: true, mode: 0o700 })
+    this.presentationWorkspace = new PresentationWorkspace({
+      userDataDirectory,
+      run: (args, options) => this.runOfficeCommand(args, options),
+      registerPreview: (value) => this.registerGeneratedPreview(value),
+      publish: (event) => this.publishOfficeSessionEvent(event),
+      isVisible: (filePath) => [...this.previewLeases.values()].includes(filePath),
+      assertActive: () => this.#assertActive(),
+      finishCommitted: (operation) => this.#finishCommitted(operation),
+    })
+  }
+
+  runWithSignal(signal, operation) {
+    return this.operationContext.run({ ...this.operationContext.getStore(), signal }, () => {
+      this.#assertActive()
+      return operation()
+    })
+  }
+
+  #assertActive() {
+    const signal = this.operationContext.getStore()?.signal
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Office 操作已取消，原文件未写回，草稿仍保留。')
+  }
+
+  #finishCommitted(operation) {
+    // Atomic rename is the commit boundary. Cancellation after that point must
+    // not interrupt bookkeeping or claim that an already-saved file is unsaved.
+    return this.operationContext.run({ ...this.operationContext.getStore(), signal: undefined }, operation)
   }
 
   onSessionEvent(listener) {
@@ -1114,18 +1261,137 @@ export class OfficeWorkspaceService {
   }
 
   async #run(args, timeout = 90_000) {
+    this.#assertActive()
     const executable = this.#resolveTool()
     if (!executable) throw new Error('ZSense 安装包中的 Office 编辑引擎不可用，请重新安装应用。')
     try {
-      const result = await execFileAsync(executable, args, {
-        timeout,
-        maxBuffer: 16 * 1024 * 1024,
-        windowsHide: true,
-        env: { ...process.env, OFFICECLI_NO_AUTO_RESIDENT: '1' },
-      })
+      const result = await this.commandRunner(executable, args, { timeout, signal: this.operationContext.getStore()?.signal })
+      this.#assertActive()
       return String(result.stdout || '').trim()
     } catch (error) {
       throw new Error(compactError(error) || 'Office 文件处理失败。')
+    }
+  }
+
+  async runOfficeCommand(args, { cwd, timeout = 120_000, maxBuffer, signal, internal = false, sourceClientId = '' } = {}) {
+    args = normalizeOfficeCommandArgs(args)
+    signal ||= this.operationContext.getStore()?.signal
+    const executable = this.#resolveTool()
+    if (!executable) throw new Error('ZSense 安装包中的 Office 编辑引擎不可用。')
+    const filePath = officeCommandFile(args, cwd)
+    const outputs = internal ? [] : officeCommandOutputFiles(args, cwd)
+    const inputPath = outputs.length ? officeCommandInputFile(args, cwd) : ''
+    const run = () => this.runWithSignal(signal, async () => {
+      for (const output of outputs) {
+        let sameInput = output === inputPath
+        if (!sameInput && inputPath) {
+          try {
+            const inputStats = fs.statSync(inputPath)
+            const outputStats = fs.statSync(output)
+            sameInput = inputStats.dev === outputStats.dev && inputStats.ino === outputStats.ino
+          } catch { /* a new export has no existing inode */ }
+        }
+        if (sameInput || /\.(?:docx|xlsx|pptx|doc|xls|ppt)$/i.test(output)) throw new Error('Office 导出不能覆盖源文件或 Office 文档，请选择新的 HTML、PDF 或其他导出文件路径。')
+        const session = this.workbookSessions.get(output) || this.wordSessions.get(output) || this.htmlSessions.get(output)
+        if ((session && sessionMetadata(session).dirty) || this.presentationWorkspace.sessions.get(output)?.operations.length) throw new Error('导出目标有尚未保存的编辑，请先保存或放弃修改，或选择其他导出路径。')
+      }
+      if (!internal && isOfficeMutation(args) && filePath) {
+        const session = this.workbookSessions.get(filePath) || this.wordSessions.get(filePath)
+        if (session && sessionMetadata(session).dirty) throw new Error('文件有尚未保存的编辑。请先保存或放弃修改，再使用 officecli 修改原文件。')
+        if (this.presentationWorkspace.sessions.get(filePath)?.operations.length) throw new Error('PowerPoint 有尚未保存的编辑，请先保存或放弃修改。')
+      }
+      let result
+      const atomicMutation = !internal && filePath && isOfficeMutation(args) && /\.(?:docx|xlsx|pptx)$/i.test(filePath) && fs.existsSync(filePath) && !/^(?:save|close|open)$/i.test(args[0])
+      if (atomicMutation) {
+        const beforeHash = await documentHash(filePath)
+        const stats = fs.statSync(filePath)
+        const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath, path.extname(filePath))}.zsense-cli-${randomUUID()}${path.extname(filePath)}`)
+        const values = [...args]
+        values[String(args[0]).toLowerCase() === 'merge' ? 2 : 1] = temporary
+        try {
+          fs.copyFileSync(filePath, temporary, fs.constants.COPYFILE_FICLONE)
+          result = await this.commandRunner(executable, values, { cwd, timeout, maxBuffer, signal })
+          await this.#runJson(['get', temporary, '/', '--depth', '0'])
+          if (await documentHash(filePath) !== beforeHash) throw new Error('Office 文件在执行期间被其他程序修改，已取消写回，原文件未被覆盖。')
+          const handle = fs.openSync(temporary, 'r+')
+          try { fs.fsyncSync(handle) } finally { fs.closeSync(handle) }
+          fs.chmodSync(temporary, stats.mode)
+          this.#assertActive()
+          fs.renameSync(temporary, filePath)
+          const rewrite = (output) => String(output || '').split(JSON.stringify(temporary).slice(1, -1)).join(JSON.stringify(filePath).slice(1, -1)).split(temporary).join(filePath)
+          result = { ...result, stdout: rewrite(result.stdout), stderr: rewrite(result.stderr) }
+        } finally { try { fs.unlinkSync(temporary) } catch { /* only this command's working copy */ } }
+      } else result = await this.commandRunner(executable, args, { cwd, timeout, maxBuffer, signal })
+      if (!internal && filePath && isOfficeMutation(args)) await this.#finishCommitted(async () => {
+        this.renderCache.delete(filePath)
+        const session = this.workbookSessions.get(filePath) || this.wordSessions.get(filePath)
+        if (session) {
+          session.modifiedAt = ''
+          session.revision += 1
+          this.#publishSession(session, { kind: 'saved', source: 'agent', sourceClientId })
+        }
+        await this.presentationWorkspace.invalidate?.(filePath, sourceClientId)
+      })
+      return result
+    })
+    const queueFiles = internal ? [] : [...new Set([...outputs, ...(filePath && isOfficeMutation(args) ? [filePath] : [])])].sort()
+    const queuedRun = (index) => index < queueFiles.length ? this.#queueFileSave(queueFiles[index], () => queuedRun(index + 1)) : run()
+    return queuedRun(0)
+  }
+
+  publishOfficeSessionEvent(event) {
+    for (const listener of this.sessionListeners) {
+      try { listener(event) } catch { /* listeners are isolated */ }
+    }
+  }
+
+  registerGeneratedPreview({ filePath, previewPath, revision }) {
+    const resolved = this.#resolveDocument(filePath)
+    const canonicalPreview = fs.realpathSync.native(previewPath)
+    if (!isInsideOrEqual(fs.realpathSync.native(this.userDataDirectory), canonicalPreview)) throw new Error('Office 预览路径不安全。')
+    const token = createHash('sha256').update(`generated\0${filePath}\0${previewPath}`).digest('hex').slice(0, 32)
+    this.previewTokens.set(token, { kind: 'generated', filePath: previewPath, sourceFilePath: resolved.filePath, lastAccess: Date.now() })
+    return { filePath: resolved.filePath, name: path.basename(resolved.filePath), extension: resolved.extension, kind: resolved.kind, accessedAt: new Date().toISOString(), editable: true, previewUrl: `zsense-office://preview/${token}?v=${encodeURIComponent(String(revision))}`, modifiedAt: resolved.stats.mtime.toISOString(), size: resolved.stats.size, sheets: [], message: '修改保存在本地工作副本中，点击保存后写回原文件。' }
+  }
+
+  cancelOpen(requestId) {
+    this.openRequests.get(requestId)?.abort(new Error('文件已切换，停止生成旧预览。'))
+    this.previewLeases.delete(requestId)
+    return { cancelled: true }
+  }
+
+  #pruneCaches() {
+    const now = Date.now()
+    const visibleFiles = new Set(this.previewLeases.values())
+    const loadingFiles = new Set([...this.workbookLoads.keys(), ...this.wordLoads.keys(), ...[...this.renderLoads.keys()].map((key) => key.split('\0')[0])])
+    for (const sessions of [this.workbookSessions, this.htmlSessions, this.wordSessions]) {
+      const clean = [...sessions.entries()].filter(([filePath, session]) => !sessionMetadata(session).dirty && !this.saveQueues.has(filePath) && !visibleFiles.has(filePath) && !loadingFiles.has(filePath)).sort((a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0))
+      for (const [filePath, session] of clean) {
+        if (sessions.size <= OFFICE_CACHE_LIMIT && now - (session.lastAccess || now) < OFFICE_CACHE_IDLE_MS) continue
+        sessions.delete(filePath)
+        if (session.workingFilePath && isInsideOrEqual(this.wordSessionRoot, session.workingFilePath)) {
+          try { fs.unlinkSync(session.workingFilePath) } catch { /* cache cleanup */ }
+        }
+        if (session.baselineFilePath && isInsideOrEqual(this.wordSessionRoot, session.baselineFilePath)) {
+          try { fs.unlinkSync(session.baselineFilePath) } catch { /* cache cleanup */ }
+        }
+      }
+    }
+    for (const [filePath, record] of this.renderCache) {
+      if (this.renderCache.size <= OFFICE_CACHE_LIMIT && now - record.lastAccess < OFFICE_CACHE_IDLE_MS) continue
+      this.renderCache.delete(filePath)
+    }
+    // Image and PDF previews do not own Office sessions. Their visible lease
+    // must protect the token just as a cached Office document does.
+    const activeFiles = new Set([...visibleFiles, ...loadingFiles, ...this.workbookSessions.keys(), ...this.htmlSessions.keys(), ...this.wordSessions.keys(), ...this.renderCache.keys(), ...this.presentationWorkspace.sessions.keys()])
+    for (const record of this.previewTokens.values()) record.lastAccess ||= now
+    const inactive = [...this.previewTokens.entries()].filter(([, record]) => !activeFiles.has(record.sourceFilePath || record.originalFilePath || record.filePath)).sort((a, b) => a[1].lastAccess - b[1].lastAccess)
+    for (const [token, record] of inactive) {
+      if (this.previewTokens.size <= 256 && now - record.lastAccess < OFFICE_CACHE_IDLE_MS * 3) continue
+      this.previewTokens.delete(token)
+      if (['generated', 'word-generated'].includes(record.kind) && isInsideOrEqual(this.previewRoot, record.filePath)) {
+        try { fs.unlinkSync(record.filePath) } catch { /* only generated cache files */ }
+      }
     }
   }
 
@@ -1151,11 +1417,26 @@ export class OfficeWorkspaceService {
   }
 
   #queueFileSave(filePath, operation) {
+    const signal = this.operationContext.getStore()?.signal
     const previous = this.saveQueues.get(filePath) || Promise.resolve()
-    const next = previous.catch(() => undefined).then(operation)
+    let started = false
+    const next = previous.catch(() => undefined).then(() => {
+      this.#assertActive()
+      started = true
+      return operation()
+    })
     this.saveQueues.set(filePath, next)
-    return next.finally(() => {
+    const tracked = next.finally(() => {
       if (this.saveQueues.get(filePath) === next) this.saveQueues.delete(filePath)
+    })
+    if (!signal) return tracked
+    return new Promise((resolve, reject) => {
+      // Only queued work may return early. Running work determines whether its
+      // atomic commit happened, and finishes that transaction consistently.
+      const abort = () => { if (!started) reject(signal.reason instanceof Error ? signal.reason : new Error('Office 等待操作已取消。')) }
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
+      tracked.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
     })
   }
 
@@ -1250,7 +1531,7 @@ export class OfficeWorkspaceService {
     }
   }
 
-  async #excelSheet(filePath, sheetName) {
+  async #excelSheet(filePath, sheetName, identityPath = filePath) {
     const result = await this.#runJson(['get', filePath, `/${sheetName}`, '--depth', '1'], 120_000)
     const root = result?.data?.results?.find((item) => item?.type === 'sheet')
     const cells = collectSheetCells(root)
@@ -1258,7 +1539,7 @@ export class OfficeWorkspaceService {
     const lastRow = addresses.reduce((maximum, address) => Math.max(maximum, rowIndexFromAddress(address)), 0)
     const lastColumn = addresses.reduce((maximum, address) => Math.max(maximum, columnIndexFromAddress(address)), 0)
     return {
-      id: createHash('sha256').update(`${filePath}\0${sheetName}`).digest('hex').slice(0, 24),
+      id: createHash('sha256').update(`${identityPath}\0${sheetName}`).digest('hex').slice(0, 24),
       sheet: sheetName,
       rowCount: Math.max(EXCEL_MIN_ROWS, lastRow + 1 + EXCEL_ROW_BUFFER),
       columnCount: Math.max(EXCEL_MIN_COLUMNS, lastColumn + 1 + EXCEL_COLUMN_BUFFER),
@@ -1294,13 +1575,16 @@ export class OfficeWorkspaceService {
   }
 
   async #renderWordSession(session, resolved = this.#resolveDocument(session.filePath)) {
+    if (session.document && session.previewRevision === session.revision) return session.document
+    if (session.renderPromise) { await session.renderPromise; return this.#renderWordSession(session, resolved) }
     const token = createHash('sha256').update(`word\0${session.filePath}\0${session.sessionId}`).digest('hex').slice(0, 32)
     const previewPath = path.join(this.previewRoot, `${token}.html`)
-    await this.#run(['view', session.workingFilePath, 'html', '-o', previewPath], 120_000)
-    this.previewTokens.set(token, { kind: 'word-generated', filePath: previewPath })
+    session.renderPromise = this.#run(['view', session.workingFilePath, 'html', '-o', previewPath], 120_000)
+    try { await session.renderPromise } finally { session.renderPromise = null }
+    this.previewTokens.set(token, { kind: 'word-generated', filePath: previewPath, originalFilePath: session.filePath, lastAccess: Date.now() })
     const preview = new URL(`zsense-office://preview/${token}`)
     preview.searchParams.set('v', String(session.revision))
-    return {
+    session.document = {
       filePath: resolved.filePath,
       name: path.basename(resolved.filePath),
       extension: resolved.extension,
@@ -1313,9 +1597,36 @@ export class OfficeWorkspaceService {
       sheets: [],
       message: 'Word 由 ZSense 本地编辑器打开；修改先保存在工作副本中，只有点击保存才会写回原文件。',
     }
+    session.previewRevision = session.revision
+    return session.document
   }
 
   async #render(resolved) {
+    const stats = fs.statSync(resolved.filePath)
+    const version = `${stats.mtimeMs}:${stats.size}:${stats.ctimeMs}`
+    const cacheable = resolved.kind === 'powerpoint'
+    const cached = this.renderCache.get(resolved.filePath)
+    if (cacheable && cached?.version === version && fs.existsSync(cached.previewPath)) {
+      cached.lastAccess = Date.now()
+      return { ...cached.document, accessedAt: new Date().toISOString() }
+    }
+    const key = `${resolved.filePath}\0${version}`
+    if (cacheable && this.renderLoads.has(key)) return this.renderLoads.get(key)
+    const task = this.#renderUncached(resolved)
+    if (cacheable) this.renderLoads.set(key, task)
+    try {
+      const document = await task
+      if (cacheable) {
+        const token = new URL(document.previewUrl).pathname.replace(/^\/+/, '')
+        const previewPath = this.previewTokens.get(token)?.filePath
+        this.renderCache.set(resolved.filePath, { version, document, previewPath, lastAccess: Date.now() })
+        this.#pruneCaches()
+      }
+      return document
+    } finally { if (cacheable && this.renderLoads.get(key) === task) this.renderLoads.delete(key) }
+  }
+
+  async #renderUncached(resolved) {
     const updatedStats = fs.statSync(resolved.filePath)
     let previewUrl = ''
     if (resolved.kind === 'image') {
@@ -1350,7 +1661,7 @@ export class OfficeWorkspaceService {
       const token = createHash('sha256').update(resolved.filePath).digest('hex').slice(0, 32)
       const previewPath = path.join(this.previewRoot, `${token}.html`)
       await this.#run(['view', resolved.filePath, 'html', '-o', previewPath], 120_000)
-      this.previewTokens.set(token, { kind: 'generated', filePath: previewPath })
+      this.previewTokens.set(token, { kind: 'generated', filePath: previewPath, sourceFilePath: resolved.filePath })
       const preview = new URL(`zsense-office://preview/${token}`)
       preview.searchParams.set('v', String(updatedStats.mtimeMs))
       previewUrl = preview.toString()
@@ -1380,10 +1691,22 @@ export class OfficeWorkspaceService {
     }
   }
 
-  async open(filePath) {
+  async open(filePath, { requestId } = {}) {
+    this.#pruneCaches()
+    if (requestId) {
+      const leasedPath = this.#resolveDocument(filePath).filePath
+      const controller = new AbortController()
+      this.openRequests.set(requestId, controller)
+      this.previewLeases.set(requestId, leasedPath)
+      try { return await this.operationContext.run({ signal: controller.signal }, () => this.open(filePath)) }
+      catch (error) { this.previewLeases.delete(requestId); throw error }
+      finally { if (this.openRequests.get(requestId) === controller) this.openRequests.delete(requestId) }
+    }
     const resolved = this.#resolveDocument(filePath)
     const document = resolved.kind === 'word'
       ? (await this.getWord({ filePath: resolved.filePath })).document
+      : resolved.kind === 'powerpoint'
+        ? (await this.getPresentation({ filePath: resolved.filePath })).document
       : MODERN_EXTENSIONS.has(resolved.extension) || IMAGE_EXTENSIONS.has(resolved.extension)
         ? await this.#render(resolved)
       : {
@@ -1406,64 +1729,142 @@ export class OfficeWorkspaceService {
   async refresh(filePath) {
     try {
       const resolved = this.#resolveDocument(filePath)
+      this.renderCache.delete(resolved.filePath)
+      if (resolved.kind === 'powerpoint') await this.discardPresentation({ filePath: resolved.filePath })
       this.workbookSessions.delete(resolved.filePath)
       this.htmlSessions.delete(resolved.filePath)
       const wordSession = this.wordSessions.get(resolved.filePath)
       this.wordSessions.delete(resolved.filePath)
       try { if (wordSession?.workingFilePath) fs.unlinkSync(wordSession.workingFilePath) } catch { /* best effort */ }
+      try { if (wordSession?.baselineFilePath) fs.unlinkSync(wordSession.baselineFilePath) } catch { /* best effort */ }
     } catch { /* open surfaces the error */ }
     return this.open(filePath)
+  }
+
+  getPresentation(request) { return this.#queueFileSave(this.#resolveDocument(request.filePath).filePath, () => this.presentationWorkspace.getPresentation(request)) }
+  stagePresentation(request) { return this.#queueFileSave(this.#resolveDocument(request.filePath).filePath, () => this.presentationWorkspace.stagePresentation(request)) }
+  savePresentation(request) { return this.#queueFileSave(this.#resolveDocument(request.filePath).filePath, () => this.presentationWorkspace.savePresentation(request)) }
+  discardPresentation(request) { return this.#queueFileSave(this.#resolveDocument(request.filePath).filePath, () => this.presentationWorkspace.discardPresentation(request)) }
+
+  async readWordForAgent({ filePath, maxCharacters = 80_000 }) {
+    const resolved = this.#resolveDocument(filePath)
+    return this.#queueFileSave(resolved.filePath, async () => {
+      const session = await this.getWord({ filePath })
+      const working = this.wordSessions.get(session.filePath)
+      if (working.agentTextRevision !== session.sessionRevision) {
+        working.agentText = await this.#run(['view', working.workingFilePath, 'text', '--max-lines', '1500'])
+        working.agentTextRevision = session.sessionRevision
+      }
+      return { sessionId: session.sessionId, revision: session.sessionRevision, baseContentHash: session.baseContentHash, dirty: session.dirty, pendingCount: session.pendingCount, content: working.agentText.slice(0, Math.max(1000, Math.min(200_000, Number(maxCharacters) || 80_000))), ...(session.conflict ? { conflict: session.conflict } : {}) }
+    })
   }
 
   async getWord({ filePath }) {
     const resolved = this.#resolveDocument(filePath)
     if (resolved.kind !== 'word') throw new Error('Word 编辑会话只适用于 .docx 文件。')
-    let session = this.wordSessions.get(resolved.filePath)
-    if (session && session.diskModifiedAt === resolved.stats.mtimeMs && session.diskSize === resolved.stats.size) {
+    if (this.wordLoads.has(resolved.filePath)) return this.wordLoads.get(resolved.filePath)
+    const task = this.#getWordResolved(resolved)
+    this.wordLoads.set(resolved.filePath, task)
+    try { return await task }
+    finally {
+      // Prune while this completed load is still protected. Other concurrent
+      // loads may already have created working files which remain in use.
+      this.#pruneCaches()
+      if (this.wordLoads.get(resolved.filePath) === task) this.wordLoads.delete(resolved.filePath)
+    }
+  }
+
+  async #getWordResolved(resolved, previousSession) {
+    let session = this.wordSessions.get(resolved.filePath) || previousSession
+    if (session) session.lastAccess = Date.now()
+    const unchanged = session && session.diskModifiedAt === resolved.stats.mtimeMs && session.diskSize === resolved.stats.size && session.diskChangedAt === resolved.stats.ctimeMs
+    if (!previousSession && session && (unchanged || session.operations.length)) {
+      if (!unchanged) session.conflict = { code: 'OFFICE_EXTERNAL_CONFLICT', message: '原文件已被其他程序修改。当前 Word 草稿已保留，未覆盖外部修改；确认复制所需草稿文字后，可放弃修改并重新加载原文件。' }
       const document = await this.#renderWordSession(session, resolved)
-      return { ...sessionMetadata(session), filePath: session.filePath, modifiedAt: new Date(session.diskModifiedAt).toISOString(), operations: session.operations, document }
+      return { ...sessionMetadata(session), filePath: session.filePath, modifiedAt: new Date(session.diskModifiedAt).toISOString(), baseContentHash: session.baseContentHash, ...(session.conflict ? { conflict: session.conflict } : {}), operations: session.operations, document, previewHtml: this.#wordPreviewHtml(session) }
     }
     if (session?.workingFilePath) {
       try { fs.unlinkSync(session.workingFilePath) } catch { /* best effort */ }
+      try { fs.unlinkSync(session.baselineFilePath) } catch { /* best effort */ }
     }
     const sessionId = session?.sessionId || randomUUID()
     const workingFilePath = path.join(this.wordSessionRoot, `${createHash('sha256').update(`${resolved.filePath}\0${sessionId}`).digest('hex').slice(0, 32)}.docx`)
-    fs.copyFileSync(resolved.filePath, workingFilePath)
+    const baselineFilePath = `${workingFilePath}.base.docx`
+    fs.copyFileSync(resolved.filePath, workingFilePath, fs.constants.COPYFILE_FICLONE)
+    fs.copyFileSync(workingFilePath, baselineFilePath, fs.constants.COPYFILE_FICLONE)
     session = {
       filePath: resolved.filePath,
       workingFilePath,
+      baselineFilePath,
       sessionId,
       revision: (session?.revision || 0) + 1,
       diskModifiedAt: resolved.stats.mtimeMs,
       diskSize: resolved.stats.size,
+      diskChangedAt: resolved.stats.ctimeMs,
+      baseContentHash: await documentHash(baselineFilePath),
       operations: [],
+      lastAccess: Date.now(),
     }
     this.wordSessions.set(resolved.filePath, session)
     const document = await this.#renderWordSession(session, resolved)
-    return { ...sessionMetadata(session), filePath: session.filePath, modifiedAt: resolved.stats.mtime.toISOString(), operations: [], document }
+    return { ...sessionMetadata(session), filePath: session.filePath, modifiedAt: resolved.stats.mtime.toISOString(), baseContentHash: session.baseContentHash, operations: [], document, previewHtml: this.#wordPreviewHtml(session) }
   }
 
-  async stageWordOperations({ filePath, operations, source = 'editor', sourceClientId = '' }) {
+  #wordPreviewHtml(session) {
+    const token = createHash('sha256').update(`word\0${session.filePath}\0${session.sessionId}`).digest('hex').slice(0, 32)
+    const previewPath = path.join(this.previewRoot, `${token}.html`)
+    if (!fs.existsSync(previewPath) || fs.statSync(previewPath).size > MAX_HTML_BYTES) return undefined
+    return fs.readFileSync(previewPath, 'utf8')
+  }
+
+  async stageWordOperations({ filePath, operations, source = 'editor', sourceClientId = '', expectedContentHash, expectedRevision }) {
     const resolved = this.#resolveDocument(filePath)
     if (resolved.kind !== 'word') throw new Error('Word 编辑只适用于 .docx 文件。')
     if (!Array.isArray(operations)) throw new Error('Word 编辑操作格式无效。')
     if (operations.length > WORD_MAX_OPERATIONS) throw new Error(`单个 Word 编辑会话最多保留 ${WORD_MAX_OPERATIONS} 项操作。`)
     await this.getWord({ filePath: resolved.filePath })
+    return this.#queueFileSave(resolved.filePath, async () => {
     const session = this.wordSessions.get(resolved.filePath)
     if (!session) throw new Error('Word 本地编辑会话创建失败。')
+    if (expectedContentHash && expectedContentHash !== session.baseContentHash) throw new Error('Word 原文件版本已变化，当前草稿不会被覆盖，请重新加载文件后重试。')
+    if (expectedRevision !== undefined && expectedRevision !== session.revision) throw new Error('Word 已收到其他编辑器的修改，请刷新后重试；当前草稿仍保留。')
     const normalized = operations.map(normalizeWordOperation)
+    const cleanOperations = normalized.map(({ command: _command, ...operation }) => operation)
+    if (JSON.stringify(cleanOperations) === JSON.stringify(session.operations)) {
+      return { ...sessionMetadata(session), revision: session.revision, filePath: session.filePath, baseContentHash: session.baseContentHash, ...(session.conflict ? { conflict: session.conflict } : {}), changed: 0, document: await this.#renderWordSession(session, resolved), message: 'Word 草稿未发生变化。' }
+    }
     const temporaryWorking = `${session.workingFilePath}.${randomUUID()}.tmp.docx`
     try {
-      fs.copyFileSync(resolved.filePath, temporaryWorking)
-      const commands = normalized.map((item) => item.command)
-      for (let index = 0; index < commands.length; index += EXCEL_BATCH_SIZE) {
-        await this.#runJsonWithLockRetry(['batch', temporaryWorking, '--commands', JSON.stringify(commands.slice(index, index + EXCEL_BATCH_SIZE))], 180_000)
+      const appendOnly = session.operations.length > 0 && cleanOperations.length > session.operations.length && session.operations.every((operation, index) => JSON.stringify(operation) === JSON.stringify(cleanOperations[index]))
+      fs.copyFileSync(appendOnly ? session.workingFilePath : session.baselineFilePath, temporaryWorking, fs.constants.COPYFILE_FICLONE)
+      // A text edit is expressed as a minimal OOXML patch. Flushing command
+      // groups before reading XML keeps offsets relative to preceding edits.
+      let commands = []
+      const flush = async () => {
+        if (!commands.length) return
+        await this.#runJsonWithLockRetry(['batch', temporaryWorking, '--commands', JSON.stringify(commands)], 180_000)
+        commands = []
       }
+      for (const item of appendOnly ? normalized.slice(session.operations.length) : normalized) {
+        if (item.action === 'setText') {
+          await flush()
+          const raw = await this.#runJson(['raw', temporaryWorking, '/document'], 120_000)
+          const command = wordTextReplacementCommand(raw.data, item)
+          if (command) commands.push(command)
+        } else {
+          commands.push(item.command)
+        }
+        if (commands.length >= EXCEL_BATCH_SIZE) await flush()
+      }
+      await flush()
+      this.#assertActive()
       fs.renameSync(temporaryWorking, session.workingFilePath)
     } finally {
       try { if (fs.existsSync(temporaryWorking)) fs.unlinkSync(temporaryWorking) } catch { /* best effort */ }
     }
-    session.operations = normalized.map(({ command: _command, ...operation }) => operation)
+    return this.#finishCommitted(async () => {
+    session.operations = cleanOperations
+    session.lastAccess = Date.now()
     session.revision += 1
     const document = await this.#renderWordSession(session, resolved)
     this.#publishSession(session, { kind: 'changed', source, sourceClientId, operations: session.operations })
@@ -1474,64 +1875,91 @@ export class OfficeWorkspaceService {
       dirty: session.operations.length > 0,
       pendingCount: session.operations.length,
       changed: session.operations.length,
+      baseContentHash: session.baseContentHash,
+      ...(session.conflict ? { conflict: session.conflict } : {}),
       document,
+      previewHtml: this.#wordPreviewHtml(session),
       message: session.operations.length ? `已暂存 ${session.operations.length} 项 Word 修改，尚未写入原文件。` : '未保存的 Word 修改已撤销。',
     }
+    })
+    })
   }
 
-  async saveWord({ filePath, source = 'editor', sourceClientId = '' }) {
+  async saveWord({ filePath, source = 'editor', sourceClientId = '', expectedContentHash, expectedRevision }) {
     const resolved = this.#resolveDocument(filePath)
     if (resolved.kind !== 'word') throw new Error('Word 保存只适用于 .docx 文件。')
     await this.getWord({ filePath: resolved.filePath })
     return this.#queueFileSave(resolved.filePath, async () => {
       const session = this.wordSessions.get(resolved.filePath)
       if (!session) throw new Error('Word 本地编辑会话不存在。')
+      if (expectedContentHash && expectedContentHash !== session.baseContentHash) throw new Error('Word 原文件版本已变化，未覆盖磁盘文件；草稿仍保留。')
+      if (expectedRevision !== undefined && expectedRevision !== session.revision) throw new Error('Word 草稿版本已变化，请确认最新修改后再保存。')
+      const diskHash = await documentHash(resolved.filePath)
+      if (diskHash !== session.baseContentHash) {
+        session.conflict = { code: 'OFFICE_EXTERNAL_CONFLICT', message: '原文件已被其他程序修改，未覆盖磁盘文件；Word 草稿仍保留。确认复制所需草稿文字后，可放弃修改并重新加载原文件。' }
+        throw new Error(session.conflict.message)
+      }
       if (!session.operations.length) {
         const document = await this.#renderWordSession(session, resolved)
         return { filePath: session.filePath, sessionId: session.sessionId, revision: session.revision, dirty: false, pendingCount: 0, saved: 0, document, message: '没有检测到需要保存的 Word 修改。' }
       }
-      const expectedBytes = fs.readFileSync(session.workingFilePath)
-      const expectedHash = createHash('sha256').update(expectedBytes).digest('hex')
+      const expectedSize = fs.statSync(session.workingFilePath).size
+      const expectedHash = await documentHash(session.workingFilePath)
       const temporary = `${resolved.filePath}.zsense-${process.pid}-${randomUUID()}.tmp`
       try {
-        fs.copyFileSync(session.workingFilePath, temporary)
+        fs.copyFileSync(session.workingFilePath, temporary, fs.constants.COPYFILE_FICLONE)
         fs.chmodSync(temporary, resolved.stats.mode)
+        if (await documentHash(resolved.filePath) !== session.baseContentHash) throw new Error('Word 原文件在保存期间发生变化，未覆盖外部修改；草稿仍保留。')
+        const handle = fs.openSync(temporary, 'r+')
+        try { fs.fsyncSync(handle) } finally { fs.closeSync(handle) }
+        this.#assertActive()
         fs.renameSync(temporary, resolved.filePath)
       } finally {
         try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary) } catch { /* best effort */ }
       }
-      const persistedBytes = fs.readFileSync(resolved.filePath)
-      const persistedHash = createHash('sha256').update(persistedBytes).digest('hex')
-      if (!persistedBytes.equals(expectedBytes) || persistedHash !== expectedHash) throw new Error('Word 写入后校验失败，磁盘内容与编辑内容不一致。')
+      return this.#finishCommitted(async () => {
+      const persistedSize = fs.statSync(resolved.filePath).size
+      const persistedHash = await documentHash(resolved.filePath)
+      if (persistedSize !== expectedSize || persistedHash !== expectedHash) throw new Error('Word 写入后校验失败，磁盘内容与编辑内容不一致。')
       const updated = this.#resolveDocument(resolved.filePath)
       const savedCount = session.operations.length
       session.operations = []
       session.diskModifiedAt = updated.stats.mtimeMs
       session.diskSize = updated.stats.size
+      session.diskChangedAt = updated.stats.ctimeMs
+      session.baseContentHash = persistedHash
+      session.conflict = undefined
+      fs.copyFileSync(session.workingFilePath, session.baselineFilePath, fs.constants.COPYFILE_FICLONE)
       session.revision += 1
+      // Saving does not alter the working document. Reuse its already-rendered
+      // preview instead of invoking the CLI and replacing the editing frame.
+      if (session.document) {
+        session.document = { ...session.document, modifiedAt: updated.stats.mtime.toISOString(), size: updated.stats.size }
+        session.previewRevision = session.revision
+      }
       const document = await this.#renderWordSession(session, updated)
       this.#remember(document)
       this.#publishSession(session, { kind: 'saved', source, sourceClientId })
-      return { filePath: session.filePath, sessionId: session.sessionId, revision: session.revision, dirty: false, pendingCount: 0, saved: savedCount, savedAt: updated.stats.mtime.toISOString(), bytesWritten: persistedBytes.byteLength, contentHash: persistedHash, document, message: `已将 ${savedCount} 项 Word 修改保存并校验。` }
+      return { filePath: session.filePath, sessionId: session.sessionId, revision: session.revision, dirty: false, pendingCount: 0, saved: savedCount, savedAt: updated.stats.mtime.toISOString(), bytesWritten: persistedSize, contentHash: persistedHash, baseContentHash: persistedHash, document, message: `已将 ${savedCount} 项 Word 修改保存并校验。` }
+      })
     })
   }
 
   async discardWord({ filePath, sourceClientId = '' }) {
     const resolved = this.#resolveDocument(filePath)
     if (resolved.kind !== 'word') throw new Error('Word 放弃修改只适用于 .docx 文件。')
+    return this.#queueFileSave(resolved.filePath, async () => {
     const previous = this.wordSessions.get(resolved.filePath)
     this.wordSessions.delete(resolved.filePath)
     try { if (previous?.workingFilePath) fs.unlinkSync(previous.workingFilePath) } catch { /* best effort */ }
-    const session = await this.getWord({ filePath: resolved.filePath })
+    try { if (previous?.baselineFilePath) fs.unlinkSync(previous.baselineFilePath) } catch { /* best effort */ }
+    const session = await this.#getWordResolved(resolved, previous)
     const active = this.wordSessions.get(resolved.filePath)
     if (previous && active) {
-      active.sessionId = previous.sessionId
-      active.revision = previous.revision + 1
       this.#publishSession(active, { kind: 'discarded', source: 'editor', sourceClientId })
-      session.sessionId = active.sessionId
-      session.sessionRevision = active.revision
     }
     return session
+    })
   }
 
   async getHtml({ filePath }) {
@@ -1683,8 +2111,20 @@ export class OfficeWorkspaceService {
 
   async getWorkbook({ filePath }) {
     const resolved = this.#resolveDocument(filePath)
+    if (this.workbookLoads.has(resolved.filePath)) return this.workbookLoads.get(resolved.filePath)
+    const task = this.#loadWorkbook(resolved)
+    this.workbookLoads.set(resolved.filePath, task)
+    try { return await task }
+    finally {
+      this.#pruneCaches()
+      if (this.workbookLoads.get(resolved.filePath) === task) this.workbookLoads.delete(resolved.filePath)
+    }
+  }
+
+  async #loadWorkbook(resolved) {
     if (resolved.extension !== '.xlsx' && !DELIMITED_EXTENSIONS.has(resolved.extension)) throw new Error('工作簿编辑只适用于 .xlsx、.csv 或 .tsv 文件。')
     const current = this.workbookSessions.get(resolved.filePath)
+    if (current) current.lastAccess = Date.now()
     if (current && (current.pendingChanges.size || current.pendingOperations.size || current.modifiedAt === resolved.stats.mtimeMs)) {
       return { ...current.workbook, ...sessionMetadata(current) }
     }
@@ -1707,12 +2147,20 @@ export class OfficeWorkspaceService {
       pendingChanges: new Map(),
       pendingOperations: new Map(),
       delimitedMetadata: delimited?.metadata || null,
+      baselineCells: new Map(),
+      baseContentHash: await documentHash(resolved.filePath),
+      lastAccess: Date.now(),
     }
     this.workbookSessions.set(resolved.filePath, session)
     return { ...workbook, ...sessionMetadata(session) }
   }
 
   async stageCells({ filePath, changes, source = 'editor', sourceClientId = '' }) {
+    const resolved = this.#resolveDocument(filePath)
+    return this.#queueFileSave(resolved.filePath, () => this.#stageCells({ filePath: resolved.filePath, changes, source, sourceClientId }))
+  }
+
+  async #stageCells({ filePath, changes, source, sourceClientId }) {
     const resolved = this.#resolveDocument(filePath)
     if (resolved.extension !== '.xlsx' && !DELIMITED_EXTENSIONS.has(resolved.extension)) throw new Error('实时单元格编辑只适用于 .xlsx、.csv 或 .tsv 文件。')
     if (!Array.isArray(changes) || !changes.length) throw new Error('没有需要暂存的单元格修改。')
@@ -1721,12 +2169,17 @@ export class OfficeWorkspaceService {
     const session = this.workbookSessions.get(resolved.filePath)
     if (!session) throw new Error('Excel 本地编辑会话创建失败。')
     const normalizedChanges = changes.map(normalizeCellChange).map((change) => DELIMITED_EXTENSIONS.has(resolved.extension) ? { ...change, style: undefined, formula: '', value: change.formula ? `=${change.formula.replace(/^=/, '')}` : change.value } : change)
+    // Validate the whole request before changing any cell.
+    for (const change of normalizedChanges) if (!session.workbook.sheets.some((sheet) => sheet.sheet === change.sheet)) throw new Error(`工作表“${change.sheet}”不存在。`)
     for (const change of normalizedChanges) {
       const sheet = session.workbook.sheets.find((item) => item.sheet === change.sheet)
       if (!sheet) throw new Error(`工作表“${change.sheet}”不存在。`)
       const key = `${change.sheet}!${change.cell}`
-      session.pendingChanges.set(key, change)
+      if (!session.baselineCells.has(key)) session.baselineCells.set(key, structuredClone(sheet.cells[change.cell] || null))
       sheet.cells[change.cell] = sessionCellFromChange(sheet.cells[change.cell], change)
+      const delta = pendingCellDelta(session.baselineCells.get(key), sheet.cells[change.cell], change)
+      if (delta) session.pendingChanges.set(key, delta)
+      else session.pendingChanges.delete(key)
       const rowIndex = rowIndexFromAddress(change.cell)
       const columnIndex = columnIndexFromAddress(change.cell)
       sheet.usedRowCount = Math.max(sheet.usedRowCount, rowIndex + 1)
@@ -1740,7 +2193,7 @@ export class OfficeWorkspaceService {
       filePath: session.filePath,
       sessionId: session.sessionId,
       revision: session.revision,
-      dirty: true,
+      dirty: session.pendingChanges.size > 0 || session.pendingOperations.size > 0,
       pendingCount: session.pendingChanges.size + session.pendingOperations.size,
       changed: normalizedChanges.length,
       message: `已在本地会话中暂存 ${normalizedChanges.length} 个单元格，尚未写入磁盘。`,
@@ -1748,6 +2201,11 @@ export class OfficeWorkspaceService {
   }
 
   async stageOperations({ filePath, operations, source = 'editor', sourceClientId = '' }) {
+    const resolved = this.#resolveDocument(filePath)
+    return this.#queueFileSave(resolved.filePath, () => this.#stageOperations({ filePath: resolved.filePath, operations, source, sourceClientId }))
+  }
+
+  async #stageOperations({ filePath, operations, source, sourceClientId }) {
     const resolved = this.#resolveDocument(filePath)
     if (DELIMITED_EXTENSIONS.has(resolved.extension)) throw new Error('CSV/TSV 只保存单元格内容，不支持样式、冻结、图片、图表或多工作表功能。')
     if (resolved.extension !== '.xlsx') throw new Error('Excel 功能编辑只适用于 .xlsx 文件。')
@@ -1810,6 +2268,7 @@ export class OfficeWorkspaceService {
     return this.#queueFileSave(resolved.filePath, async () => {
       const session = this.workbookSessions.get(resolved.filePath)
       if (!session) throw new Error('Excel 本地编辑会话不存在。')
+      if (await documentHash(resolved.filePath) !== session.baseContentHash) throw new Error('文件已被其他程序修改。未保存的编辑仍保留，请先导出或重新读取后再保存，避免覆盖新内容。')
       const pendingSnapshot = new Map(session.pendingChanges)
       const operationSnapshot = new Map(session.pendingOperations)
       const changes = [...pendingSnapshot.values()]
@@ -1836,10 +2295,17 @@ export class OfficeWorkspaceService {
           rows.push(values.join(metadata.delimiter))
         }
         const temporary = `${resolved.filePath}.zsense-${process.pid}-${randomUUID()}.tmp`
-        fs.writeFileSync(temporary, encodeDelimitedFile(`${rows.join(metadata.lineEnding)}${metadata.lineEnding}`, metadata), { mode: resolved.stats.mode })
-        fs.renameSync(temporary, resolved.filePath)
+        try {
+          fs.writeFileSync(temporary, encodeDelimitedFile(`${rows.join(metadata.lineEnding)}${metadata.lineEnding}`, metadata), { mode: resolved.stats.mode })
+          if (await documentHash(resolved.filePath) !== session.baseContentHash) throw new Error('保存期间文件已被其他程序修改，已取消写回；草稿仍保留。')
+          this.#assertActive()
+          fs.renameSync(temporary, resolved.filePath)
+        } finally { try { fs.unlinkSync(temporary) } catch { /* only this transaction's temporary file */ } }
+        return this.#finishCommitted(async () => {
         const updated = this.#resolveDocument(resolved.filePath)
         session.modifiedAt = updated.stats.mtimeMs
+        session.baseContentHash = await documentHash(resolved.filePath)
+        session.baselineCells.clear()
         for (const [key, change] of pendingSnapshot) if (JSON.stringify(session.pendingChanges.get(key)) === JSON.stringify(change)) session.pendingChanges.delete(key)
         session.revision += 1
         session.workbook.revision = `${updated.stats.mtimeMs}-${updated.stats.size}-session-${session.revision}`
@@ -1847,6 +2313,7 @@ export class OfficeWorkspaceService {
         this.#remember(document)
         this.#publishSession(session, { kind: 'saved', source, sourceClientId })
         return { filePath: session.filePath, sessionId: session.sessionId, revision: session.revision, dirty: session.pendingChanges.size > 0, pendingCount: session.pendingChanges.size, document, saved: changes.length, message: `已将 ${changes.length} 个单元格保存回原 ${resolved.extension.slice(1).toUpperCase()} 文件。${metadata.encoding === 'gb18030' ? '原文件编码无法无损回写，已转换为 UTF-8 BOM。' : ''}` }
+        })
       }
       const commands = [
         ...[...operationSnapshot.values()].flatMap((item) => item.commands),
@@ -1865,12 +2332,33 @@ export class OfficeWorkspaceService {
           message: '没有检测到需要写回的单元格变化。',
         }
       }
-      for (let index = 0; index < commands.length; index += EXCEL_BATCH_SIZE) {
-        const batch = commands.slice(index, index + EXCEL_BATCH_SIZE)
-        await this.#runJsonWithLockRetry(['batch', resolved.filePath, '--commands', JSON.stringify(batch)], 180_000)
-      }
+      // All batches operate on an isolated same-directory copy. A failed batch
+      // never leaves the original half-written or repeats structural edits.
+      const temporary = path.join(path.dirname(resolved.filePath), `.${path.basename(resolved.filePath, resolved.extension)}.zsense-${randomUUID()}${resolved.extension}`)
+      let persistedSheets
+      try {
+        fs.copyFileSync(resolved.filePath, temporary, fs.constants.COPYFILE_FICLONE)
+        for (let index = 0; index < commands.length; index += EXCEL_BATCH_SIZE) {
+          const batch = commands.slice(index, index + EXCEL_BATCH_SIZE)
+          await this.#runJsonWithLockRetry(['batch', temporary, '--commands', JSON.stringify(batch)], 180_000)
+        }
+        await this.#runJson(['get', temporary, '/', '--depth', '0'], 120_000)
+        const names = await this.#excelSheets(temporary)
+        if (!names.length) throw new Error('保存校验失败：工作簿没有可读取的工作表。')
+        persistedSheets = await Promise.all(names.map((name) => this.#excelSheet(temporary, name, resolved.filePath)))
+        if (await documentHash(resolved.filePath) !== session.baseContentHash) throw new Error('保存期间文件已被其他程序修改，已取消写回；草稿仍保留。')
+        const handle = fs.openSync(temporary, 'r+')
+        try { fs.fsyncSync(handle) } finally { fs.closeSync(handle) }
+        fs.chmodSync(temporary, resolved.stats.mode)
+        this.#assertActive()
+        fs.renameSync(temporary, resolved.filePath)
+      } finally { try { fs.unlinkSync(temporary) } catch { /* only this transaction's temporary workbook */ } }
+      return this.#finishCommitted(async () => {
       const updated = this.#resolveDocument(resolved.filePath)
       session.modifiedAt = updated.stats.mtimeMs
+      session.baseContentHash = await documentHash(resolved.filePath)
+      session.baselineCells.clear()
+      session.workbook.sheets = persistedSheets
       for (const [key, change] of pendingSnapshot) {
         if (JSON.stringify(session.pendingChanges.get(key)) === JSON.stringify(change)) session.pendingChanges.delete(key)
       }
@@ -1892,10 +2380,16 @@ export class OfficeWorkspaceService {
         saved: changes.length + operationSnapshot.size,
         message: `已保存 ${changes.length} 个单元格和 ${operationSnapshot.size} 项功能修改到原文件。`,
       }
+      })
     })
   }
 
   async discardWorkbook({ filePath, sourceClientId = '' }) {
+    const resolved = this.#resolveDocument(filePath)
+    return this.#queueFileSave(resolved.filePath, () => this.#discardWorkbook({ filePath: resolved.filePath, sourceClientId }))
+  }
+
+  async #discardWorkbook({ filePath, sourceClientId }) {
     const resolved = this.#resolveDocument(filePath)
     const previous = this.workbookSessions.get(resolved.filePath)
     this.workbookSessions.delete(resolved.filePath)
@@ -2037,6 +2531,7 @@ export class OfficeWorkspaceService {
     } catch { return new Response('Bad request', { status: 400 }) }
     const record = this.previewTokens.get(token)
     if (!record) return new Response('Preview expired', { status: 404 })
+    record.lastAccess = Date.now()
     if (record.workspaceRoot) {
       try {
         if (!isInsideOrEqual(record.workspaceRoot, fs.realpathSync.native(record.filePath))) return new Response('Forbidden', { status: 403 })

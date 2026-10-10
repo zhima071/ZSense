@@ -954,6 +954,10 @@ export class WebBridgeService {
     }
   }
 
+  publishMemoryChanged(payload) {
+    this.#pushEvent('zsense:workspace:memory-changed',payload)
+  }
+
   #pushEvent(channel, payload) {
     if (!channel) return
     let body

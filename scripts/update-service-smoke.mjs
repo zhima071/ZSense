@@ -88,6 +88,11 @@ const badBody = await new UpdateService({ currentVersion: '0.24.0', fetchImpl: a
 assert.equal(badBody.ok, false, '无法识别的清单应该返回失败')
 assert.match(badBody.error, /无法识别/, '失败信息应该说明格式问题')
 
+const oversizedFeed = await new UpdateService({ currentVersion: '0.24.0', fetchImpl: async () => new Response('x'.repeat(300 * 1024)) })
+  .check('https://download.example.com/zsense/latest-mac.yml')
+assert.equal(oversizedFeed.ok, false, '超大清单应在读取阶段拒绝')
+assert.match(oversizedFeed.error, /过大/)
+
 const networkFailure = await new UpdateService({ currentVersion: '0.24.0', fetchImpl: async () => { throw new Error('getaddrinfo ENOTFOUND') } }).check('https://download.example.com/zsense/latest-mac.yml')
 assert.equal(networkFailure.ok, false, '网络异常应该返回失败而不是抛出')
 assert.match(networkFailure.error, /ENOTFOUND/, '应该保留底层错误信息')
@@ -142,6 +147,17 @@ try {
   const speedChecksum = createHash('sha256').update(speedPayload).digest('hex')
   const speedFeed = JSON.stringify({ tag_name: 'v0.26.9', body: `- ZSense-0.26.9-mac-arm64.dmg: ${speedChecksum}`,
     assets: [{ browser_download_url: releaseUrl, size: speedPayload.length }] })
+  let currentFeed = releaseFeed
+  const changedReleaseUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
+    downloadDirectory: path.join(tempDirectory, 'same-version-change'),
+    fetchImpl: async (url) => new Response(url === defaultUpdateFeedUrl() ? currentFeed : payload),
+  })
+  await changedReleaseUpdater.check(defaultUpdateFeedUrl())
+  assert.equal((await changedReleaseUpdater.download()).phase, 'ready')
+  currentFeed = speedFeed
+  await changedReleaseUpdater.check(defaultUpdateFeedUrl())
+  assert.equal(changedReleaseUpdater.inspect().download.phase, 'idle', '同一版本的发布包校验值变化后，旧包不可继续显示为可安装')
+  await assert.rejects(changedReleaseUpdater.install(), /先在应用内下载并校验/, '旧校验值的安装包不能直接安装')
   const speedSnapshots = []
   const speedUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
     downloadDirectory: path.join(tempDirectory, 'speed'),
@@ -235,6 +251,7 @@ try {
   assert.equal((await pauseUpdater.pauseDownload()).phase, 'paused', '暂停应保留未完成下载')
   assert.equal((await pausedDownload).phase, 'paused')
   assert.equal(fs.statSync(resumePartialPath).size, half, '暂停应保留已下载字节')
+  assert.equal(fs.readFileSync(`${resumePartialPath}.sha256`, 'utf8'), speedChecksum, '暂停缓存应记录目标安装包校验值')
 
   let requestedRange = ''
   const resumedUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
@@ -257,7 +274,9 @@ try {
 
   const fallbackDirectory = path.join(tempDirectory, 'range-ignored')
   fs.mkdirSync(fallbackDirectory)
-  fs.writeFileSync(path.join(fallbackDirectory, 'ZSense-0.26.9-mac-arm64.dmg.part'), speedPayload.subarray(0, half))
+  const fallbackPartial = path.join(fallbackDirectory, 'ZSense-0.26.9-mac-arm64.dmg.part')
+  fs.writeFileSync(fallbackPartial, speedPayload.subarray(0, half))
+  fs.writeFileSync(`${fallbackPartial}.sha256`, speedChecksum)
   const fallbackUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
     downloadDirectory: fallbackDirectory,
     fetchImpl: async (url, options) => {
@@ -274,6 +293,7 @@ try {
   fs.mkdirSync(invalidRangeDirectory)
   const invalidRangePartial = path.join(invalidRangeDirectory, 'ZSense-0.26.9-mac-arm64.dmg.part')
   fs.writeFileSync(invalidRangePartial, speedPayload.subarray(0, half))
+  fs.writeFileSync(`${invalidRangePartial}.sha256`, speedChecksum)
   const invalidRangeUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
     downloadDirectory: invalidRangeDirectory,
     fetchImpl: async (url) => url === defaultUpdateFeedUrl() ? new Response(speedFeed)
@@ -289,11 +309,25 @@ try {
   fs.mkdirSync(clearedDirectory)
   const clearedPartialPath = path.join(clearedDirectory, 'ZSense-0.26.9-mac-arm64.dmg.part')
   fs.writeFileSync(clearedPartialPath, speedPayload.subarray(0, half))
+  fs.writeFileSync(`${clearedPartialPath}.sha256`, speedChecksum)
   const clearedUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
     downloadDirectory: clearedDirectory, fetchImpl: async () => new Response(speedFeed) })
   await clearedUpdater.check(defaultUpdateFeedUrl())
   assert.equal((await clearedUpdater.cancelDownload()).phase, 'canceled', '取消暂停中的下载应清理缓存')
   assert.equal(fs.existsSync(clearedPartialPath), false)
+  assert.equal(fs.existsSync(`${clearedPartialPath}.sha256`), false)
+
+  const replacedDirectory = path.join(tempDirectory, 'replaced-release')
+  fs.mkdirSync(replacedDirectory)
+  const replacedPartial = path.join(replacedDirectory, 'ZSense-0.26.9-mac-arm64.dmg.part')
+  fs.writeFileSync(replacedPartial, payload.subarray(0, 8))
+  fs.writeFileSync(`${replacedPartial}.sha256`, checksum)
+  const replacedUpdater = new UpdateService({ currentVersion: '0.26.8', platform: 'darwin', arch: 'arm64',
+    downloadDirectory: replacedDirectory, fetchImpl: async () => new Response(speedFeed) })
+  await replacedUpdater.check(defaultUpdateFeedUrl())
+  assert.equal(replacedUpdater.inspect().download.phase, 'idle', '同名发布文件换了校验值时不得续传旧缓存')
+  assert.equal(fs.existsSync(replacedPartial), false, '失效缓存应及时清理以免占用磁盘')
+  assert.equal(fs.existsSync(`${replacedPartial}.sha256`), false)
 
   await assert.rejects(scheduleUpdateInstall({ platform: 'darwin', filePath: path.join(tempDirectory, 'wrong.dmg'),
     version: '0.26.9', execPath: '/Applications/ZSense.app/Contents/MacOS/ZSense',

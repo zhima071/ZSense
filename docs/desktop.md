@@ -21,7 +21,7 @@ macOS 包从 `bundled-tools/darwin-${arch}` 携带当前架构的 `officecli`、
 
 ## Windows 构建
 
-Windows x64 使用固定版本、带 SHA-256 校验的完整离线资源包。首次准备资源后，Mac 可以交叉生成 NSIS 安装包；发布前仍由 GitHub Actions 的 Windows x64 构建机实际执行 Office、语音和工具测试。
+Windows x64 使用固定版本、带 SHA-256 校验的完整离线资源包。Mac 可准备和校验离线资源，但 NSIS 安装包必须由原生 Windows x64 构建机生成，并实际执行 Office、语音和工具测试。
 
 ```bash
 npm run tools:prepare:win
@@ -39,7 +39,7 @@ Windows 安装前检查包括：
 - `%APPDATA%\ZSense` 可写；
 - 当前是否有 ZSense 实例需要安全关闭。
 
-安装器不下载 Python、Node.js、Git 或单独 Agent Runtime。Electron 自带应用所需的 Node 运行环境；本地语音需要的 Microsoft VC++ 运行库随安装包静默安装。OfficeCLI、dws、kdocs-cli、Whisper 模型和 MOSS-TTS 模型全部位于安装包中。
+安装器不下载 Python、Node.js、Git 或单独 Agent Runtime。Electron 自带应用所需的 Node 运行环境；本地语音需要的 Microsoft VC++ 运行库随安装包静默安装。OfficeCLI、dws、kdocs-cli、Whisper Base Q5、MeloTTS 模型和原生语音引擎全部位于安装包中。
 
 ## 首次启动
 
@@ -53,7 +53,13 @@ Windows 安装前检查包括：
 
 在“设置 → 语音交互”可以直接输入自定义唤醒词，或打开录入向导说出并测试唤醒词。唤醒和主动语音交流统一使用内置本地语音链路，不读取模型密钥，也不要求配置 OpenAI Audio API。
 
-本地 STT 使用随安装包部署的 whisper.cpp base 多语言模型，本地 TTS 使用 MOSS-TTS-Nano ONNX 模型。音频不会上传到语音服务。
+本地 STT 使用随安装包部署的 whisper.cpp Base Q5_1 多语言模型，本地 TTS 使用 MeloTTS 中英模型的固定中文音色，由内置 sherpa-onnx 原生引擎合成并按句播放。语音界面仍只开放简体中文，保留语种扩展入口。模型与运行库随安装包部署，音频不会上传到语音服务，也不会在首次使用时下载组件。
+
+为减少安装体积，MOSS-TTS、浏览器 ONNX/WASM 运行时及未量化 Whisper 模型已退出交付链路。原六个播报音色和自定义音色克隆不再提供；旧设置中的音色 ID 自动使用固定中文音色，已保存的用户音色数据不主动删除。
+
+语音资源准备与校验：`node scripts/prepare-voice-assets.mjs --platform=darwin-arm64` 或 `--platform=win32-x64`，然后运行 `node scripts/verify-voice-assets.mjs <平台>`。下载使用固定版本、文件大小与 SHA-256，模型只保留一份；打包不自动联网补资源，缺失时直接报错。
+
+第三方许可：Melo 模型为 MIT，sherpa-onnx 为 Apache-2.0，ONNX Runtime 为 MIT；当前上游通用 TTS CLI 还通过 Piper phonemize 静态包含 GPL-3.0 的 eSpeak NG。资源目录携带许可证与固定源码链接，公开分发该 CLI 前须按适用 GPL 条款提供对应源码，不能将全部组件视为仅 MIT/Apache-2.0。此次仅更新本机 `.app`，未发布安装包。
 
 ## Agent Core 生命周期
 

@@ -8,7 +8,7 @@ import { nativeWorkspaceIdentity } from './services/workspace-context.mjs'
 import { stageChatAttachments, stagePastedImageAttachments } from './services/chat-attachment-service.mjs'
 import { readPdfDocument, readPdfDocumentChunk, savePdfDocument, transformPdfPages } from './services/pdf-document-service.mjs'
 import { fetchOfficialModelCatalog } from './services/model-catalog-service.mjs'
-import { createMemoryMaintenanceQueue, shouldExtractMemory } from './services/memory-intelligence.mjs'
+import { createMemoryScope } from './services/memory-scope.mjs'
 import { defaultUpdateFeedUrl } from './services/update-service.mjs'
 import { connectTrustedRemote, createPinnedLanFetch } from './services/remote-trust-connect.mjs'
 import { listWorkspaceDirectories } from './services/workspace-directory-picker.mjs'
@@ -197,6 +197,7 @@ function validateMemory(input) {
     id: text(item.id, '记忆 ID', 180), title: text(item.title, '记忆标题', 200),
     excerpt: text(item.excerpt, '记忆内容', 20_000), type: oneOf(item.type, memoryTypes, '记忆类型'),
     updatedAt: text(item.updatedAt, '更新时间', 100), source: text(item.source, '记忆来源', 200),
+    locked: item.locked !== false,
   }
 }
 
@@ -350,6 +351,8 @@ function validateSettings(input) {
     autoApprovalEnabled: Boolean(settings.autoApprovalEnabled),
     webAccessEnabled: Boolean(settings.webAccessEnabled),
     autoExtractMemory: Boolean(settings.autoExtractMemory),
+    memoryModelRefinement: Boolean(settings.memoryModelRefinement),
+    autoDistillSkills: Boolean(settings.autoDistillSkills),
     memoryPeriodicReview: Boolean(settings.memoryPeriodicReview),
     memoryReviewInterval: integer(settings.memoryReviewInterval, '记忆复盘间隔', 2, 100),
     memoryRecallLimit: integer(settings.memoryRecallLimit, '单轮记忆召回数量', 1, 100),
@@ -388,6 +391,9 @@ function validateSettings(input) {
     approvalDesktopNotification: Boolean(settings.approvalDesktopNotification),
     completionDesktopNotification: Boolean(settings.completionDesktopNotification),
     chatInputHeight: integer(settings.chatInputHeight, '聊天输入框高度', 80, 320),
+    // Database validation keeps the portable shortcut grammar authoritative.
+    // Preserve '' (disabled) and undefined (legacy payload: keep current value).
+    chatDictationShortcut: settings.chatDictationShortcut,
     voiceWakeEnabled: Boolean(settings.voiceWakeEnabled),
     voiceWakePhrase: text(settings.voiceWakePhrase || '你好 ZSense', '语音唤醒词', 32),
     voiceWakeSound: Boolean(settings.voiceWakeSound),
@@ -397,7 +403,7 @@ function validateSettings(input) {
     voiceConversationEnabled: Boolean(settings.voiceConversationEnabled),
     voiceAutoSpeak: Boolean(settings.voiceAutoSpeak),
     voiceContinuousConversation: Boolean(settings.voiceContinuousConversation),
-    voiceTtsVoice: text(settings.voiceTtsVoice || 'Xiaoyu', '本地 TTS 音色', 80),
+    voiceTtsVoice: 'melo-zh',
     voiceTtsSpeed: number(settings.voiceTtsSpeed ?? 1, '本地 TTS 语速', 0.7, 1.5),
     responseLanguage: oneOf(settings.responseLanguage || 'zh-CN', responseLanguages, '回复与播报语言'),
   }
@@ -505,11 +511,17 @@ export async function importPortableConfiguration({ payload, database, skillMana
   const data = object(payload.data, '配置数据')
   const counts = { bots: 0, models: 0, skills: 0, scheduledTasks: 0, gatewayProfiles: 0 }
   let workspace = database.loadWorkspace()
+  const knownBotIds = new Set(workspace.bots.map((bot) => bot.id))
+  const configuredProviders = new Set(workspace.availableModelConfigurations
+    .filter((item) => item.apiKeyConfigured).map((item) => item.provider))
+  if (workspace.modelConfiguration.apiKeyConfigured) configuredProviders.add(workspace.modelConfiguration.provider)
 
   for (const rawBot of (Array.isArray(data.bots) ? data.bots : []).slice(0, 100)) {
     const bot = validateBot({ ...rawBot, memories: [], memoryCount: 0, memorySize: '0 KB', conversations: 0, channels: ['web'], lastActive: '尚未运行' })
     if (bot.id === NATIVE_BOT_ID) continue
-    workspace = database.getBot(bot.id) ? database.updateBot(bot) : database.createBot(bot)
+    if (knownBotIds.has(bot.id)) database.updateBot(bot, { returnWorkspace: false })
+    else database.createBot(bot, { returnWorkspace: false })
+    knownBotIds.add(bot.id)
     counts.bots += 1
   }
 
@@ -521,43 +533,38 @@ export async function importPortableConfiguration({ payload, database, skillMana
     const key = `${model.provider}\u0000${model.model}`
     if (modelKeys.has(key)) continue
     modelKeys.add(key)
-    workspace = database.loadWorkspace()
-    const apiKeyConfigured = workspace.availableModelConfigurations.some((item) => item.provider === model.provider && item.apiKeyConfigured)
-      || (workspace.modelConfiguration.provider === model.provider && workspace.modelConfiguration.apiKeyConfigured)
     database.upsertPortableModelConfiguration({
       provider: model.provider,
       model: model.model,
       baseUrl: model.baseUrl,
       apiKeyName: model.apiKeyName,
-      apiKeyConfigured,
+      apiKeyConfigured: configuredProviders.has(model.provider),
       updatedAt: new Date().toISOString(),
-    }, false)
+    }, false, { returnWorkspace: false })
     counts.models += 1
   }
   if (defaultModel) {
     const model = validateModelConfiguration({ ...defaultModel, apiKey: '', clearApiKey: false })
-    workspace = database.loadWorkspace()
-    const apiKeyConfigured = workspace.availableModelConfigurations.some((item) => item.provider === model.provider && item.apiKeyConfigured)
-      || (workspace.modelConfiguration.provider === model.provider && workspace.modelConfiguration.apiKeyConfigured)
-    database.upsertPortableModelConfiguration({ ...model, apiKeyConfigured, updatedAt: new Date().toISOString() }, true)
+    database.upsertPortableModelConfiguration({ ...model, apiKeyConfigured: configuredProviders.has(model.provider), updatedAt: new Date().toISOString() }, true, { returnWorkspace: false })
   }
 
+  const skillsById = new Map(skillManager.listSkills().map((skill) => [skill.id, skill]))
+  const skillsByName = new Map([...skillsById.values()].map((skill) => [skill.name, skill]))
   for (const rawSkill of (Array.isArray(data.skills) ? data.skills : []).slice(0, 500)) {
-    const knownBotIds = new Set(database.loadBotIds())
     const input = validateSkillEditorInput({
       ...rawSkill,
       assignedBotIds: Array.isArray(rawSkill?.assignedBotIds) ? rawSkill.assignedBotIds.filter((id) => knownBotIds.has(id)) : [],
     })
-    const existing = skillManager.getSkill(optionalText(rawSkill?.id, '技能 ID', 180))
-      || skillManager.listSkills().find((skill) => skill.name === input.name)
-    if (existing) database.updateSkill(existing.id, input)
-    else database.createSkill(input)
+    const existing = skillsById.get(optionalText(rawSkill?.id, '技能 ID', 180)) || skillsByName.get(input.name)
+    const skill = existing ? database.updateSkill(existing.id, input, { returnWorkspace: false })
+      : database.createSkill(input, { returnWorkspace: false })
+    if (existing && existing.name !== skill.name) skillsByName.delete(existing.name)
+    skillsById.set(skill.id, skill)
+    skillsByName.set(skill.name, skill)
     counts.skills += 1
   }
 
-  workspace = database.loadWorkspace()
-  const knownBotIds = new Set(workspace.bots.map((bot) => bot.id))
-  const knownSkillIds = new Set(workspace.skills.map((skill) => skill.id))
+  const knownSkillIds = new Set(skillsById.keys())
   for (const rawConnection of (Array.isArray(data.gatewayProfiles) ? data.gatewayProfiles : []).slice(0, 500)) {
     if (!knownBotIds.has(rawConnection?.botId)) continue
     const imported = validateGatewayConnectionConfiguration({ ...rawConnection, enabled: false, secrets: {}, clearSecrets: [] })
@@ -576,7 +583,7 @@ export async function importPortableConfiguration({ payload, database, skillMana
       secretKeys: existing?.secretKeys || [],
       secretScope: existing?.secretScope || `gateway:${imported.id || randomUUID()}`,
       updatedAt: new Date().toISOString(),
-    })
+    }, { returnWorkspace: false })
     counts.gatewayProfiles += 1
   }
 
@@ -590,12 +597,11 @@ export async function importPortableConfiguration({ payload, database, skillMana
     const id = optionalText(rawTask?.id, '定时任务 ID', 180) || randomUUID()
     const now = new Date().toISOString()
     const portableTask = { ...task, id, enabled: false, workspacePath: '', nextRunAt: null, createdAt: rawTask?.createdAt || now, updatedAt: now }
-    if (database.getScheduledTask(id)) database.updateScheduledTask(id, portableTask)
-    else database.createScheduledTask(portableTask)
+    if (database.getScheduledTask(id)) database.updateScheduledTask(id, portableTask, { returnWorkspace: false })
+    else database.createScheduledTask(portableTask, { returnWorkspace: false })
     counts.scheduledTasks += 1
   }
 
-  workspace = database.loadWorkspace()
   if (data.settings && typeof data.settings === 'object') {
     const importedSettings = validateSettings({
       ...workspace.settings,
@@ -604,7 +610,7 @@ export async function importPortableConfiguration({ payload, database, skillMana
       defaultWorkspacePath: workspace.settings.defaultWorkspacePath,
     })
     workspace = database.updateSettings(importedSettings)
-  }
+  } else workspace = database.loadWorkspace()
   return { workspace, counts }
 }
 
@@ -648,8 +654,8 @@ function currentDeviceLinkSnapshot(service) {
   } catch { return null }
 }
 
-export function registerIpcHandlers({ ipcMain, database, agentCore, browserService, capabilityService, computerUseService, mcpService, gatewayService, officeTaskService = null, voiceService, inspectApplicationRuntime = () => agentCore.inspect(), secrets, skillManager, auth, officeWorkspace, canvasService, deviceLinkService, webBridgeService = null, updateService = null, deployBundledAgentResources = () => undefined, scheduledTaskRunner, notify, onWorkspaceChanged = () => undefined, microphoneAccessStatus = () => 'unknown', requestMicrophoneAccess = async () => 'unknown', onVoiceWakeDetected = () => ({ phrase: '你好 ZSense', detectedAt: new Date().toISOString() }), onRunWhileLockedChanged = () => undefined, appVersion = 'unknown' }) {
-  const enqueueMemoryMaintenance = createMemoryMaintenanceQueue()
+export function registerIpcHandlers({ ipcMain, database, agentCore, browserService, capabilityService, computerUseService, mcpService, gatewayService, officeTaskService = null, voiceService, inspectApplicationRuntime = () => agentCore.inspect(), secrets, skillManager, auth, officeWorkspace, canvasService, deviceLinkService, webBridgeService = null, updateService = null, deployBundledAgentResources = () => undefined, scheduledTaskRunner, notify, onWorkspaceChanged = () => undefined, onMemoryChanged = () => undefined, microphoneAccessStatus = () => 'unknown', requestMicrophoneAccess = async () => 'unknown', onVoiceWakeDetected = () => ({ phrase: '你好 ZSense', detectedAt: new Date().toISOString() }), onRunWhileLockedChanged = () => undefined, appVersion = 'unknown' }) {
+  const skillDistillations = new Map()
   publicHandle(ipcMain, 'zsense:auth:status', (_payload, event) => auth.status(event.sender.id))
   publicHandle(ipcMain, 'zsense:auth:lock', (_payload, event) => {
     voiceService.stopWake()
@@ -1194,7 +1200,12 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     if (result.canceled || !result.filePaths[0]) return null
     return officeWorkspace.open(result.filePaths[0])
   })
-  safeHandle(ipcMain, 'zsense:office:open', (payload) => officeWorkspace.open(text(payload, 'Office 文件路径', 4_000)))
+  safeHandle(ipcMain, 'zsense:office:open', (payload) => {
+    if (typeof payload === 'string') return officeWorkspace.open(text(payload, 'Office 文件路径', 4_000))
+    const value = object(payload, 'Office 文件打开请求')
+    return officeWorkspace.open(text(value.filePath, 'Office 文件路径', 4_000), { requestId: optionalText(value.requestId, '文件读取请求 ID', 180) })
+  })
+  safeHandle(ipcMain, 'zsense:office:cancel-open', (payload) => officeWorkspace.cancelOpen(text(payload, '文件读取请求 ID', 180)))
   safeHandle(ipcMain, 'zsense:office:inline-image', (payload) => {
     const value = object(payload, '会话图片预览请求')
     return officeWorkspace.inlineImage({
@@ -1250,6 +1261,8 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     return officeWorkspace.stageWordOperations({
       filePath: text(value.filePath, 'Word 文件路径', 4_000),
       operations: value.operations,
+      expectedContentHash: optionalText(value.expectedContentHash, 'Word 原文件版本', 64),
+      expectedRevision: value.expectedRevision === undefined ? undefined : integer(value.expectedRevision, 'Word 编辑版本', 0, Number.MAX_SAFE_INTEGER),
       source: 'editor',
       sourceClientId: optionalText(value.clientId, '编辑器实例 ID', 180),
     })
@@ -1258,6 +1271,8 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const value = object(payload, 'Word 手动保存请求')
     return officeWorkspace.saveWord({
       filePath: text(value.filePath, 'Word 文件路径', 4_000),
+      expectedContentHash: optionalText(value.expectedContentHash, 'Word 原文件版本', 64),
+      expectedRevision: value.expectedRevision === undefined ? undefined : integer(value.expectedRevision, 'Word 编辑版本', 0, Number.MAX_SAFE_INTEGER),
       source: 'editor',
       sourceClientId: optionalText(value.clientId, '编辑器实例 ID', 180),
     })
@@ -1268,6 +1283,32 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
       filePath: text(value.filePath, 'Word 文件路径', 4_000),
       sourceClientId: optionalText(value.clientId, '编辑器实例 ID', 180),
     })
+  })
+  safeHandle(ipcMain, 'zsense:office:get-presentation', (payload) => {
+    const value = object(payload, 'PowerPoint 编辑会话读取请求')
+    return officeWorkspace.getPresentation({ filePath: text(value.filePath, 'PowerPoint 文件路径', 4_000) })
+  })
+  safeHandle(ipcMain, 'zsense:office:stage-presentation', (payload) => {
+    const value = object(payload, 'PowerPoint 修改请求')
+    return officeWorkspace.stagePresentation({
+      filePath: text(value.filePath, 'PowerPoint 文件路径', 4_000), operations: value.operations,
+      expectedContentHash: optionalText(value.expectedContentHash, 'PowerPoint 原文件版本', 64),
+      expectedRevision: value.expectedRevision === undefined ? undefined : integer(value.expectedRevision, 'PowerPoint 编辑版本', 0, Number.MAX_SAFE_INTEGER),
+      sourceClientId: optionalText(value.clientId, '编辑器实例 ID', 180),
+    })
+  })
+  safeHandle(ipcMain, 'zsense:office:save-presentation', (payload) => {
+    const value = object(payload, 'PowerPoint 保存请求')
+    return officeWorkspace.savePresentation({
+      filePath: text(value.filePath, 'PowerPoint 文件路径', 4_000),
+      expectedContentHash: optionalText(value.expectedContentHash, 'PowerPoint 原文件版本', 64),
+      expectedRevision: value.expectedRevision === undefined ? undefined : integer(value.expectedRevision, 'PowerPoint 编辑版本', 0, Number.MAX_SAFE_INTEGER),
+      sourceClientId: optionalText(value.clientId, '编辑器实例 ID', 180),
+    })
+  })
+  safeHandle(ipcMain, 'zsense:office:discard-presentation', (payload) => {
+    const value = object(payload, 'PowerPoint 放弃修改请求')
+    return officeWorkspace.discardPresentation({ filePath: text(value.filePath, 'PowerPoint 文件路径', 4_000), sourceClientId: optionalText(value.clientId, '编辑器实例 ID', 180) })
   })
   safeHandle(ipcMain, 'zsense:office:get-html', (payload) => {
     const value = object(payload, 'HTML 编辑会话读取请求')
@@ -1558,6 +1599,14 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const value = object(payload, '删除消息请求')
     return database.deleteConversationMessage(text(value.conversationId, '会话 ID', 180), text(value.messageId, '消息 ID', 180))
   })
+  safeHandle(ipcMain, 'zsense:conversations:bookmark-message', (payload) => {
+    const value = object(payload, '消息书签请求')
+    return database.setConversationMessageBookmark(text(value.conversationId, '会话 ID', 180), text(value.messageId, '消息 ID', 180), value.bookmarked)
+  })
+  safeHandle(ipcMain, 'zsense:conversations:fork-message', (payload) => {
+    const value = object(payload, '分支会话请求')
+    return database.forkConversationMessage(text(value.conversationId, '会话 ID', 180), text(value.messageId, '消息 ID', 180))
+  })
   safeHandle(ipcMain, 'zsense:conversations:delete', (payload) => database.deleteConversation(text(payload, '会话 ID', 180)))
   safeHandle(ipcMain, 'zsense:tasks:set-overview-visibility', (payload) => {
     const value = object(payload, '总览展示设置')
@@ -1684,6 +1733,8 @@ export function registerIpcHandlers({ ipcMain, database, agentCore, browserServi
     const nextSettings = validateSettings(payload)
     const wasLocked = Boolean(database.getSetting('appLockEnabled'))
     const workspace = database.updateSettings(nextSettings)
+    if (!nextSettings.autoExtractMemory || !nextSettings.memoryModelRefinement) database.memoryService?.cancelAllMaintenance?.()
+    if (!nextSettings.autoDistillSkills) for (const controller of skillDistillations.values()) controller.abort()
     // 关闭安全锁不再关闭远程通道，但旧安全锁密码登录的网页会话必须失效。
     if (wasLocked && !workspace.settings.appLockEnabled) webBridgeService?.revokeRemoteSessions()
     onRunWhileLockedChanged(workspace.settings.runWhileLocked)
@@ -1873,16 +1924,16 @@ function withScheduledTaskOwner(task, payload) {
     })
   })
   safeHandle(ipcMain, 'zsense:voice:list-voices', () => voiceService.listVoices())
-  safeHandle(ipcMain, 'zsense:voice:tts-config', () => {
-    const status = voiceService.inspectBundledTts()
-    if (!status.ready) throw new Error(`MOSS-TTS-Nano 模型不完整：${status.missing.slice(0, 4).join('、')}${status.missing.length > 4 ? `等 ${status.missing.length} 个文件` : ''}。`)
-    return {
-      engine: 'moss-tts-nano',
-      modelUrl: 'zsense-tts://models/',
-      threadCount: Math.max(1, Math.min(4, Number(process.env.ZSENSE_TTS_THREADS) || 4)),
-      streaming: true,
-      offline: true,
-    }
+  safeHandle(ipcMain, 'zsense:voice:synthesize-local', async (payload) => {
+    const value = object(payload, '本地语音播报请求')
+    const speed = Number(value.speed ?? 1)
+    if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) throw new Error('本地播报语速必须在 0.5–2 倍之间。')
+    return voiceService.synthesize({
+      text: text(value.text, '本地播报文本', 2_000),
+      language: oneOf(value.language || 'zh-CN', new Set(['zh-CN']), '本地播报语言'),
+      voice: 'melo-zh',
+      speed,
+    })
   })
   safeHandle(ipcMain, 'zsense:voice:stop-speaking', () => voiceService.stopSpeaking())
   safeHandle(ipcMain, 'zsense:models:list', async (payload) => {
@@ -1997,9 +2048,10 @@ function withScheduledTaskOwner(task, payload) {
     const reasoningEffort = oneOf(value.reasoningEffort || 'high', reasoningEfforts, '推理强度')
     const interactionMode = oneOf(value.interactionMode || 'text', interactionModes, '交互模式')
     const workspace = database.loadWorkspace()
-    const bot = delegateBotId
-      ? database.getBot(delegateBotId)
-      : native ? nativeWorkspaceIdentity(workspace) : database.getBot(botId)
+    let bot
+    if (delegateBotId) bot = delegateBotId === NATIVE_BOT_ID ? workspace.nativeBot : workspace.bots.find((item) => item.id === delegateBotId)
+    else if (native) bot = nativeWorkspaceIdentity(workspace)
+    else bot = workspace.bots.find((item) => item.id === botId)
     if (!bot) throw new Error(delegateBotId ? '被委派的 Bot 不存在。' : 'Bot 不存在')
     const agentStatus = await agentCore.inspect()
     if (!agentStatus.runnable) throw new Error(agentStatus.message)
@@ -2077,7 +2129,10 @@ function withScheduledTaskOwner(task, payload) {
       botId, taskId: workItem.id, filePath: item.path, workspacePath, title: item.name,
     }))).then(() => officeTaskService.notify())
     onWorkspaceChanged(database.loadWorkspace())
+    const memoryRetentionVersion = database.getMemoryVersion(bot.id)
+    const memoryRetentionGeneration = database.memoryService.captureRetentionGeneration?.()
     const recalledMemories = (await database.memoryService.recallMemories(bot.id, safeText(message), {
+      ...createMemoryScope({ workspacePath }),
       limit: workspace.settings.memoryRecallLimit,
       characterBudget: Math.max(2_000, Math.min(5_000, Number(workspace.settings.memoryRecallLimit || 24) * 200)),
     })).memories
@@ -2139,6 +2194,7 @@ function withScheduledTaskOwner(task, payload) {
           legacyMessages,
           skills: assignedSkills,
           memories: recalledMemories,
+          memoryScope: createMemoryScope({ workspacePath }),
           settings: workspace.settings,
           appContext: {
             currentBot: { id: bot.id, name: bot.name, status: bot.status, modelProvider: selectedModelProvider, model: selectedModel },
@@ -2214,46 +2270,42 @@ function withScheduledTaskOwner(task, payload) {
       if (native) database.completeNativeConversation(conversationId)
       else database.completeConversation(botId, conversationId, toolEvents)
       database.recordSkillUsage({ botId: bot.id, conversationId, toolEvents, durationMs })
-      // ③ 技能沉淀闭环：本轮真跑过工具、且流程看起来可复用时，沉淀成一个新技能（不覆盖已有技能）
-      if (workspace.settings.autoExtractMemory && Array.isArray(toolEvents) && toolEvents.length >= 4) {
-        try {
-          const existingSkillNames = new Set((workspace.skills || []).map((skill) => skill.name))
-          const proposal = await agentCore.distillSkill({
-            message: safeText(message),
-            toolSummary: toolEvents.slice(-24).map((event) => `${event?.name || event?.type || '工具'} ${String(JSON.stringify(event?.args ?? {})).slice(0, 160)}`),
-            existingSkills: (workspace.skills || []).map((skill) => ({ name: skill.name, description: skill.description })),
-            model: selectedModel,
-            modelProvider: selectedModelProvider,
-            apiKey: (secrets.get(`model:${selectedModelProvider}`)?.apiKey || secrets.get('model:default')?.apiKey || ''),
-            baseUrl: modelConfiguration.baseUrl || '',
-          })
-          if (proposal && !existingSkillNames.has(proposal.name)) {
-            skillManager.createSkill({ name: proposal.name, description: proposal.description, content: proposal.content })
-            console.log('[ZSense] 已自动沉淀技能：', proposal.name)
-          }
-        } catch (distillError) {
-          console.warn('ZSense Core 技能沉淀失败：', distillError instanceof Error ? distillError.message : distillError)
-        }
+      // 独立、显式开启的后台技能沉淀：不延迟回复，不读取或发送旧会话。
+      if (workspace.settings.autoDistillSkills && toolEvents.length >= 4 && !skillDistillations.has(bot.id) && skillDistillations.size < 2) {
+        const controller = new AbortController()
+        skillDistillations.set(bot.id,controller)
+        setImmediate(() => {
+          void (async () => {
+            try {
+              if (controller.signal.aborted || !database.getSetting('autoDistillSkills')) return
+              const proposal = await agentCore.distillSkill({
+                message: safeText(message), toolSummary: toolEvents.slice(-24).map((item) => `${item?.name || item?.type || '工具'}`),
+                existingSkills: (workspace.skills || []).map((item) => ({name:item.name,description:item.description})),
+                model:selectedModel,modelProvider:selectedModelProvider,apiKey:modelSecret.apiKey || '',baseUrl:modelConfiguration.baseUrl || '',signal:controller.signal,
+              })
+              if (!proposal || controller.signal.aborted || !database.getSetting('autoDistillSkills')) return
+              const currentSkills = database.getEnabledSkills(bot.id)
+              if (currentSkills.some((item) => item.name === proposal.name)) return
+              skillManager.createSkill({name:proposal.name,description:proposal.description,content:proposal.content})
+              onWorkspaceChanged(database.loadWorkspace())
+            } catch {
+              if (!controller.signal.aborted) onMemoryChanged(bot.id,{reason:'后台技能沉淀失败，原回复与记忆不受影响。'})
+            } finally { if (skillDistillations.get(bot.id) === controller) skillDistillations.delete(bot.id) }
+          })()
+        })
       }
       if (workspace.settings.autoExtractMemory) {
         // 应用内置的轻量记忆流程在本机后台整理明确的长期事实，不阻塞回复。
         const memorySourceMessage = [safeText(message), ...steeringMessages.map((item) => safeText(item))].filter(Boolean).join('\n\n')
         setImmediate(() => {
-          void enqueueMemoryMaintenance(bot.id, async () => {
-            if (database.getSetting('autoExtractMemory') === false) return
-            if (shouldExtractMemory(memorySourceMessage)) {
-              try {
-                const result = await database.memoryService.retainUserMessage(bot.id, memorySourceMessage, {
-                  conversationId: memoryConversationId, messageId: requestId,
-                })
-                if (result.stored) onWorkspaceChanged(database.loadWorkspace())
-              } catch (memoryError) {
-                console.warn('本地自动记忆失败：', memoryError instanceof Error ? memoryError.message : memoryError)
-              }
-            }
-          }).catch((memoryError) => {
-            console.warn('ZSense Core 后台记忆维护失败：', memoryError instanceof Error ? memoryError.message : memoryError)
-          })
+          if (database.getSetting('autoExtractMemory') === false) return
+          void database.memoryService.retainUserMessage(bot.id, memorySourceMessage, {
+            ...createMemoryScope({ workspacePath }), conversationId: memoryConversationId, messageId: requestId,
+            expectedVersion: memoryRetentionVersion, expectedGeneration: memoryRetentionGeneration,
+            modelContext: { model: selectedModel, modelProvider: selectedModelProvider, apiKey: modelSecret.apiKey || '', baseUrl: modelConfiguration.baseUrl || '' },
+          }).then((result) => {
+            if (result.stored || result.capacityReached || result.blocked) onMemoryChanged(bot.id,result)
+          }).catch(() => onMemoryChanged(bot.id,{reason:'本地自动记忆整理失败，原回复不受影响。'}))
         })
       }
       const nextWorkspace = database.loadWorkspace()

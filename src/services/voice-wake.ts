@@ -17,6 +17,7 @@ export interface VoiceTextCaptureResult {
 }
 
 export interface VoiceTextCaptureHandle {
+  stop: () => void
   cancel: () => void
   readonly active: boolean
   readonly result: Promise<VoiceTextCaptureResult>
@@ -40,7 +41,10 @@ interface VoiceTextCaptureOptions {
   language?: typeof VOICE_LANGUAGE
   timeoutMs?: number
   mode?: 'conversation' | 'enrollment'
+  /** Composer dictation keeps pauses until the user explicitly finishes. */
+  manualStop?: boolean
   onInterim?: (transcript: string) => void
+  onTranscribing?: () => void
 }
 
 interface VoiceBargeInCaptureOptions {
@@ -151,7 +155,7 @@ async function transcribeLocal(pcm: Int16Array, language: typeof VOICE_LANGUAGE,
   return response.data
 }
 
-async function openPcmRecorder(onChunk: (pcm: Int16Array, rms: number) => void): Promise<PcmRecorder> {
+async function openPcmRecorder(onChunk: (pcm: Int16Array, rms: number) => void, signal?: AbortSignal): Promise<PcmRecorder> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前系统无法访问麦克风。')
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -162,40 +166,54 @@ async function openPcmRecorder(onChunk: (pcm: Int16Array, rms: number) => void):
     },
     video: false,
   })
-  const extendedWindow = window as Window & { webkitAudioContext?: typeof AudioContext }
-  const AudioContextConstructor = window.AudioContext || extendedWindow.webkitAudioContext
-  if (!AudioContextConstructor) {
-    stream.getTracks().forEach((track) => track.stop())
-    throw new Error('当前系统不支持本地 PCM 录音。')
-  }
-  const context = new AudioContextConstructor({ latencyHint: 'interactive' })
-  const source = context.createMediaStreamSource(stream)
-  const processor = context.createScriptProcessor(2048, 1, 1)
-  const silentOutput = context.createGain()
-  silentOutput.gain.value = 0
+  let context: AudioContext | null = null
+  let source: MediaStreamAudioSourceNode | null = null
+  let processor: ScriptProcessorNode | null = null
+  let silentOutput: GainNode | null = null
   let active = true
-  processor.onaudioprocess = (event) => {
+  const stop = () => {
     if (!active) return
-    const samples = event.inputBuffer.getChannelData(0)
-    onChunk(downsampleToPcm16(samples, context.sampleRate), rootMeanSquare(samples))
+    active = false
+    signal?.removeEventListener('abort', stop)
+    if (processor) processor.onaudioprocess = null
+    try { source?.disconnect() } catch { /* already disconnected */ }
+    try { processor?.disconnect() } catch { /* already disconnected */ }
+    try { silentOutput?.disconnect() } catch { /* already disconnected */ }
+    for (const track of stream.getTracks()) {
+      try { track.stop() } catch { /* keep stopping the remaining tracks */ }
+    }
+    try { void context?.close().catch(() => undefined) } catch { /* failed initialization */ }
   }
-  source.connect(processor)
-  processor.connect(silentOutput)
-  silentOutput.connect(context.destination)
-  if (context.state === 'suspended') await context.resume()
+  signal?.addEventListener('abort', stop, { once: true })
+  try {
+    if (signal?.aborted) throw abortError()
+    const extendedWindow = window as Window & { webkitAudioContext?: typeof AudioContext }
+    const AudioContextConstructor = window.AudioContext || extendedWindow.webkitAudioContext
+    if (!AudioContextConstructor) throw new Error('当前系统不支持本地 PCM 录音。')
+    context = new AudioContextConstructor({ latencyHint: 'interactive' })
+    const sampleRate = context.sampleRate
+    source = context.createMediaStreamSource(stream)
+    processor = context.createScriptProcessor(2048, 1, 1)
+    silentOutput = context.createGain()
+    silentOutput.gain.value = 0
+    processor.onaudioprocess = (event) => {
+      if (!active) return
+      const samples = event.inputBuffer.getChannelData(0)
+      onChunk(downsampleToPcm16(samples, sampleRate), rootMeanSquare(samples))
+    }
+    source.connect(processor)
+    processor.connect(silentOutput)
+    silentOutput.connect(context.destination)
+    if (context.state === 'suspended') await context.resume()
+    if (!active || signal?.aborted) throw abortError()
+  } catch (error) {
+    stop()
+    throw error
+  }
 
   return {
     get active() { return active },
-    stop() {
-      if (!active) return
-      active = false
-      processor.onaudioprocess = null
-      try { source.disconnect() } catch { /* already disconnected */ }
-      try { processor.disconnect() } catch { /* already disconnected */ }
-      try { silentOutput.disconnect() } catch { /* already disconnected */ }
-      stream.getTracks().forEach((track) => track.stop())
-      void context.close().catch(() => undefined)
-    },
+    stop,
   }
 }
 
@@ -203,7 +221,8 @@ export function startVoiceTextCapture(options: VoiceTextCaptureOptions = {}): Vo
   let active = true
   let cancelled = false
   let recorder: PcmRecorder | null = null
-  let rejectRecording: ((error: Error) => void) | null = null
+  let finishRecording: ((error?: Error) => void) | null = null
+  const recorderAbort = new AbortController()
   const chunks: Int16Array[] = []
   const preRollChunks: Int16Array[] = []
   const candidateChunks: Int16Array[] = []
@@ -227,23 +246,27 @@ export function startVoiceTextCapture(options: VoiceTextCaptureOptions = {}): Vo
   const result = (async (): Promise<VoiceTextCaptureResult> => {
     try {
       const pcm = await new Promise<Int16Array>((resolve, reject) => {
-        rejectRecording = reject
         let settled = false
         let maximumTimer = 0
         const finish = (error?: Error) => {
           if (settled) return
           settled = true
           window.clearTimeout(maximumTimer)
+          recorderAbort.abort()
           recorder?.stop()
           recorder = null
-          rejectRecording = null
+          finishRecording = null
           if (error) reject(error)
+          else if (!speechStartedAt) reject(new Error('没有检测到语音，请靠近麦克风后重试。'))
           else resolve(concatenatePcm(chunks, LOCAL_SAMPLE_RATE * 35))
         }
+        finishRecording = finish
         maximumTimer = window.setTimeout(() => {
           if (speechStartedAt) finish()
           else finish(new Error('没有检测到语音，请靠近麦克风后重试。'))
-        }, Math.max(4_000, options.timeoutMs || 12_000))
+        }, options.manualStop
+          ? Math.min(35_000, Math.max(4_000, options.timeoutMs || 35_000))
+          : Math.max(4_000, options.timeoutMs || 12_000))
 
         void openPcmRecorder((chunk, rms) => {
           if (settled || cancelled) return
@@ -288,13 +311,15 @@ export function startVoiceTextCapture(options: VoiceTextCaptureOptions = {}): Vo
             lastStatusAt = now
             options.onInterim?.(`本地录音 ${Math.max(1, Math.round((now - speechStartedAt) / 1000))} 秒`)
           }
-          if (speechStartedAt && now - speechStartedAt >= 420 && now - lastSpeechAt >= 700) finish()
-        }).then((openedRecorder) => {
-          recorder = openedRecorder
-          if (cancelled) finish(abortError())
+          if (!options.manualStop && speechStartedAt && now - speechStartedAt >= 420 && now - lastSpeechAt >= 700) finish()
+        }, recorderAbort.signal).then((openedRecorder) => {
+          // Permission prompts and AudioContext.resume can outlive cancellation.
+          if (settled || cancelled) openedRecorder.stop()
+          else recorder = openedRecorder
         }).catch((error) => finish(errorFromUnknown(error)))
       })
       if (cancelled) throw abortError()
+      options.onTranscribing?.()
       options.onInterim?.('录音完成，正在使用内置 Whisper 模型转写')
       const transcription = await transcribeLocal(pcm, options.language || VOICE_LANGUAGE, options.mode || 'conversation')
       if (cancelled) throw abortError()
@@ -305,7 +330,8 @@ export function startVoiceTextCapture(options: VoiceTextCaptureOptions = {}): Vo
       const currentRecorder = recorder as PcmRecorder | null
       currentRecorder?.stop()
       recorder = null
-      rejectRecording = null
+      finishRecording = null
+      recorderAbort.abort()
       active = false
     }
   })()
@@ -313,13 +339,18 @@ export function startVoiceTextCapture(options: VoiceTextCaptureOptions = {}): Vo
   return {
     get active() { return active },
     result,
+    stop() {
+      if (!active || cancelled) return
+      finishRecording?.()
+    },
     cancel() {
       if (!active || cancelled) return
       cancelled = true
+      finishRecording?.(abortError())
+      recorderAbort.abort()
       recorder?.stop()
       recorder = null
-      rejectRecording?.(abortError())
-      rejectRecording = null
+      finishRecording = null
       active = false
     },
   }

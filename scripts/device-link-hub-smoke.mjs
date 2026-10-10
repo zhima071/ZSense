@@ -24,6 +24,8 @@ class TestVault {
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zsense-client-hub-'))
 const challenges = new Map()
 const mutations = []
+let registrationGate = null
+let releaseRegistrationResponse
 const assignedDeviceId = 'hub00001'
 const otherKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' })
 
@@ -78,6 +80,10 @@ const hub = http.createServer(async (request, response) => {
     )
     if (action === 'account-bind') assert.equal(body.code, '123456')
     mutations.push({ action, deviceId: body.deviceId, upstream: body.upstream })
+    if (action === 'register' && body.upstream === 'https://client-1.trycloudflare.com' && registrationGate) {
+      registrationGate.received = true
+      await registrationGate.response
+    }
     return send(response, 200, { ok: true, data: { deviceId: body.deviceId, online: !['offline', 'revoke'].includes(action), peers: action === 'account-peers' ? [{ deviceId: 'hub00002', name: 'Windows', identityPublicKey: otherKey, online: true, lastSeenAt: new Date().toISOString() }] : [] } })
   } catch (error) {
     return send(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
@@ -145,10 +151,19 @@ try {
     await assert.rejects(legacyClient.refreshRemoteIdentity({ requireRegistration: true }), /旧设备号需要绑定设备公钥/)
   } finally { await legacyClient.shutdown() }
 
+  // A server-side mutation log is written before the HTTP reply. Hold that
+  // reply deterministically: observing receipt alone must not be mistaken for
+  // a completed client registration (the old assertion raced this boundary).
+  registrationGate = { received: false, response: new Promise((resolve) => { releaseRegistrationResponse = resolve }) }
   await service.setRemoteEnabled(true)
   assert.equal(service.inspect().remote.deviceLockEnabled, false, '未开启安全锁时也应允许远程连接')
   await waitFor(() => mutations.some((entry) => entry.action === 'register' && entry.upstream === 'https://client-1.trycloudflare.com'), 'first signed registration did not reach hub')
+  assert.equal(registrationGate.received, true)
+  assert.equal(service.inspect().remote.deviceId, '', 'client must not accept an id before the signed registration response is received and checked')
+  releaseRegistrationResponse()
+  await waitFor(() => service.inspect().remote.deviceId === assignedDeviceId && Boolean(service.inspect().remote.registeredAt), 'client did not acknowledge and persist the completed hub registration')
   assert.equal(service.inspect().remote.deviceId, assignedDeviceId, 'client must persist the id allocated by the hub')
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stateDirectory, 'state.json'), 'utf8')).remote.deviceId, assignedDeviceId, 'allocated hub identity must also be persisted to disk')
   assert.equal(service.inspect().remote.publicUrl, `https://${assignedDeviceId}.zsense.space`, 'public device URL must be derived from the hub root domain')
   assert.equal(service.inspect().remote.url, `https://${assignedDeviceId}.zsense.space`, 'active remote URL must not use the legacy app.zsense.space bypass')
   await service.bindVerifiedEmail('owner@example.com', '123456')
@@ -172,8 +187,9 @@ try {
 
   await service.setRemoteEnabled(false)
   assert.equal(mutations.at(-1).action, 'offline', 'turning remote access off must stop hub routing')
-  console.log(JSON.stringify({ ok: true, hubAssignedId: true, ed25519SignedMutations: true, pendingTunnelRegistersOffline: true, registrationErrorSurfaced: true, verifiedAccountAutoTrust: true, revokedPeerStaysBlocked: true, tunnelDisconnectOffline: true, tunnelReconnectUpdatesUpstream: true }))
+  console.log(JSON.stringify({ ok: true, hubAssignedId: true, registrationResponseAcknowledged: true, ed25519SignedMutations: true, pendingTunnelRegistersOffline: true, registrationErrorSurfaced: true, verifiedAccountAutoTrust: true, revokedPeerStaysBlocked: true, tunnelDisconnectOffline: true, tunnelReconnectUpdatesUpstream: true }))
 } finally {
+  releaseRegistrationResponse?.()
   await service.shutdown()
   await new Promise((resolve) => hub.close(resolve))
   fs.rmSync(root, { recursive: true, force: true })

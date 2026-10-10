@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, CheckCircle2, LoaderCircle, Menu, PanelLeftOpen, Search, X } from 'lucide-react'
+import { AlertTriangle, Bell, CheckCircle2, LoaderCircle, Menu, Search, X } from 'lucide-react'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import brandLogo from './assets/zsense-brand.png'
 import { activities as fallbackActivities, initialBots, initialChannels, initialGatewayConnections, initialModelConfiguration, initialSavedModelConfigurations, initialSkills } from './data'
@@ -10,10 +10,15 @@ import { VoiceWakeToggle } from './components/VoiceWakeToggle'
 import { DisplaySettingsProvider, defaultDisplaySettings } from './components/DisplaySettingsContext'
 import type { SettingsSection } from './components/SystemPages'
 import { AppLockScreen } from './components/AppLockScreen'
+import { StartupScreen, STARTUP_ANIMATION_MS } from './components/StartupScreen'
 import { errorMessage, isDesktopApp, unwrapDesktop } from './services/desktop'
 import { startVoiceBargeInCapture, startVoiceTextCapture, startVoiceWakeCapture, voiceTextRecognitionSupported, type VoiceBargeInCaptureHandle, type VoiceTextCaptureHandle, type VoiceWakeCaptureHandle } from './services/voice-wake'
 import { createLocalSpeechStream, stopLocalSpeech, type LocalSpeechStream } from './services/local-speech'
 import { VOICE_LANGUAGE } from './services/voice-language'
+import { CHAT_DICTATION_ACTIVITY_EVENT } from './components/ChatDictationButton'
+import { DEFAULT_CHAT_DICTATION_SHORTCUT } from './services/chat-dictation-shortcut'
+import { useSidebarPanelWidth } from './services/sidebar-panel-width'
+import { requestOfficeNavigation } from './services/office-navigation-guard'
 import type { Activity, AppSettings, AuthStatus, Bot, Channel, ChatAttachment, ChatClarificationAnswer, ChatResult, ChatStreamEvent, Conversation, ConversationGroup, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnection, GatewayConnectionConfigurationInput, GatewayPairingRequest, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfiguration, ModelConfigurationInput, ModelProvider, ReasoningEffort, RuntimeStatus, ScheduledTask, ScheduledTaskInput, ScheduledTaskRun, SessionProgressItem, Skill, SkillEditorInput, SkillMaintenanceResult, ViewId, VoiceChatRequest, VoiceInteractionStatus as VoiceInteractionStatusValue, VoiceWakeStatus, WeixinQrLoginStatus, WorkspaceSnapshot } from './types'
 
 // 默认首屏只需要总览与导航。聊天、设置、技能、任务和 Bot 工作区按第一次进入时加载，
@@ -68,6 +73,8 @@ const defaultSettings: AppSettings = {
   strictMemory: true,
   autoApprovalEnabled: false,
   autoExtractMemory: true,
+  memoryModelRefinement: false,
+  autoDistillSkills: false,
   memoryPeriodicReview: true,
   memoryReviewInterval: 10,
   memoryRecallLimit: 24,
@@ -105,7 +112,7 @@ const defaultSettings: AppSettings = {
   voiceConversationEnabled: true,
   voiceAutoSpeak: true,
   voiceContinuousConversation: true,
-  voiceTtsVoice: 'Xiaoyu',
+  voiceTtsVoice: 'melo-zh',
   voiceTtsSpeed: 1,
   responseLanguage: 'zh-CN',
   ...defaultDisplaySettings,
@@ -231,7 +238,6 @@ function getStoredSettings(): AppSettings {
 type Notice = { tone: 'success' | 'error'; message: string } | null
 type VoiceTarget = { kind: 'native'; newConversation?: boolean } | { kind: 'bot'; botId: string }
 type VoiceOperation = { generation: number; target: VoiceTarget | null; requestId: string }
-const STARTUP_ANIMATION_MS = 2_500 // CSS 入场动画 2.4 秒，额外留 100ms 给最后一帧
 
 export default function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(() => isDesktopApp ? null : browserAuthStatus)
@@ -263,6 +269,8 @@ export default function App() {
   const coreReady = runtime.agentCoreReady ?? runtime.runnable
   const [voiceWakeStatus, setVoiceWakeStatus] = useState<VoiceWakeStatus>(browserVoiceWakeStatus)
   const [voiceWakeSuspended, setVoiceWakeSuspended] = useState(false)
+  const [dictationActive, setDictationActive] = useState(false)
+  const dictationActiveRef = useRef(false)
   const [voiceInteraction, setVoiceInteraction] = useState<VoiceInteractionStatusValue>({ state: 'idle', message: '点击开始语音交流。' })
   const [voiceWakeBusy, setVoiceWakeBusy] = useState(false)
   const [nativeVoiceRequest, setNativeVoiceRequest] = useState<VoiceChatRequest>()
@@ -276,7 +284,9 @@ export default function App() {
   const [activeBotId, setActiveBotId] = useState<string | null>(null)
   const [activeNativeConversationId, setActiveNativeConversationId] = useState<string | undefined>()
   const [nativeChatResetToken, setNativeChatResetToken] = useState(0)
-  const [chatTarget, setChatTarget] = useState<{ botId: string; conversationId?: string } | null>(null)
+  const [chatTarget, setChatTarget] = useState<{ botId: string; conversationId?: string; dialogKey?: string } | null>(null)
+  const chatViewRef = useRef({ activeView, activeBotId, activeNativeConversationId, chatTarget })
+  chatViewRef.current = { activeView, activeBotId, activeNativeConversationId, chatTarget }
   // 从总览卡片的详情面板点「编辑任务」时，跳到定时任务页并打开这个任务的表单
   const [pendingEditTaskId, setPendingEditTaskId] = useState('')
   /** 从 Bot 页面新建任务时，把任务归属预置为这个 Bot */
@@ -291,6 +301,7 @@ export default function App() {
   const [sessionCenterOpen, setSessionCenterOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [sidebarPanelWidth, setSidebarPanelWidth] = useSidebarPanelWidth()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === 'true'
@@ -350,6 +361,13 @@ export default function App() {
   const showNotice = useCallback((tone: 'success' | 'error', message: string) => {
     setNotice({ tone, message })
     window.setTimeout(() => setNotice(null), tone === 'error' ? 5_000 : 2_500)
+  }, [])
+
+  useEffect(() => {
+    if (window.zsenseDesktop?.transport === 'web-bridge') return
+    return window.zsenseDesktop?.screenshot?.onGlobalError((message) => {
+      setNotice({ tone: 'error', message })
+    })
   }, [])
 
   const refreshRuntime = useCallback(async () => {
@@ -436,6 +454,14 @@ export default function App() {
 
   useEffect(() => window.zsenseDesktop?.runtime.onStatusChanged((status) => setRuntime(status)), [])
   useEffect(() => window.zsenseDesktop?.data.onChanged((snapshot) => applySnapshot(snapshot)), [applySnapshot])
+  useEffect(() => window.zsenseDesktop?.data.onMemoryChanged?.((event) => {
+    const merge = (bot: Bot) => bot.id === event.botId
+      ? { ...bot, memories: event.memories, memoryCount: event.memoryCount, memorySize: event.memorySize }
+      : bot
+    setBots((current) => current.map(merge))
+    setNativeBot(merge)
+    if (event.status?.message || event.status?.capacityReached) showNotice('error', event.status.message || '当前自动记忆已达到容量上限，请删除不再需要的自动记忆或提高上限。')
+  }), [showNotice])
 
   useEffect(() => {
     if (window.zsenseDesktop?.transport !== 'web-bridge') return
@@ -519,7 +545,13 @@ export default function App() {
     }
   }, [sidebarCollapsed])
 
-  const navigate = (view: ViewId) => {
+  const guardedNavigation = (action: () => void) => {
+    void requestOfficeNavigation().then((allowed) => { if (allowed) action() }).catch((reason) => showNotice('error', `文件编辑尚未关闭：${errorMessage(reason)}`))
+  }
+
+  const openBotChat = (target: typeof chatTarget) => guardedNavigation(() => setChatTarget(target))
+
+  const navigate = (view: ViewId) => guardedNavigation(() => {
     const settingsSectionForView = settingsViewSections[view]
     if (settingsSectionForView) {
       setSettingsSection(settingsSectionForView)
@@ -530,26 +562,28 @@ export default function App() {
     setActiveBotId(null)
     setMobileOpen(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
-  const openBot = (id: string) => {
+  })
+  const openBot = (id: string) => guardedNavigation(() => {
     setActiveBotId(id)
     setMobileOpen(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
+  })
 
-  const openNativeChat = (conversationId?: string) => {
+  const openNativeChat = (conversationId?: string) => guardedNavigation(() => {
     setActiveNativeConversationId(conversationId)
     setActiveView('chat')
     setActiveBotId(null)
     setMobileOpen(false)
     window.scrollTo({ top: 0, behavior: 'smooth' })
-  }
+  })
 
-  const startNativeChat = () => {
+  const startNativeChat = () => guardedNavigation(() => {
     setActiveNativeConversationId(undefined)
     setNativeChatResetToken((current) => current + 1)
-    openNativeChat()
-  }
+    setActiveView('chat')
+    setActiveBotId(null)
+    setMobileOpen(false)
+  })
 
   const stopVoiceInteraction = useCallback((announce = false) => {
     const current = voiceOperationRef.current
@@ -570,6 +604,7 @@ export default function App() {
   }, [settings.voiceWakeEnabled, showNotice])
 
   const startVoiceInteraction = useCallback(async (targetOverride?: VoiceTarget) => {
+    if (dictationActiveRef.current) return
     const desktop = window.zsenseDesktop
     if (!desktop?.voice) {
       setVoiceInteraction({ state: 'error', message: '语音交流只能在 ZSense 桌面端中使用。' })
@@ -586,6 +621,10 @@ export default function App() {
     if (target.kind === 'bot' && !targetBot) {
       setVoiceInteraction({ state: 'error', message: '当前 Bot 已不存在，无法开始语音交流。' })
       return
+    }
+    if (target.kind === 'native' && (target.newConversation || chatTarget || activeView !== 'chat' || activeBotId)) {
+      try { if (!await requestOfficeNavigation()) return }
+      catch (error) { showNotice('error', `文件编辑尚未关闭：${errorMessage(error)}`); return }
     }
     const targetLabel = target.kind === 'bot' ? targetBot!.name : 'AI 对话'
     const currentConversation = target.kind === 'bot'
@@ -673,7 +712,7 @@ export default function App() {
       setVoiceInteraction({ state: 'error', message, targetLabel })
       showNotice('error', `语音交互失败：${message}`)
     }
-  }, [activeNativeConversationId, bots, chatTarget, conversations, coreReady, showNotice])
+  }, [activeBotId, activeNativeConversationId, activeView, bots, chatTarget, conversations, coreReady, showNotice])
 
   voiceStartRef.current = (target?: VoiceTarget) => { void startVoiceInteraction(target) }
 
@@ -709,7 +748,7 @@ export default function App() {
   useEffect(() => {
     voiceBargeInCaptureRef.current?.stop()
     voiceBargeInCaptureRef.current = null
-    if ((voiceInteraction.state !== 'thinking' && voiceInteraction.state !== 'speaking') || !voiceOperationRef.current.target) return
+    if (dictationActive || (voiceInteraction.state !== 'thinking' && voiceInteraction.state !== 'speaking') || !voiceOperationRef.current.target) return
     let cancelled = false
     void startVoiceBargeInCapture({
       armDelayMs: voiceInteraction.state === 'speaking' ? 850 : 300,
@@ -729,11 +768,11 @@ export default function App() {
       voiceBargeInCaptureRef.current?.stop()
       voiceBargeInCaptureRef.current = null
     }
-  }, [interruptVoiceInteraction, voiceInteraction.state])
+  }, [dictationActive, interruptVoiceInteraction, voiceInteraction.state])
 
   const handleVoiceTurnDelta = useCallback((requestId: string, delta: string) => {
     const operation = voiceOperationRef.current
-    if (!settings.voiceAutoSpeak || !operation.target || operation.requestId !== requestId || !delta) return
+    if (dictationActiveRef.current || !settings.voiceAutoSpeak || !operation.target || operation.requestId !== requestId || !delta) return
     let activeStream = voiceSpeechStreamRef.current
     if (activeStream?.requestId !== requestId) {
       activeStream?.stream.cancel()
@@ -789,7 +828,9 @@ export default function App() {
       if (settings.voiceContinuousConversation) {
         voiceOperationRef.current = { generation, target, requestId: '' }
         setVoiceInteraction({ state: 'starting', message: '回复完成，正在等待扬声器尾音结束后继续聆听…', targetLabel })
-        window.setTimeout(() => voiceStartRef.current(target.kind === 'native' ? { kind: 'native' } : target), 520)
+        window.setTimeout(() => {
+          if (voiceOperationRef.current.generation === generation && voiceOperationRef.current.target && !dictationActiveRef.current) voiceStartRef.current(target.kind === 'native' ? { kind: 'native' } : target)
+        }, 520)
       } else {
         voiceOperationRef.current = { generation, target: null, requestId: '' }
         setVoiceWakeSuspended(false)
@@ -825,6 +866,32 @@ export default function App() {
   }, [showNotice])
 
   useEffect(() => {
+    const onDictationActivity = (event: Event) => {
+      const active = Boolean((event as CustomEvent<{ active: boolean }>).detail?.active)
+      dictationActiveRef.current = active
+      setDictationActive(active)
+      if (!active) return
+      // 手动听写接管音频，但不取消已经下发的 Agent 任务。
+      voiceWakeCaptureRef.current?.stop()
+      voiceWakeCaptureRef.current = null
+      voiceConversationCaptureRef.current?.cancel()
+      voiceConversationCaptureRef.current = null
+      voiceBargeInCaptureRef.current?.stop()
+      voiceBargeInCaptureRef.current = null
+      voiceSpeechStreamRef.current?.stream.cancel()
+      voiceSpeechStreamRef.current = null
+      void stopLocalSpeech().catch(() => undefined)
+      voiceOperationRef.current = { generation: voiceOperationRef.current.generation + 1, target: null, requestId: '' }
+      setNativeVoiceRequest(undefined)
+      setBotVoiceRequest(undefined)
+      setVoiceWakeSuspended(false)
+      setVoiceInteraction({ state: 'idle', message: '正在输入框听写，识别文字后由你决定是否发送。' })
+    }
+    window.addEventListener(CHAT_DICTATION_ACTIVITY_EVENT, onDictationActivity)
+    return () => window.removeEventListener(CHAT_DICTATION_ACTIVITY_EVENT, onDictationActivity)
+  }, [])
+
+  useEffect(() => {
     const voiceWake = window.zsenseDesktop?.voiceWake
     if (!voiceWake || !authStatus?.authenticated) return
     const removeStatusListener = voiceWake.onStatusChanged((status) => {
@@ -849,7 +916,7 @@ export default function App() {
       stopLocalCapture()
       return
     }
-    if (!settings.voiceWakeEnabled || !coreReady || voiceWakeSuspended) {
+    if (!settings.voiceWakeEnabled || !coreReady || voiceWakeSuspended || dictationActive) {
       stopLocalCapture()
       void unwrapDesktop(voiceWake.stop()).then(setVoiceWakeStatus).catch(() => undefined)
       return
@@ -887,21 +954,25 @@ export default function App() {
           sensitivity: settings.voiceWakeSensitivity,
           confirmationFrames: settings.voiceWakeConfirmationFrames,
           onDetected: (phrase) => {
+            if (cancelled || dictationActiveRef.current) return
             void unwrapDesktop(voiceWake.detected({ phrase })).catch(() => undefined)
             if (settings.voiceConversationEnabled) {
               showNotice('success', `已听到“${phrase}”，正在开始语音交流`)
               voiceStartRef.current({ kind: 'native', newConversation: settings.voiceWakeStartNewConversation })
               return
             }
-            if (settings.voiceWakeStartNewConversation) {
-              setActiveNativeConversationId(undefined)
-              setNativeChatResetToken((current) => current + 1)
-            }
-            setActiveView('chat')
-            setActiveBotId(null)
-            setMobileOpen(false)
-            showNotice('success', `已听到“${phrase}”，AI 对话已就绪`)
-            window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('.native-chat-page textarea')?.focus(), 180)
+            void requestOfficeNavigation().then((allowed) => {
+              if (!allowed || cancelled) return
+              if (settings.voiceWakeStartNewConversation) {
+                setActiveNativeConversationId(undefined)
+                setNativeChatResetToken((current) => current + 1)
+              }
+              setActiveView('chat')
+              setActiveBotId(null)
+              setMobileOpen(false)
+              showNotice('success', `已听到“${phrase}”，AI 对话已就绪`)
+              window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('.native-chat-page textarea')?.focus(), 180)
+            }).catch((error) => showNotice('error', `文件编辑尚未关闭：${errorMessage(error)}`))
           },
           onError: (error) => {
             stopLocalCapture()
@@ -937,7 +1008,7 @@ export default function App() {
       cancelled = true
       stopLocalCapture()
     }
-  }, [authStatus?.authenticated, coreReady, settings.voiceConversationEnabled, settings.voiceWakeConfirmationFrames, settings.voiceWakeEnabled, settings.voiceWakePhrase, settings.voiceWakeSensitivity, settings.voiceWakeStartNewConversation, showNotice, voiceWakeSuspended])
+  }, [authStatus?.authenticated, coreReady, dictationActive, settings.voiceConversationEnabled, settings.voiceWakeConfirmationFrames, settings.voiceWakeEnabled, settings.voiceWakePhrase, settings.voiceWakeSensitivity, settings.voiceWakeStartNewConversation, showNotice, voiceWakeSuspended])
 
   useEffect(() => {
     if (authStatus?.authenticated) return
@@ -1324,6 +1395,40 @@ export default function App() {
     }
   }
 
+  const forkConversationMessage = async (conversationId: string, messageId: string) => {
+    if (!window.zsenseDesktop) throw new Error('请在 ZSense 桌面应用或已连接的远程界面创建分支。')
+    const source = conversations.find((conversation) => conversation.id === conversationId)
+    if (!source) throw new Error('原会话不存在，请刷新后重试。')
+    const requestedView = chatViewRef.current
+    const result = await unwrapDesktop(window.zsenseDesktop.conversations.forkMessage(conversationId, messageId))
+    const branch = result.workspace.conversations.find((conversation) => conversation.id === result.conversationId)
+    if (!branch || branch.id === conversationId || branch.kind !== source.kind || branch.botId !== source.botId) {
+      throw new Error('创建分支的返回结果不匹配，请刷新会话列表。')
+    }
+    applySnapshot(result.workspace)
+    const latestView = chatViewRef.current
+    // A completed background mutation must not steal a newly selected chat or reopen a closed dialog.
+    const sameView = latestView.activeView === requestedView.activeView && latestView.activeBotId === requestedView.activeBotId && latestView.activeNativeConversationId === requestedView.activeNativeConversationId && latestView.chatTarget === requestedView.chatTarget
+    if (sameView) {
+      if (branch.kind === 'native') openNativeChat(branch.id)
+      else openBotChat({ botId: branch.botId, conversationId: branch.id })
+    }
+    showNotice('success', '已创建分支聊天，原会话保持不变')
+  }
+
+  const bookmarkConversationMessage = async (conversationId: string, messageId: string, bookmarked: boolean) => {
+    const result = window.zsenseDesktop
+      ? await unwrapDesktop(window.zsenseDesktop.conversations.bookmarkMessage(conversationId, messageId, bookmarked))
+      : { conversationId, messageId, bookmarked }
+    if (result.conversationId !== conversationId || result.messageId !== messageId || result.bookmarked !== bookmarked) {
+      throw new Error('标记保存结果不匹配，请重试。')
+    }
+    // A bookmark is presentation metadata: do not reload the workspace or reset an active Agent run.
+    setConversations((current) => current.map((conversation) => conversation.id === conversationId
+      ? { ...conversation, messages: conversation.messages.map((message) => message.id === messageId ? { ...message, bookmarked: result.bookmarked } : message) }
+      : conversation))
+  }
+
   const archiveNativeConversation = async (conversationId: string, archived: boolean) => {
     await archiveConversation(conversationId, archived)
     if (archived && activeNativeConversationId === conversationId) {
@@ -1539,12 +1644,13 @@ export default function App() {
     approvalDesktopNotification: settings.approvalDesktopNotification,
     completionDesktopNotification: settings.completionDesktopNotification,
     chatInputHeight: settings.chatInputHeight,
+    chatDictationShortcut: settings.chatDictationShortcut ?? DEFAULT_CHAT_DICTATION_SHORTCUT,
     onChatInputHeightChange: updateChatInputHeight,
   }), [
     settings.streamingResponse, settings.compactMode, settings.showReasoning, settings.showUsage,
     settings.inlineDiff, settings.completionSound, settings.approvalSound,
     settings.approvalDesktopNotification, settings.completionDesktopNotification,
-    settings.chatInputHeight, updateChatInputHeight,
+    settings.chatInputHeight, settings.chatDictationShortcut, updateChatInputHeight,
   ])
 
   const createScheduledTask = async (input: ScheduledTaskInput) => {
@@ -1638,6 +1744,7 @@ export default function App() {
 
   const sendChat = async (botId: string, message: string, conversationId: string | undefined, requestId: string, options: { attachments: ChatAttachment[]; modelProvider?: ModelProvider; model?: string; reasoningEffort: ReasoningEffort; interactionMode?: 'text' | 'voice'; workspacePath: string; browserSessionId?: string; delegateBotId?: string }, onEvent: (event: ChatStreamEvent) => void): Promise<ChatResult> => {
     if (!window.zsenseDesktop) throw new Error('真实对话仅在 ZSense 桌面端中可用。')
+    const sendingTarget = chatTarget
     const bot = bots.find((item) => item.id === botId)
     const conversation = conversations.find((item) => item.id === conversationId)
     const startedAt = new Date().toISOString()
@@ -1651,6 +1758,11 @@ export default function App() {
     try {
       const result = await unwrapDesktop(window.zsenseDesktop.chat.send({ requestId, botId, message, conversationId, ...options }))
       applySnapshot(result.workspace)
+      // Associate a newly saved Bot conversation without remounting its composer,
+      // or bringing back a dialog the user has already closed or switched away from.
+      setChatTarget((current) => current && current === sendingTarget
+        ? { ...current, conversationId: result.conversationId, dialogKey: current.dialogKey || current.conversationId || `new-${current.botId}` }
+        : current)
       const savedConversation = result.workspace.conversations.find((item) => item.id === result.conversationId)
       updateSessionProgress(requestId, { conversationId: result.conversationId, title: savedConversation?.title || conversation?.title || `${bot?.name || 'Bot'} 对话`, status: 'complete', detail: '回答已生成', read: false })
       return result
@@ -1765,7 +1877,7 @@ export default function App() {
     setSessionCenterOpen(false)
     setMobileOpen(false)
     if (item.kind === 'native') return openNativeChat(item.conversationId)
-    if (item.botId) setChatTarget({ botId: item.botId, conversationId: item.conversationId })
+    if (item.botId) openBotChat({ botId: item.botId, conversationId: item.conversationId })
   }
 
   // 四态明确：加载中 / 已锁 / 出错 / 就绪。任何一态都不会再出现「界面在、数据是空的」这种假象。
@@ -1774,7 +1886,7 @@ export default function App() {
   const appStillStarting = loading || waitingFirstStatus || loadingWorkspace
   if (!startupAnimationFinished || appStillStarting) {
     const startupStage = bootError ? '启动失败，正在准备错误提示…' : !appStillStarting ? '准备就绪，即将进入工作空间…' : !authStatus ? '正在检查本地安全状态…' : authStatus.locked ? '正在打开安全锁…' : '正在恢复本地工作区…'
-    return <div className={`zsense-startup${startupAnimationFinished ? ' zsense-startup--waiting' : ''}`} role="status" aria-live="polite" aria-busy="true"><div className="zsense-startup-inner"><div className="zsense-startup-symbol" aria-hidden="true"><span className="zsense-startup-halo" /><span className="zsense-startup-orbit" /><span className="zsense-startup-orbit zsense-startup-orbit-secondary" /><span className="zsense-startup-logo"><img src={brandLogo} alt="" width={88} height={88} /></span></div><strong className="zsense-startup-name">ZSense</strong><span className="zsense-startup-tagline">你的智能工作空间</span><div className="zsense-startup-progress" aria-hidden="true" /><span className="zsense-startup-stage">{startupStage}</span></div></div>
+    return <StartupScreen stage={startupStage} waiting={startupAnimationFinished} />
   }
 
   if (isDesktopApp && bootError) {
@@ -1831,13 +1943,12 @@ export default function App() {
 
   return (
     <DisplaySettingsProvider value={displaySettingsValue}>
-    <div className={`app-shell ${settings.compactMode ? 'compact-mode' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} style={{ '--chat-input-height': `${settings.chatInputHeight}px` } as React.CSSProperties}>
+    <div className={`app-shell ${settings.compactMode ? 'compact-mode' : ''} ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`} style={{ '--chat-input-height': `${settings.chatInputHeight}px`, '--sidebar-panel-width': `${sidebarPanelWidth}px` } as React.CSSProperties}>
       <a className="skip-link" href="#main-content">跳到主要内容</a>
-      <Sidebar activeView={activeView} bots={bots.filter((bot) => !settings.hiddenSidebarBotIds.includes(bot.id))} nativeConversations={listedNativeConversations} activeNativeConversationId={activeNativeConversationId} activeBotId={activeBotId} mobileOpen={mobileOpen} collapsed={sidebarCollapsed} onNavigate={navigate} onOpenBot={openBot} onOpenNativeChat={openNativeChat} onStartNativeChat={startNativeChat} onRenameNativeConversation={renameConversation} onArchiveNativeConversation={archiveNativeConversation} onDeleteNativeConversation={deleteNativeConversation} nativeSpaceId={nativeSpaceId} nativeConversationGroups={nativeConversationGroups} onCreateConversationGroup={createConversationGroup} onRenameConversationGroup={renameConversationGroup} onDeleteConversationGroup={deleteConversationGroup} onToggleConversationGroup={toggleConversationGroup} onMoveConversationToGroup={moveConversationToGroup} onReorderConversations={reorderConversations} onCloseMobile={() => setMobileOpen(false)} onToggleCollapsed={() => setSidebarCollapsed((current) => !current)} currentUser={currentUser} appLockEnabled={settings.appLockEnabled} onLock={lockApplication} voiceStatus={voiceStatus} voiceWakeEnabled={settings.voiceWakeEnabled} voiceWakeStatus={voiceWakeStatus} voiceWakeBusy={voiceWakeBusy} onToggleVoiceWake={() => void toggleVoiceWake()} sessionCenterOpen={sessionCenterOpen} runningSessionCount={runningSessionCount} unreadSessionCount={unreadSessionCount} onToggleSessionCenter={toggleSessionCenter} />
+      <Sidebar activeView={activeView} bots={bots.filter((bot) => !settings.hiddenSidebarBotIds.includes(bot.id))} nativeConversations={listedNativeConversations} activeNativeConversationId={activeNativeConversationId} activeBotId={activeBotId} mobileOpen={mobileOpen} collapsed={sidebarCollapsed} panelWidth={sidebarPanelWidth} onPanelWidthChange={setSidebarPanelWidth} onNavigate={navigate} onOpenBot={openBot} onOpenNativeChat={openNativeChat} onStartNativeChat={startNativeChat} onRenameNativeConversation={renameConversation} onArchiveNativeConversation={archiveNativeConversation} onDeleteNativeConversation={deleteNativeConversation} nativeSpaceId={nativeSpaceId} nativeConversationGroups={nativeConversationGroups} onCreateConversationGroup={createConversationGroup} onRenameConversationGroup={renameConversationGroup} onDeleteConversationGroup={deleteConversationGroup} onToggleConversationGroup={toggleConversationGroup} onMoveConversationToGroup={moveConversationToGroup} onReorderConversations={reorderConversations} onCloseMobile={() => setMobileOpen(false)} onToggleCollapsed={() => setSidebarCollapsed((current) => !current)} currentUser={currentUser} appLockEnabled={settings.appLockEnabled} onLock={lockApplication} voiceStatus={voiceStatus} voiceWakeEnabled={settings.voiceWakeEnabled} voiceWakeStatus={voiceWakeStatus} voiceWakeBusy={voiceWakeBusy} onToggleVoiceWake={() => void toggleVoiceWake()} sessionCenterOpen={sessionCenterOpen} runningSessionCount={runningSessionCount} unreadSessionCount={unreadSessionCount} onToggleSessionCenter={toggleSessionCenter} />
       <div className="app-main">
         <header className="topbar">
-          <button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="打开导航"><Menu size={20} /></button>
-          {sidebarCollapsed && <button className="icon-button desktop-sidebar-open" onClick={() => setSidebarCollapsed(false)} aria-label="展开左侧导航" title="展开左侧导航" aria-expanded="false"><PanelLeftOpen size={19} /></button>}
+          <button className="icon-button mobile-menu" onClick={() => setMobileOpen(true)} aria-label="打开导航" title="打开导航" aria-expanded={mobileOpen} aria-controls="sidebar-panel"><Menu size={20} /></button>
           <div className="topbar-actions">
             {voiceStatus}
             <VoiceWakeToggle enabled={settings.voiceWakeEnabled} status={voiceWakeStatus} busy={voiceWakeBusy} onToggle={() => void toggleVoiceWake()} />
@@ -1851,14 +1962,14 @@ export default function App() {
         <SessionProgressCenter open={sessionCenterOpen} items={visibleProgressItems} onClose={() => setSessionCenterOpen(false)} onOpenSession={openProgressSession} onClearFinished={() => setSessionProgressItems((current) => current.filter((item) => item.status === 'running'))} />
         <main id="main-content" tabIndex={-1}>
           <Suspense fallback={<LazyPageFallback />}>
-          {activeBot ? <BotWorkspace bot={activeBot} channels={channels} gatewayConnections={gatewayConnections.filter((connection) => connection.botId === activeBot.id)} skills={skills} conversations={listedBotConversations.filter((conversation) => conversation.botId === activeBot.id)} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} runtime={runtime} scheduledTasks={scheduledTasks.filter((task) => task.ownerBotId === activeBot.id)} onRunScheduledTask={runScheduledTaskNow} onToggleScheduledTask={toggleScheduledTask} onEditScheduledTask={(task) => { setPendingEditTaskId(task.id); navigate('scheduled-tasks') }} onOpenScheduledTaskWorkspace={openScheduledTaskWorkspace} onCreateScheduledTask={() => { setPendingTaskOwnerId(activeBot.id); setPendingEditTaskId('new'); navigate('scheduled-tasks') }} onBack={() => navigate('bots')} onOpenModels={() => navigate('models')} onLoadAuthorizedUsers={loadGatewayAuthorizedUsers} onSaveGateway={saveGatewayConnection} onDeleteGateway={deleteGatewayConnection} onLoadGatewayPairings={loadGatewayPairings} onApproveGatewayPairing={approveGatewayPairing} onStartWeixinLogin={startWeixinLogin} onGetWeixinLoginStatus={getWeixinLoginStatus} onCancelWeixinLogin={cancelWeixinLogin} onOpenRuntime={() => { setSettingsSection('runtime'); navigate('settings') }} onRefreshRuntime={refreshRuntime} onUpdate={updateBot} onDuplicate={duplicateBot} onDelete={deleteBot} onAddMemory={addMemory} onUpdateMemory={updateMemory} onDeleteMemory={deleteMemory} onStartChat={(conversationId) => setChatTarget({ botId: activeBot.id, conversationId })} onRenameConversation={renameConversation} onArchiveConversation={archiveConversation} onDeleteConversation={deleteConversation} /> : (
+{activeBot ? <BotWorkspace bot={activeBot} channels={channels} gatewayConnections={gatewayConnections.filter((connection) => connection.botId === activeBot.id)} skills={skills} conversations={listedBotConversations.filter((conversation) => conversation.botId === activeBot.id)} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} runtime={runtime} scheduledTasks={scheduledTasks.filter((task) => task.ownerBotId === activeBot.id)} onRunScheduledTask={runScheduledTaskNow} onToggleScheduledTask={toggleScheduledTask} onEditScheduledTask={(task) => { setPendingEditTaskId(task.id); navigate('scheduled-tasks') }} onOpenScheduledTaskWorkspace={openScheduledTaskWorkspace} onCreateScheduledTask={() => { setPendingTaskOwnerId(activeBot.id); setPendingEditTaskId('new'); navigate('scheduled-tasks') }} onBack={() => navigate('bots')} onOpenModels={() => navigate('models')} onLoadAuthorizedUsers={loadGatewayAuthorizedUsers} onSaveGateway={saveGatewayConnection} onDeleteGateway={deleteGatewayConnection} onLoadGatewayPairings={loadGatewayPairings} onApproveGatewayPairing={approveGatewayPairing} onStartWeixinLogin={startWeixinLogin} onGetWeixinLoginStatus={getWeixinLoginStatus} onCancelWeixinLogin={cancelWeixinLogin} onOpenRuntime={() => { setSettingsSection('runtime'); navigate('settings') }} onRefreshRuntime={refreshRuntime} onUpdate={updateBot} onDuplicate={duplicateBot} onDelete={deleteBot} onAddMemory={addMemory} onUpdateMemory={updateMemory} onDeleteMemory={deleteMemory} onStartChat={(conversationId) => openBotChat({ botId: activeBot.id, conversationId, dialogKey: conversationId || crypto.randomUUID() })} onRenameConversation={renameConversation} onArchiveConversation={archiveConversation} onDeleteConversation={deleteConversation} /> : (
             <>
               {activeView === 'chat' && remoteNativeConversation && <RemoteConversationFallback error={remoteConversationErrors[remoteNativeConversation.id]} onRetry={() => void loadRemoteConversation(remoteNativeConversation.id)} />}
               {activeView === 'overview' && <Overview bots={bots} conversations={listedBotConversations} channels={channels} activities={activityItems} scheduledTasks={scheduledTasks} scheduledTaskRuns={scheduledTaskRuns} runtime={runtime} defaultModelConfiguration={modelConfiguration} voiceWakeEnabled={settings.voiceWakeEnabled} onOpenBot={openBot} onNavigate={navigate} onToggleTask={toggleScheduledTask} onRunTask={runScheduledTaskNow} onEditTask={(task) => { setPendingEditTaskId(task.id); navigate('scheduled-tasks') }} onOpenTaskWorkspace={openScheduledTaskWorkspace} onDeleteTask={deleteScheduledTask} onOpenConversation={openNativeChat} onToggleOverviewVisibility={setScheduledTaskOverviewVisibility} onOpenVoiceSettings={() => { setSettingsSection('voice'); navigate('settings') }} />}
-              {activeView === 'chat' && <NativeChatPage conversations={nativeConversations} bots={bots} skills={skills} activeConversationId={activeNativeConversationId} resetToken={nativeChatResetToken} draftRequest={nativeChatDraftRequest} runtime={runtime} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} defaultWorkspacePath={nativeDefaultWorkspacePath} voiceRequest={nativeVoiceRequest} speechLanguage={VOICE_LANGUAGE} speechVoice={settings.voiceTtsVoice} speechSpeed={settings.voiceTtsSpeed} browserSettings={settings} onSend={sendNativeChat} onPickAttachments={pickChatAttachments} onPickWorkspace={pickChatWorkspace} onSaveWorkspace={saveConversationWorkspace} onDeleteMessage={deleteConversationMessage} onCancel={cancelChat} onClarify={respondToChatClarification} onConversationChange={setActiveNativeConversationId} onOpenSettings={() => navigate('settings')} onNewConversation={startNativeChat} onVoiceTurnDelta={handleVoiceTurnDelta} onVoiceTurnCompleted={handleVoiceTurnCompleted} onVoiceTurnFailed={handleVoiceTurnFailed} />}
+              {activeView === 'chat' && <NativeChatPage conversations={nativeConversations} bots={bots} skills={skills} activeConversationId={activeNativeConversationId} resetToken={nativeChatResetToken} draftRequest={nativeChatDraftRequest} runtime={runtime} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} defaultWorkspacePath={nativeDefaultWorkspacePath} voiceRequest={nativeVoiceRequest} speechLanguage={VOICE_LANGUAGE} speechVoice={settings.voiceTtsVoice} speechSpeed={settings.voiceTtsSpeed} browserSettings={settings} onSend={sendNativeChat} onPickAttachments={pickChatAttachments} onPickWorkspace={pickChatWorkspace} onSaveWorkspace={saveConversationWorkspace} onDeleteMessage={deleteConversationMessage} onBookmarkMessage={bookmarkConversationMessage} onForkMessage={forkConversationMessage} onCancel={cancelChat} onClarify={respondToChatClarification} onConversationChange={setActiveNativeConversationId} onOpenSettings={() => navigate('settings')} onNewConversation={startNativeChat} onVoiceTurnDelta={handleVoiceTurnDelta} onVoiceTurnCompleted={handleVoiceTurnCompleted} onVoiceTurnFailed={handleVoiceTurnFailed} />}
               {activeView === 'bots' && <BotsPage bots={bots} conversations={listedBotConversations} gatewayConnections={gatewayConnections} hiddenSidebarBotIds={settings.hiddenSidebarBotIds} onToggleSidebarBot={toggleSidebarBot} onOpenBot={openBot} onCreate={() => setCreateOpen(true)} onUpdate={updateBot} onDuplicate={duplicateBot} onDelete={deleteBot} />}
               {activeView === 'scheduled-tasks' && <ScheduledTasksPage tasks={scheduledTasks} runs={scheduledTaskRuns} models={availableModelConfigurations} skills={skills} defaultWorkspacePath={settings.defaultWorkspacePath} onCreate={createScheduledTaskWithOwner} onUpdate={updateScheduledTask} onToggle={toggleScheduledTask} onDelete={deleteScheduledTask} onDeleteRun={deleteScheduledTaskRun} onRunNow={runScheduledTaskNow} onPickWorkspace={pickScheduledTaskWorkspace} onOpenWorkspace={openScheduledTaskWorkspace} onOpenConversation={openNativeChat} onToggleOverviewVisibility={setScheduledTaskOverviewVisibility} editingTaskId={pendingEditTaskId} onEditingTaskHandled={() => setPendingEditTaskId('')} />}
-              {activeView === 'office-tasks' && <OfficeTasksPage bots={bots} onOpenConversation={(task) => task.botId === NATIVE_BOT_ID ? openNativeChat(task.conversationId) : setChatTarget({ botId: task.botId, conversationId: task.conversationId })} />}
+              {activeView === 'office-tasks' && <OfficeTasksPage bots={bots} onOpenConversation={(task) => task.botId === NATIVE_BOT_ID ? openNativeChat(task.conversationId) : openBotChat({ botId: task.botId, conversationId: task.conversationId })} />}
               {activeView === 'settings' && <SettingsPage
                 settings={settings}
                 voiceWakeStatus={voiceWakeStatus}
@@ -1874,7 +1985,7 @@ export default function App() {
                 onSectionChange={setSettingsSection}
                 modelPanel={<ModelPage embedded configuration={modelConfiguration} savedConfigurations={savedModelConfigurations} availableConfigurations={availableModelConfigurations} runtime={runtime} onSave={saveModelConfiguration} onLoadModels={loadModelCatalog} onRefreshRuntime={refreshRuntime} onOpenRuntime={() => setSettingsSection('runtime')} />}
                 skillsPanel={<SkillsPage embedded bots={bots} skills={skills} skillsPath={skillsPath} onCreateSkill={createSkill} onUpdateSkill={saveSkill} onDeleteSkill={deleteSkill} onAssignSkill={assignSkill} onImportSkill={importSkill} onOpenSkillsFolder={openSkillsFolder} onCheckUpdates={checkSkillUpdates} onUpdateRegistrySkill={updateRegistrySkill} onRestoreVersion={restoreSkillVersion} />}
-                memoryPanel={<GlobalMemoryPage embedded bots={bots} nativeBot={nativeBot} onAddMemory={addMemory} onUpdateMemory={updateMemory} onDeleteMemory={deleteMemory} />}
+                memoryPanel={<GlobalMemoryPage embedded bots={bots} nativeBot={nativeBot} memoryMaxItems={settings.memoryMaxItems} onAddMemory={addMemory} onUpdateMemory={updateMemory} onDeleteMemory={deleteMemory} />}
                 activityPanel={<ActivityPage embedded bots={bots} conversations={conversations} activities={activityItems} />}
               />}
             </>
@@ -1885,7 +1996,7 @@ export default function App() {
       <Suspense fallback={null}>
         {createOpen && <CreateBotDialog open onClose={() => setCreateOpen(false)} onCreate={createBot} defaultModel={modelConfiguration.model || ''} />}
         {remoteBotConversation && <div className="dialog-backdrop"><div className="remote-conversation-dialog"><RemoteConversationFallback error={remoteConversationErrors[remoteBotConversation.id]} onRetry={() => void loadRemoteConversation(remoteBotConversation.id)} onClose={() => setChatTarget(null)} /></div></div>}
-        {chatBot && <ChatDialog key={chatConversation?.id || `new-${chatBot.id}`} bot={chatBot} bots={bots} skills={skills} conversation={chatConversation} runtime={runtime} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} defaultWorkspacePath={chatDefaultWorkspacePath} voiceRequest={voiceOperationRef.current.target?.kind === 'bot' && voiceOperationRef.current.target.botId === chatBot.id ? botVoiceRequest : undefined} speechLanguage={VOICE_LANGUAGE} speechVoice={settings.voiceTtsVoice} speechSpeed={settings.voiceTtsSpeed} browserSettings={settings} onClose={() => { if (voiceOperationRef.current.target?.kind === 'bot' && voiceOperationRef.current.target.botId === chatBot.id) stopVoiceInteraction(false); setChatTarget(null) }} onNewConversation={() => setChatTarget({ botId: chatBot.id })} onSend={sendChat} onPickAttachments={pickChatAttachments} onPickWorkspace={pickChatWorkspace} onSaveWorkspace={saveConversationWorkspace} onDeleteMessage={deleteConversationMessage} onCancel={cancelChat} onClarify={respondToChatClarification} onVoiceTurnDelta={handleVoiceTurnDelta} onVoiceTurnCompleted={handleVoiceTurnCompleted} onVoiceTurnFailed={handleVoiceTurnFailed} onOpenSettings={() => { if (voiceOperationRef.current.target?.kind === 'bot') stopVoiceInteraction(false); setChatTarget(null); navigate('settings') }} />}
+        {chatBot && <ChatDialog key={chatTarget?.dialogKey || chatConversation?.id || `new-${chatBot.id}`} bot={chatBot} bots={bots} skills={skills} conversation={chatConversation} runtime={runtime} savedModelConfigurations={availableModelConfigurations} defaultModelConfiguration={modelConfiguration} defaultWorkspacePath={chatDefaultWorkspacePath} voiceRequest={voiceOperationRef.current.target?.kind === 'bot' && voiceOperationRef.current.target.botId === chatBot.id ? botVoiceRequest : undefined} speechLanguage={VOICE_LANGUAGE} speechVoice={settings.voiceTtsVoice} speechSpeed={settings.voiceTtsSpeed} browserSettings={settings} onClose={() => guardedNavigation(() => { if (voiceOperationRef.current.target?.kind === 'bot' && voiceOperationRef.current.target.botId === chatBot.id) stopVoiceInteraction(false); setChatTarget(null) })} onNewConversation={() => openBotChat({ botId: chatBot.id, dialogKey: crypto.randomUUID() })} onSend={sendChat} onPickAttachments={pickChatAttachments} onPickWorkspace={pickChatWorkspace} onSaveWorkspace={saveConversationWorkspace} onDeleteMessage={deleteConversationMessage} onBookmarkMessage={bookmarkConversationMessage} onForkMessage={forkConversationMessage} onCancel={cancelChat} onClarify={respondToChatClarification} onVoiceTurnDelta={handleVoiceTurnDelta} onVoiceTurnCompleted={handleVoiceTurnCompleted} onVoiceTurnFailed={handleVoiceTurnFailed} onOpenSettings={() => guardedNavigation(() => { if (voiceOperationRef.current.target?.kind === 'bot') stopVoiceInteraction(false); setChatTarget(null); navigate('settings') })} />}
         {isDesktopApp && !dwsAuthDismissed && !dwsAuthStatus.authenticated && <DwsAuthSetupDialog status={dwsAuthStatus} onLogin={loginDws} onRefresh={refreshDwsAuth} onLater={() => setDwsAuthDismissed(true)} />}
       </Suspense>
       {notice && <div className={`app-notice ${notice.tone}`} role="status">{notice.tone === 'success' ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}<span>{notice.message}</span><button onClick={() => setNotice(null)} aria-label="关闭提示"><X size={15} /></button></div>}

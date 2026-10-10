@@ -8,6 +8,7 @@
   <style>
     :root { font: 14px/1.4 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:#29231f; background:#f8f7f5; }
     * { box-sizing:border-box; }
+    [hidden] { display:none!important; }
     body { margin:0; overflow:hidden; }
     button, input { font:inherit; }
     button { cursor:pointer; }
@@ -22,42 +23,44 @@
     #select-hint { position:absolute; z-index:3; top:22px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:14px; padding:10px 16px; border:1px solid rgba(255,255,255,.2); border-radius:12px; background:#29231fea; color:#fff; box-shadow:0 10px 30px #0004; white-space:nowrap; cursor:default; }
     #select-hint strong { font-size:13px; }
     #select-hint small { color:#dfd8d1; }
-    .icon-button { display:inline-flex; align-items:center; justify-content:center; width:32px; height:32px; border:1px solid #e8e1da; border-radius:8px; background:#fff; color:#665e57; }
+    .icon-button, .tool { display:inline-flex; flex:none; align-items:center; justify-content:center; width:30px; height:30px; padding:0; border:1px solid transparent; border-radius:7px; background:transparent; color:#665e57; }
+    button svg { width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; pointer-events:none; }
     .icon-button:hover, .tool:hover { border-color:#b4532a; color:#98431f; background:#fff7f2; }
     .primary { border-color:#b4532a; background:#b4532a; color:white; }
     .primary:hover { border-color:#98431f; background:#98431f; color:white; }
     #select-close { width:26px; height:26px; border-color:#716760; background:#403933; color:#fff; }
     #edit-view { height:100vh; min-height:0; flex-direction:column; }
-    .editor-bar { display:flex; align-items:center; gap:8px; min-height:54px; padding:8px 14px; border-bottom:1px solid #e8e1da; background:#fff; -webkit-app-region:drag; }
+    .editor-bar { display:flex; flex:none; align-items:center; gap:12px; min-height:42px; padding:6px 10px; border-bottom:1px solid #e8e1da; background:#fff; -webkit-app-region:drag; }
     .editor-bar > * { -webkit-app-region:no-drag; }
-    .editor-title { margin-right:10px; font-size:14px; white-space:nowrap; }
     .toolbar { display:flex; align-items:center; gap:4px; min-width:0; flex:1; }
-    .tool { min-height:32px; padding:0 9px; border:1px solid transparent; border-radius:8px; background:transparent; color:#665e57; font-size:12px; font-weight:600; white-space:nowrap; }
     .tool[aria-pressed="true"] { border-color:#e5bda9; background:#fff2ea; color:#98431f; }
     .divider { width:1px; height:20px; margin:0 5px; background:#e8e1da; }
     .color { width:22px; height:22px; padding:0; border:2px solid white; border-radius:50%; background:var(--swatch); box-shadow:0 0 0 1px #d7cdc4; }
     .color[aria-pressed="true"] { box-shadow:0 0 0 2px #b4532a; }
-    #label-wrap { display:none; align-items:center; gap:7px; padding:8px 14px; border-bottom:1px solid #e8e1da; background:#fff; font-size:12px; }
+    #label-wrap { display:none; align-items:center; padding:5px 10px; border-bottom:1px solid #e8e1da; background:#fff; }
     #label-wrap.visible { display:flex; }
     #label-text { flex:1; max-width:480px; min-height:32px; padding:5px 9px; border:1px solid #d7cdc4; border-radius:8px; }
-    #editor-stage { display:flex; align-items:center; justify-content:center; flex:1; min-height:0; overflow:auto; padding:18px; background:#efebe6; }
+    #editor-stage { display:flex; align-items:center; justify-content:center; flex:1; min-height:0; overflow:auto; padding:12px; background:#efebe6; }
     #editor-canvas { display:block; flex:none; background:white; box-shadow:0 10px 30px #29231f35; touch-action:none; }
     #editor-canvas[data-tool="text"] { cursor:text; }
     #editor-canvas:not([data-tool="text"]) { cursor:crosshair; }
-    .editor-footer { display:flex; align-items:center; gap:8px; min-height:55px; padding:9px 14px; border-top:1px solid #e8e1da; background:#fff; }
-    #editor-status { flex:1; min-width:0; color:#665e57; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+    .editor-actions { display:flex; flex:none; align-items:center; gap:4px; margin-left:auto; }
+    #editor-status { position:fixed; z-index:5; bottom:14px; left:50%; transform:translateX(-50%); max-width:calc(100vw - 28px); padding:7px 12px; border:1px solid #e8e1da; border-radius:9px; background:#ffffffed; color:#665e57; box-shadow:0 3px 12px #29231f15; font-size:12px; overflow-wrap:anywhere; pointer-events:none; }
     #editor-status.error { color:#b13f34; }
-    .action { display:inline-flex; align-items:center; gap:6px; min-height:34px; padding:0 12px; border:1px solid #d7cdc4; border-radius:8px; background:#fff; color:#29231f; font-size:12px; font-weight:600; white-space:nowrap; }
-    .action:hover { border-color:#b4532a; background:#fff7f2; }
-    .action.primary { border-color:#b4532a; background:#b4532a; color:#fff; }
-    .action.primary:hover { background:#98431f; }
-    .action:disabled { opacity:.45; cursor:wait; }
+    button:disabled { opacity:.45; cursor:wait; }
+    #button-tooltip { position:fixed; z-index:20; max-width:calc(100vw - 16px); padding:6px 9px; border:1px solid #e8e1da; border-radius:7px; background:#fff; color:#29231f; box-shadow:0 4px 14px #29231f20; font-size:12px; line-height:1.4; overflow-wrap:anywhere; pointer-events:none; }
     #pin-view { height:100vh; flex-direction:column; border:1px solid #d7cdc4; background:#fff; }
-    .pin-bar { display:flex; align-items:center; justify-content:space-between; height:34px; padding:0 4px 0 10px; background:#29231f; color:#fff; font-size:11px; -webkit-app-region:drag; }
+    .pin-bar { display:flex; flex:none; align-items:center; justify-content:flex-end; height:34px; padding:0 4px; background:#29231f; color:#fff; -webkit-app-region:drag; }
     .pin-bar button { -webkit-app-region:no-drag; width:28px; height:28px; border:0; border-radius:6px; background:transparent; color:white; font-size:20px; }
     .pin-bar button:hover { background:#ffffff30; }
     #pin-image { width:100%; flex:1; min-height:0; object-fit:contain; background:#fff; }
-    @media (max-width:850px) { .editor-title { display:none; } .toolbar { overflow-x:auto; } .editor-bar { gap:4px; } }
+    @media (max-width:560px) {
+      .editor-bar { flex-wrap:wrap; gap:4px; padding:6px 8px; }
+      .toolbar { flex:1 0 100%; justify-content:center; gap:3px; }
+      .toolbar .tool { width:28px; height:28px; }
+      .toolbar .color { width:20px; height:20px; }
+      .divider { height:16px; margin:0 3px; }
+    }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; } }
   </style>
 </head>
@@ -66,41 +69,41 @@
     <img id="select-image" alt="当前屏幕画面">
     <div id="select-dim"></div>
     <div id="selection"></div>
-    <div id="select-hint"><strong>拖动鼠标选择截图区域</strong><small>Esc 退出 · 当前鼠标所在显示器</small><button id="select-close" class="icon-button" title="退出截图" aria-label="退出截图">×</button></div>
+    <div id="select-hint"><strong>拖动鼠标选择截图区域</strong><small>Esc 退出</small><button id="select-close" class="icon-button" data-tooltip="退出截图" aria-label="退出截图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
   </div>
   <div id="edit-view" role="application" aria-label="截图批注编辑器">
     <div class="editor-bar">
-      <strong class="editor-title">ZSense 截图</strong>
       <div class="toolbar" role="toolbar" aria-label="批注工具">
-        <button class="tool" data-tool="pen" aria-pressed="true" title="画笔">画笔</button>
-        <button class="tool" data-tool="ellipse" aria-pressed="false" title="画圈">画圈</button>
-        <button class="tool" data-tool="rectangle" aria-pressed="false" title="矩形标注">矩形</button>
-        <button class="tool" data-tool="arrow" aria-pressed="false" title="箭头标注">箭头</button>
-        <button class="tool" data-tool="text" aria-pressed="false" title="文字标注">文字</button>
-        <span class="divider"></span>
-        <button class="color" data-color="#dc2626" style="--swatch:#dc2626" aria-label="红色" aria-pressed="true"></button>
-        <button class="color" data-color="#2563eb" style="--swatch:#2563eb" aria-label="蓝色" aria-pressed="false"></button>
-        <button class="color" data-color="#059669" style="--swatch:#059669" aria-label="绿色" aria-pressed="false"></button>
-        <button class="color" data-color="#111827" style="--swatch:#111827" aria-label="黑色" aria-pressed="false"></button>
-        <span class="divider"></span>
-        <button id="undo" class="tool" title="撤销 Ctrl/⌘+Z" aria-label="撤销批注">撤销</button>
-        <button id="redo" class="tool" title="重做 Ctrl/⌘+Shift+Z" aria-label="重做批注">重做</button>
+        <button class="tool" data-tool="pen" aria-pressed="true" data-tooltip="画笔" aria-label="画笔"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5L8 21H3v-5L16 3Zm-2 2 5 5"/></svg></button>
+        <button class="tool" data-tool="ellipse" aria-pressed="false" data-tooltip="画圈" aria-label="画圈"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="12" rx="9" ry="7"/></svg></button>
+        <button class="tool" data-tool="rectangle" aria-pressed="false" data-tooltip="矩形标注" aria-label="矩形标注"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="1"/></svg></button>
+        <button class="tool" data-tool="arrow" aria-pressed="false" data-tooltip="箭头标注" aria-label="箭头标注"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M5 5h14v14"/></svg></button>
+        <button class="tool" data-tool="text" aria-pressed="false" data-tooltip="文字标注" aria-label="文字标注"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V4h16v3M12 4v16M8 20h8"/></svg></button>
+        <span class="divider" aria-hidden="true"></span>
+        <button class="color" data-color="#dc2626" style="--swatch:#dc2626" data-tooltip="红色" aria-label="红色" aria-pressed="true"></button>
+        <button class="color" data-color="#2563eb" style="--swatch:#2563eb" data-tooltip="蓝色" aria-label="蓝色" aria-pressed="false"></button>
+        <button class="color" data-color="#059669" style="--swatch:#059669" data-tooltip="绿色" aria-label="绿色" aria-pressed="false"></button>
+        <button class="color" data-color="#111827" style="--swatch:#111827" data-tooltip="黑色" aria-label="黑色" aria-pressed="false"></button>
+        <span class="divider" aria-hidden="true"></span>
+        <button id="undo" class="tool" data-tooltip="撤销批注 · Ctrl/⌘+Z" aria-label="撤销批注"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4-5 5 5 5M4 9h10a6 6 0 0 1 0 12"/></svg></button>
+        <button id="redo" class="tool" data-tooltip="重做批注 · Ctrl/⌘+Shift+Z" aria-label="重做批注"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4 5 5-5 5M20 9H10a6 6 0 0 0 0 12"/></svg></button>
       </div>
-      <button id="editor-close" class="icon-button" title="退出截图" aria-label="退出截图">×</button>
+      <div class="editor-actions" role="group" aria-label="截图操作">
+        <button id="download" class="icon-button" data-tooltip="下载 PNG 图片" aria-label="下载 PNG 图片"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg></button>
+        <button id="pin" class="icon-button" data-tooltip="置顶贴在屏幕上" aria-label="置顶贴在屏幕上"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 5 5-3 3v5l-3 3-4-4-5 5M11 15l-6-6 3-3h5l3-3"/></svg></button>
+        <button id="copy" class="icon-button primary" data-tooltip="复制截图并退出" aria-label="复制截图并退出"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></button>
+        <button id="editor-close" class="icon-button" data-tooltip="退出截图" aria-label="退出截图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
     </div>
-    <label id="label-wrap">标注文字 <input id="label-text" maxlength="120" placeholder="输入文字后点击截图放置"></label>
+    <div id="label-wrap"><input id="label-text" aria-label="标注文字" maxlength="120" placeholder="输入文字后点击截图放置"></div>
     <div id="editor-stage"><canvas id="editor-canvas" aria-label="截图批注画布"></canvas></div>
-    <div class="editor-footer">
-      <span id="editor-status" role="status" aria-live="polite">在截图上绘制批注。✅ 会复制最终图片。</span>
-      <button id="download" class="action" title="下载 PNG 图片">下载 PNG</button>
-      <button id="pin" class="action" title="置顶贴在屏幕上">置顶贴图</button>
-      <button id="copy" class="action primary" title="复制截图并退出" aria-label="复制截图并退出">✓ 复制</button>
-    </div>
+    <span id="editor-status" role="status" aria-live="polite" hidden></span>
   </div>
   <div id="pin-view" role="application" aria-label="置顶截图">
-    <div class="pin-bar"><span>置顶截图 · 拖动这里移动</span><button id="pin-close" title="关闭贴图" aria-label="关闭贴图">×</button></div>
+    <div class="pin-bar"><button id="pin-close" data-tooltip="关闭贴图" aria-label="关闭贴图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
     <img id="pin-image" alt="置顶的截图">
   </div>
+  <div id="button-tooltip" role="tooltip" hidden></div>
   <script src="./global-screenshot-ui.js"></script>
 </body>
 </html>

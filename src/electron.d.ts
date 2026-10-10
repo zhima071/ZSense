@@ -1,6 +1,16 @@
 export {}
 
-import type { AgentCapabilitiesStatus, AppSettings, ApprovalGrant, AuthStatus, AuthUser, AutonomySnapshot, AutonomyTaskKind, Bot, BrowserDataState, BrowserSitePermission, ChatAttachment, ChatClarificationAnswer, ChatRequest, ChatResult, ChatStreamEvent, ComputerUseStatus, ConfigurationTransferResult, Conversation, CreateUserInput, DesktopResult, DeviceLinkPeerAccess, DeviceLinkRemoteRunResult, DeviceLinkRemoteStatus, DeviceLinkStatus, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnectionConfigurationInput, GatewayPairingRequest, HtmlDocumentSession, LocalVoiceOption, LocalVoiceSpeechResult, LocalVoiceTranscriptionRequest, McpServerConfiguration, McpServerConfigurationInput, McpTestResult, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfigurationInput, OfficeDocumentState, OfficeEditResult, OfficeRecentFile, OfficeSearchHit, OfficeSessionEvent, OfficeSessionResult, OfficeSheetCellChange, OfficeSheetGrid, OfficeWorkItem, OfficeWordOperation, OfficeWorkbookGrid, OfficeWorkbookOperation, OfficeWorkspaceStatus, RuntimeCommandResult, RuntimeStatus, ScheduledTaskInput, SkillEditorInput, SkillImportResult, SkillMaintenanceResult, UpdateCheckResult, UpdateDownloadStatus, UpdateStatus, UpdateUserInput, VoiceSynthesisRequest, VoiceWakeDetectedEvent, VoiceWakeStatus, WebBridgeStatus, WeixinQrLoginStatus, WordDocumentSession, WorkspaceSnapshot } from './types'
+export interface GlobalScreenshotStatus {
+  shortcut: string
+  registered: boolean
+  error: string
+  screenCapturePermission: 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'
+  screenCaptureNeedsRestart: boolean
+  screenCaptureRequestAttempted: boolean
+  captureInProgress: boolean
+}
+
+import type { AgentCapabilitiesStatus, AppSettings, ApprovalGrant, AuthStatus, AuthUser, AutonomySnapshot, AutonomyTaskKind, Bot, BrowserDataState, BrowserSitePermission, ChatAttachment, ChatClarificationAnswer, ChatRequest, ChatResult, ChatStreamEvent, ComputerUseStatus, ConfigurationTransferResult, Conversation, CreateUserInput, DesktopResult, DeviceLinkPeerAccess, DeviceLinkRemoteRunResult, DeviceLinkRemoteStatus, DeviceLinkStatus, DwsAuthStatus, GatewayAuthorizedUser, GatewayConnectionConfigurationInput, GatewayPairingRequest, HtmlDocumentSession, LocalVoiceOption, LocalVoiceSynthesisResult, LocalVoiceTranscriptionRequest, McpServerConfiguration, McpServerConfigurationInput, McpTestResult, MemoryItem, ModelCatalog, ModelCatalogRequest, ModelConfigurationInput, OfficeDocumentState, OfficeEditResult, OfficeRecentFile, OfficeSearchHit, OfficeSessionEvent, OfficeSessionResult, OfficeSheetCellChange, OfficeSheetGrid, OfficeWorkItem, OfficeWordOperation, OfficeWorkbookGrid, OfficeWorkbookOperation, OfficeWorkspaceStatus, RuntimeCommandResult, RuntimeStatus, ScheduledTaskInput, SkillEditorInput, SkillImportResult, SkillMaintenanceResult, UpdateCheckResult, UpdateDownloadStatus, UpdateStatus, UpdateUserInput, VoiceSynthesisRequest, VoiceWakeDetectedEvent, VoiceWakeStatus, WebBridgeStatus, WeixinQrLoginStatus, WordDocumentSession, WorkspaceSnapshot } from './types'
 
 declare global {
   interface Window {
@@ -80,9 +90,11 @@ declare global {
       }
       screenshot: {
         captureRegion: (rectangle: { x: number; y: number; width: number; height: number }) => Promise<DesktopResult<{ dataUrl: string; width: number; height: number; name: string }>>
-        globalStatus: () => Promise<DesktopResult<{ shortcut: string; registered: boolean; error: string }>>
-        setGlobalShortcut: (shortcut: string) => Promise<DesktopResult<{ shortcut: string; registered: boolean; error: string }>>
-        startGlobal: () => Promise<DesktopResult<{ shortcut: string; registered: boolean; error: string }>>
+        globalStatus: () => Promise<DesktopResult<GlobalScreenshotStatus>>
+        recheckGlobalPermissions: () => Promise<DesktopResult<GlobalScreenshotStatus>>
+        requestGlobalPermissions: () => Promise<DesktopResult<GlobalScreenshotStatus>>
+        setGlobalShortcut: (shortcut: string) => Promise<DesktopResult<GlobalScreenshotStatus>>
+        startGlobal: () => Promise<DesktopResult<GlobalScreenshotStatus>>
         onGlobalError: (callback: (message: string) => void) => () => void
       }
       auth: {
@@ -118,6 +130,7 @@ declare global {
         conversationTimestamps: () => Promise<{ ok: boolean; data?: { id: string; updatedAt: string }[]; error?: string }>
         syncMessages: () => Promise<DesktopResult<{ importedMessages: number; workspace: WorkspaceSnapshot }>>
         onChanged: (callback: (snapshot: WorkspaceSnapshot) => void) => () => void
+        onMemoryChanged?: (callback: (event: import('./types').MemoryChangedEvent) => void) => () => void
       }
       officeTasks: {
         list: (filter?: { botId?: string; conversationId?: string }) => Promise<DesktopResult<OfficeWorkItem[]>>
@@ -134,7 +147,8 @@ declare global {
         status: () => Promise<DesktopResult<OfficeWorkspaceStatus>>
         recent: () => Promise<DesktopResult<OfficeRecentFile[]>>
         pick: () => Promise<DesktopResult<OfficeDocumentState | null>>
-        open: (filePath: string) => Promise<DesktopResult<OfficeDocumentState>>
+        open: (filePath: string, options?: { requestId?: string }) => Promise<DesktopResult<OfficeDocumentState>>
+        cancelOpen: (requestId: string) => Promise<DesktopResult<void>>
         inlineImage: (request: { workspacePath: string; filePath: string }) => Promise<DesktopResult<{ previewUrl: string }>>
         refresh: (filePath: string) => Promise<DesktopResult<OfficeDocumentState>>
         imageThumbnail: (filePath: string) => Promise<DesktopResult<{ dataUrl: string; width: number; height: number }>>
@@ -143,9 +157,13 @@ declare global {
         stageCells: (request: { filePath: string; changes: OfficeSheetCellChange[]; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
         stageOperations?: (request: { filePath: string; operations: OfficeWorkbookOperation[]; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
         getWord: (request: { filePath: string }) => Promise<DesktopResult<WordDocumentSession>>
-        stageWordOperations: (request: { filePath: string; operations: OfficeWordOperation[]; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
-        saveWord: (request: { filePath: string; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
+        stageWordOperations: (request: { filePath: string; operations: OfficeWordOperation[]; expectedContentHash?: string; expectedRevision?: number; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
+        saveWord: (request: { filePath: string; expectedContentHash?: string; expectedRevision?: number; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
         discardWord: (request: { filePath: string; clientId: string }) => Promise<DesktopResult<WordDocumentSession>>
+        getPresentation: (request: { filePath: string }) => Promise<DesktopResult<import('./services/presentation-types').PresentationSession>>
+        stagePresentation: (request: { filePath: string; operations: import('./services/presentation-types').PresentationOperation[]; expectedContentHash?: string; expectedRevision?: number; clientId: string }) => Promise<DesktopResult<import('./services/presentation-types').PresentationSession>>
+        savePresentation: (request: { filePath: string; expectedContentHash?: string; expectedRevision?: number; clientId: string }) => Promise<DesktopResult<import('./services/presentation-types').PresentationSession>>
+        discardPresentation: (request: { filePath: string; clientId: string }) => Promise<DesktopResult<import('./services/presentation-types').PresentationSession>>
         getHtml: (request: { filePath: string }) => Promise<DesktopResult<HtmlDocumentSession>>
         stageHtml: (request: { filePath: string; source: string; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
         saveHtml: (request: { filePath: string; source: string; expectedRevision: number; clientId: string }) => Promise<DesktopResult<OfficeSessionResult>>
@@ -190,6 +208,8 @@ declare global {
         archive: (conversationId: string, archived: boolean) => Promise<DesktopResult<WorkspaceSnapshot>>
         setWorkspace: (conversationId: string, workspacePath: string) => Promise<DesktopResult<WorkspaceSnapshot>>
         deleteMessage: (conversationId: string, messageId: string) => Promise<DesktopResult<WorkspaceSnapshot>>
+        bookmarkMessage: (conversationId: string, messageId: string, bookmarked: boolean) => Promise<DesktopResult<{ conversationId: string; messageId: string; bookmarked: boolean }>>
+        forkMessage: (conversationId: string, messageId: string) => Promise<DesktopResult<{ conversationId: string; workspace: WorkspaceSnapshot }>>
         delete: (conversationId: string) => Promise<DesktopResult<WorkspaceSnapshot>>
         moveGroup: (conversationId: string, groupId: string) => Promise<DesktopResult<WorkspaceSnapshot>>
         reorder: (botId: string, orderedIds: string[]) => Promise<DesktopResult<WorkspaceSnapshot>>
@@ -268,7 +288,7 @@ declare global {
       voice: {
         transcribeLocal: (request: LocalVoiceTranscriptionRequest) => Promise<DesktopResult<LocalVoiceTranscriptionResult>>
         listVoices: () => Promise<DesktopResult<LocalVoiceOption[]>>
-        ttsConfig: () => Promise<DesktopResult<{ engine: 'moss-tts-nano'; modelUrl: string; threadCount: number; streaming: true; offline: true }>>
+        synthesizeLocal: (request: VoiceSynthesisRequest) => Promise<DesktopResult<LocalVoiceSynthesisResult>>
         stopSpeaking: () => Promise<DesktopResult<{ stopped: boolean }>>
       }
       models: {

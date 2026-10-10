@@ -2,18 +2,22 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import {
   listFiles,
-  mossBundleRoot,
+  isWindowsToolManifestFile,
   projectDirectory,
   sha256File,
   verifyWindowsOfflineBundle,
   windowsBundleRoot,
   windowsSourceAssets,
+  windowsLicenseAssets,
 } from './windows-offline-assets.mjs'
+import { prepareVoiceAssets } from './prepare-voice-assets.mjs'
+import { meloBundleRoot } from './voice-assets.mjs'
 
 const cacheRoot = path.resolve(process.env.ZSENSE_WINDOWS_ASSET_CACHE || path.join(os.tmpdir(), 'zsense-windows-offline-assets'))
-const sourceById = new Map(windowsSourceAssets.map((entry) => [entry.id, entry]))
 
 function safeCopy(source, destination) {
   fs.mkdirSync(path.dirname(destination), { recursive: true })
@@ -31,15 +35,10 @@ async function fetchTo(url, destination) {
   })
   if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
   const temporary = `${destination}.part-${process.pid}`
-  const file = fs.createWriteStream(temporary, { flags: 'wx' })
   try {
-    for await (const chunk of response.body) {
-      if (!file.write(chunk)) await new Promise((resolve) => file.once('drain', resolve))
-    }
-    await new Promise((resolve, reject) => file.end((error) => error ? reject(error) : resolve()))
+    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temporary, { flags: 'w' }))
     fs.renameSync(temporary, destination)
   } catch (error) {
-    file.destroy()
     try { fs.unlinkSync(temporary) } catch { /* ignore incomplete download */ }
     throw error
   }
@@ -92,7 +91,7 @@ function createNotices() {
     'License: Apache-2.0',
     'Source: https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli',
     '',
-    'whisper.cpp b5130 and Whisper base multilingual model',
+    'whisper.cpp b5130 and Whisper base multilingual Q5_1 model',
     'License files are included in stt/LICENSE.whisper.cpp and stt/LICENSE.openai-whisper.',
     'Source: https://github.com/ggml-org/whisper.cpp',
     '',
@@ -113,9 +112,11 @@ function createNotices() {
     'Installed offline by the ZSense installer only when required by the bundled speech engine.',
     'Source: https://aka.ms/vs/17/release/vc_redist.x64.exe',
     '',
-    'MOSS-TTS-Nano and MOSS Audio Tokenizer Nano',
-    `Model manifest: ${path.relative(projectDirectory, path.join(mossBundleRoot, 'manifest.json'))}`,
-    'License: bundled-tools/shared/tts/moss/LICENSE',
+    'MeloTTS original FP32 fixed Chinese voice, native sherpa-onnx 1.13.8',
+    `Model manifest: ${path.relative(projectDirectory, path.join(meloBundleRoot, 'manifest.json'))}`,
+    'Model license: bundled-tools/shared/tts/melo/LICENSE (MIT)',
+    'Native runtime licenses and exact corresponding-source references: tts/THIRD_PARTY_NOTICES.txt and tts/licenses/',
+    'The upstream general-purpose executable includes static eSpeak NG (GPL-3.0); public redistribution needs corresponding source.',
     '',
   ].join('\n')
   fs.writeFileSync(path.join(windowsBundleRoot, 'THIRD_PARTY_NOTICES.txt'), content, 'utf8')
@@ -123,6 +124,22 @@ function createNotices() {
 
 async function main() {
   fs.mkdirSync(windowsBundleRoot, { recursive: true })
+  const reuseTools = process.argv.includes('--reuse-verified-tools')
+  if (reuseTools) {
+    const existing = JSON.parse(fs.readFileSync(path.join(windowsBundleRoot, 'manifest.json'), 'utf8'))
+    const sources = new Map((existing.sources || []).map((entry) => [entry.id, entry]))
+    for (const asset of windowsSourceAssets) {
+      const source = sources.get(asset.id)
+      if (source?.version !== asset.version || source?.sha256 !== asset.sha256) throw new Error(`Existing Windows tool source is untrusted: ${asset.id}`)
+    }
+    for (const [file, entry] of Object.entries(existing.files || {})) {
+      if (file === 'stt/ggml-base.bin' || file.startsWith('tts/')) continue
+      if (path.isAbsolute(file) || file.split(/[\\/]/).some((part) => !part || part === '.' || part === '..')) throw new Error('Invalid existing Windows manifest path')
+      const filePath = path.join(windowsBundleRoot, file)
+      if (!fs.existsSync(filePath) || !fs.lstatSync(filePath).isFile() || fs.statSync(filePath).size !== entry.size || sha256File(filePath) !== entry.sha256) throw new Error(`Existing Windows tool checksum mismatch: ${file}`)
+    }
+    console.log('Reusing checksum-verified existing Windows tools; only speech assets will be replaced.')
+  } else {
   const archives = new Map()
   for (const asset of windowsSourceAssets) archives.set(asset.id, await sourceArchive(asset))
 
@@ -160,15 +177,16 @@ async function main() {
     fs.rmSync(extractionRoot, { recursive: true, force: true })
   }
 
-  safeCopy(path.join(projectDirectory, 'bundled-tools', 'darwin-arm64', 'stt', 'ggml-base.bin'), path.join(windowsBundleRoot, 'stt', 'ggml-base.bin'))
-  safeCopy(path.join(projectDirectory, 'bundled-tools', 'darwin-arm64', 'stt', 'LICENSE.whisper.cpp'), path.join(windowsBundleRoot, 'stt', 'LICENSE.whisper.cpp'))
-  safeCopy(path.join(projectDirectory, 'bundled-tools', 'darwin-arm64', 'stt', 'LICENSE.openai-whisper'), path.join(windowsBundleRoot, 'stt', 'LICENSE.openai-whisper'))
-  safeCopy(path.join(projectDirectory, 'bundled-skills', 'dws', 'LICENSE'), path.join(windowsBundleRoot, 'licenses', 'LICENSE.officecli'))
-  safeCopy(path.join(projectDirectory, 'bundled-tools', 'darwin-arm64', 'licenses', 'LICENSE.lark-cli'), path.join(windowsBundleRoot, 'licenses', 'LICENSE.lark-cli'))
   safeCopy(path.join(projectDirectory, 'bundled-skills', 'browser-skill', 'LICENSE'), path.join(windowsBundleRoot, 'licenses', 'LICENSE.bsk'))
+  }
+  for (const asset of windowsLicenseAssets) {
+    const destination = path.join(windowsBundleRoot, asset.file)
+    if (!fs.existsSync(destination) || sha256File(destination) !== asset.sha256) safeCopy(await sourceArchive(asset), destination)
+  }
+  await prepareVoiceAssets({ platforms: ['win32-x64'] })
   createNotices()
 
-  const files = Object.fromEntries(listFiles(windowsBundleRoot).filter((file) => file !== 'manifest.json').map((relativePath) => {
+  const files = Object.fromEntries(listFiles(windowsBundleRoot).filter(isWindowsToolManifestFile).map((relativePath) => {
     const filePath = path.join(windowsBundleRoot, relativePath)
     return [relativePath, { size: fs.statSync(filePath).size, sha256: sha256File(filePath) }]
   }))

@@ -110,7 +110,7 @@ assert(bridge.includes('moveGroup: (conversationId: string, groupId: string)') &
 
 // 8) 侧边栏：分组渲染、折叠、拖拽
 assert(sidebar.includes('nativeConversationGroups.map('), '侧边栏没有渲染分组')
-assert(sidebar.includes('aria-expanded={!group.collapsed}') && sidebar.includes('onToggleConversationGroup(group.id, !group.collapsed)'), '分组标题缺少折叠开关')
+assert(sidebar.includes('aria-expanded={expanded}') && sidebar.includes('!group.collapsed') && sidebar.includes('onToggleConversationGroup(group.id, !group.collapsed)'), '分组标题缺少折叠开关')
 assert(sidebar.includes('draggable') && sidebar.includes('onDragStart=') && sidebar.includes('onDragOver=') && sidebar.includes('onDrop='), '会话行缺少拖拽处理')
 assert(sidebar.includes('dropOnConversation(conversation.id)') && sidebar.includes('dropIntoGroup(group.id)') && sidebar.includes('dropOutOfGroup()'), '拖拽落点处理不完整（排序 / 收入分组 / 移出分组）')
 assert(sidebar.includes('onReorderConversations(nativeSpaceId, [...next, ...hidden])'), '拖拽后没有按新顺序提交重排')

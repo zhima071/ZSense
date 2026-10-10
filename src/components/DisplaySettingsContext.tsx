@@ -1,5 +1,6 @@
 import { createContext, useContext } from 'react'
 import type { AppSettings } from '../types'
+import { DEFAULT_CHAT_DICTATION_SHORTCUT } from '../services/chat-dictation-shortcut'
 
 export const defaultDisplaySettings: Pick<AppSettings,
   | 'streamingResponse'
@@ -12,6 +13,7 @@ export const defaultDisplaySettings: Pick<AppSettings,
   | 'approvalDesktopNotification'
   | 'completionDesktopNotification'
   | 'chatInputHeight'
+  | 'chatDictationShortcut'
 > = {
   streamingResponse: true,
   compactMode: true,
@@ -23,6 +25,7 @@ export const defaultDisplaySettings: Pick<AppSettings,
   approvalDesktopNotification: false,
   completionDesktopNotification: false,
   chatInputHeight: 88,
+  chatDictationShortcut: DEFAULT_CHAT_DICTATION_SHORTCUT,
 }
 
 type DisplaySettingsContextValue = typeof defaultDisplaySettings & {

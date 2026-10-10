@@ -1,0 +1,48 @@
+.memory-dialog-form .memory-protection-control > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.memory-dialog-form .memory-protection-control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--primary);
+}
+
+.memory-protection-control > small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.memory-revision-history summary {
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.memory-revision-history > div {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.memory-revision-history > div > small {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.memory-revision-history > div > strong,
+.memory-revision-history p {
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.55;
+}

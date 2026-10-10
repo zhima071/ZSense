@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import type { AgentLoopStep, ChatAttachment, ChatClarification, ChatToolEvent, ChatUsage, ModelProvider } from '../types'
+import type { AgentLoopStep, AgentTaskPlanSnapshot, ChatAttachment, ChatClarification, ChatToolEvent, ChatUsage, ModelProvider } from '../types'
 
 export interface ChatTranscriptItem {
   id: string
@@ -8,6 +8,7 @@ export interface ChatTranscriptItem {
   createdAt: string
   reasoning?: string
   agentSteps?: AgentLoopStep[]
+  orchestration?: AgentTaskPlanSnapshot
   tools?: ChatToolEvent[]
   attachments?: ChatAttachment[]
   modelProvider?: ModelProvider | ''
@@ -35,6 +36,16 @@ export interface ChatRunSnapshot {
   sending: boolean
   error?: string
   updatedAt: number
+}
+
+export function settleOrchestrationSnapshot(plan: AgentTaskPlanSnapshot | undefined, cancelled: boolean): AgentTaskPlanSnapshot | undefined {
+  if (!plan || ['complete', 'cancelled', 'error'].includes(plan.phase)) return plan
+  if (!cancelled) return { ...plan, phase: 'error', message: '执行请求中断，未收到子任务最终状态；以下为最后已确认的进度。' }
+  return {
+    ...plan, phase: 'cancelled', message: '已停止当前任务。',
+    tasks: plan.tasks.map((task) => ['pending', 'queued', 'waiting', 'running'].includes(task.status)
+      ? { ...task, status: 'cancelled', finishedAt: new Date().toISOString() } : task),
+  }
 }
 
 export function insertSteeringTranscript(messages: ChatTranscriptItem[], responseId: string, steering: { steeringId: string; content: string; receivedAt: string; attachments?: ChatAttachment[] }) {

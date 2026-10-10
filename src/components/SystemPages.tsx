@@ -50,12 +50,12 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
-import { type ChangeEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { writeTextToClipboard } from '../services/clipboard'
 import { formatLocalDateTime } from '../services/date-time'
 import { errorMessage, unwrapDesktop } from '../services/desktop'
-import { deleteMossVoice, importMossVoice, listLocalVoiceOptions, speakLocalAudio, stopLocalSpeech } from '../services/local-speech'
+import { listLocalVoiceOptions, speakLocalAudio, stopLocalSpeech } from '../services/local-speech'
 import { VOICE_LANGUAGE_OPTIONS } from '../services/voice-language'
 import type { Activity, AgentCapabilitiesStatus, AppSettings, AuthUser, AutonomySnapshot, AutonomyTask, AutonomyTaskKind, Bot, Conversation, LocalVoiceOption, McpServerConfiguration, McpServerConfigurationInput, MemoryItem, RuntimeCommandResult, RuntimeStatus, UpdateCheckResult, UpdateDownloadStatus, UpdateStatus, VoiceWakeStatus } from '../types'
 import { MemoryDialog, type MemoryDialogMode } from './MemoryDialog'
@@ -66,22 +66,25 @@ import { UserManagementPanel } from './UserManagementPanel'
 import { WebAccessPanel } from './WebAccessPanel'
 import { WakePhraseSetupDialog } from './WakePhraseSetupDialog'
 import { GlobalScreenshotSettings } from './GlobalScreenshotSettings'
+import { ChatDictationShortcutSetting } from './ChatDictationShortcutSetting'
 
 interface GlobalMemoryPageProps {
   bots: Bot[]
   nativeBot?: Bot
   embedded?: boolean
+  memoryMaxItems?: number
   onAddMemory: (botId: string, memory: MemoryItem) => Promise<void>
   onUpdateMemory: (botId: string, memory: MemoryItem) => Promise<void>
   onDeleteMemory: (botId: string, memoryId: string) => Promise<void>
 }
 
-export function GlobalMemoryPage({ bots, nativeBot, embedded = false, onAddMemory, onUpdateMemory, onDeleteMemory }: GlobalMemoryPageProps) {
+export function GlobalMemoryPage({ bots, nativeBot, embedded = false, memoryMaxItems = 500, onAddMemory, onUpdateMemory, onDeleteMemory }: GlobalMemoryPageProps) {
   const [query, setQuery] = useState('')
   const [selectedSpaceId, setSelectedSpaceId] = useState(nativeBot?.id || bots[0]?.id || 'all')
   const [dialog, setDialog] = useState<{ mode: MemoryDialogMode; bot: Bot; memory?: MemoryItem; confirmDelete?: boolean } | null>(null)
   const memorySpaces = useMemo(() => nativeBot ? [nativeBot, ...bots] : bots, [bots, nativeBot])
   const selectedSpace = memorySpaces.find((bot) => bot.id === selectedSpaceId)
+  const selectedAutomaticCount = selectedSpace?.memories.filter((memory) => /^(?:ZSense 自动记忆|ZSense 周期复盘|Hindsight 自动记忆|Hermes ·)/i.test(memory.source.trim())).length || 0
 
   useEffect(() => {
     if (selectedSpaceId !== 'all' && !memorySpaces.some((bot) => bot.id === selectedSpaceId)) setSelectedSpaceId(nativeBot?.id || memorySpaces[0]?.id || 'all')
@@ -98,7 +101,7 @@ export function GlobalMemoryPage({ bots, nativeBot, embedded = false, onAddMemor
       <div className="memory-registry-stats">
         <div><span className="metric-icon purple"><Brain size={19} /></span><span><small>全部记忆</small><strong>{memorySpaces.reduce((sum, bot) => sum + bot.memoryCount, 0).toLocaleString()}</strong></span></div>
         <div><span className="metric-icon blue"><Database size={19} /></span><span><small>命名空间</small><strong>{memorySpaces.length}</strong></span></div>
-        <div><span className="metric-icon green"><ShieldCheck size={19} /></span><span><small>隔离冲突</small><strong>0</strong></span></div>
+        <div><span className="metric-icon green"><ShieldCheck size={19} /></span><span><small>{selectedSpace ? '自动记忆容量' : '每空间自动记忆上限'}</small><strong>{selectedSpace ? `${selectedAutomaticCount} / ` : ''}{memoryMaxItems.toLocaleString()}</strong></span></div>
       </div>
       <div className="toolbar"><label className="search-field wide"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索记忆标题、内容或所属空间" /></label><span className="memory-active-space"><ShieldCheck size={14} />{selectedSpace ? `${selectedSpace.name} 独立空间` : '全部隔离空间'}</span></div>
       <div className="registry-layout">
@@ -110,7 +113,7 @@ export function GlobalMemoryPage({ bots, nativeBot, embedded = false, onAddMemor
         <section className="panel registry-results">
           {selectedSpace?.id === nativeBot?.id && <div className="native-memory-note"><Brain size={18} /><span><strong>AI 对话记忆就在这里管理</strong><small>它使用 ZSense AI 的独立数据库分区，不会进入 Atlas、Scout 或其他本机 Agent。</small></span></div>}
           <div className="memory-list-heading"><span>{entries.length} 条记忆</span><small>{selectedSpace ? `只显示 ${selectedSpace.name}` : '显示全部空间'}</small></div>
-          {entries.map(({ memory, bot }) => <article className="registry-memory" key={`${bot.id}-${memory.id}`}><span className="mini-avatar" style={{ '--avatar': bot.color } as React.CSSProperties}>{bot.initials}</span><span><span className="registry-memory-heading"><strong>{memory.title}</strong><small>{bot.id === nativeBot?.id ? 'AI 对话' : bot.name} / {memory.type}</small></span><p>{memory.excerpt}</p><small>{memory.source} · {formatLocalDateTime(memory.updatedAt)}</small></span><div className="memory-row-actions"><button className="button secondary compact-action" onClick={() => setDialog({ mode: 'view', bot, memory })}><Eye size={15} />查看</button><button className="button secondary compact-action" onClick={() => setDialog({ mode: 'edit', bot, memory })}><Pencil size={15} />修改</button><button className="button compact-action memory-delete-button" onClick={() => setDialog({ mode: 'view', bot, memory, confirmDelete: true })}><Trash2 size={15} />删除</button></div></article>)}
+          {entries.map(({ memory, bot }) => <article className="registry-memory" key={`${bot.id}-${memory.id}`}><span className="mini-avatar" style={{ '--avatar': bot.color } as React.CSSProperties}>{bot.initials}</span><span><span className="registry-memory-heading"><strong>{memory.title}</strong><small>{bot.id === nativeBot?.id ? 'AI 对话' : bot.name} / {memory.type}{memory.locked && ' / 已保护'}{memory.recallEligible === false && ' / 自动召回暂停'}</small></span><p>{memory.excerpt}</p><small>{memory.source} · 版本 {memory.revision || 1} · {formatLocalDateTime(memory.updatedAt)}</small></span><div className="memory-row-actions"><button className="button secondary compact-action" onClick={() => setDialog({ mode: 'view', bot, memory })}><Eye size={15} />查看</button><button className="button secondary compact-action" onClick={() => setDialog({ mode: 'edit', bot, memory })}><Pencil size={15} />修改</button><button className="button compact-action memory-delete-button" onClick={() => setDialog({ mode: 'view', bot, memory, confirmDelete: true })}><Trash2 size={15} />删除</button></div></article>)}
           {!entries.length && <div className="empty-state"><MemoryStick size={25} /><strong>{selectedSpace ? `${selectedSpace.name} 还没有长期记忆` : '没有匹配的记忆'}</strong><p>{selectedSpace ? '点击右上角“添加记忆”，或在对话中等待 ZSense Core 自动提取。' : '切换空间或修改搜索关键词。'}</p></div>}
         </section>
       </div>
@@ -605,9 +608,8 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
   const [localVoices, setLocalVoices] = useState<LocalVoiceOption[]>([])
   const [loadingVoices, setLoadingVoices] = useState(false)
   const [previewingVoice, setPreviewingVoice] = useState(false)
-  const [importingVoice, setImportingVoice] = useState(false)
-  const [customVoiceName, setCustomVoiceName] = useState('')
-  const customVoiceFileRef = useRef<HTMLInputElement>(null)
+  const voicePreviewRequestRef = useRef(0)
+  const voicePreviewActiveRef = useRef(false)
 
   useEffect(() => setDraft(settings), [settings])
 
@@ -696,35 +698,16 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
     }).finally(() => {
       if (active) setLoadingVoices(false)
     })
-    return () => { active = false }
-  }, [section])
-
-  const importVoice = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    event.target.value = ''
-    if (!file) return
-    setImportingVoice(true)
-    setLocalError(undefined)
-    try {
-      const voiceId = await importMossVoice(file, customVoiceName)
-      const voices = await listLocalVoiceOptions()
-      setLocalVoices(voices)
-      setDraft((current) => ({ ...current, voiceTtsVoice: voiceId }))
-      setCustomVoiceName('')
-    } catch (error) {
-      setLocalError(`音色导入失败：${errorMessage(error)}`)
-    } finally {
-      setImportingVoice(false)
+    return () => {
+      active = false
+      voicePreviewRequestRef.current += 1
+      setPreviewingVoice(false)
+      if (voicePreviewActiveRef.current) {
+        voicePreviewActiveRef.current = false
+        void stopLocalSpeech().catch(() => undefined)
+      }
     }
-  }
-
-  const removeSelectedVoice = () => {
-    if (!draft.voiceTtsVoice.startsWith('custom-') || !deleteMossVoice(draft.voiceTtsVoice)) return
-    void listLocalVoiceOptions().then((voices) => {
-      setLocalVoices(voices)
-      setDraft((current) => ({ ...current, voiceTtsVoice: voices[0]?.id || 'Xiaoyu' }))
-    })
-  }
+  }, [section])
 
   const previewVoice = async () => {
     const voice = window.zsenseDesktop?.voice
@@ -732,25 +715,32 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
       setLocalError('内置音色试听只在 ZSense 桌面端中可用。')
       return
     }
-    if (previewingVoice) {
-      await stopLocalSpeech().catch(() => undefined)
+    if (voicePreviewActiveRef.current) {
+      voicePreviewRequestRef.current += 1
+      voicePreviewActiveRef.current = false
       setPreviewingVoice(false)
+      await stopLocalSpeech().catch(() => undefined)
       return
     }
+    const previewRequestId = ++voicePreviewRequestRef.current
+    voicePreviewActiveRef.current = true
     setPreviewingVoice(true)
     setLocalError(undefined)
     try {
       const result = await speakLocalAudio({
-        text: '你好，我是 ZSense。这是当前选择的本地音色。',
+        text: '你好，我是 ZSense。这是内置的本地中文音色。',
         language: 'zh-CN',
         voice: draft.voiceTtsVoice,
         speed: draft.voiceTtsSpeed,
       })
       if (!result.played && !result.cancelled) throw new Error('本地音频没有完成播放。')
     } catch (error) {
-      setLocalError(`试听失败：${errorMessage(error)}`)
+      if (previewRequestId === voicePreviewRequestRef.current) setLocalError(`试听失败：${errorMessage(error)}`)
     } finally {
-      setPreviewingVoice(false)
+      if (previewRequestId === voicePreviewRequestRef.current) {
+        voicePreviewActiveRef.current = false
+        setPreviewingVoice(false)
+      }
     }
   }
 
@@ -889,7 +879,8 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
             {localError && <div className="scheduled-form-error display-settings-error" role="alert">{localError}</div>}
           </div>}
           {section === 'voice' && <div className="panel settings-block voice-wake-settings-panel">
-            <div className="panel-header"><div><h2>语音唤醒与交流</h2><p>Whisper 负责本地转写，MOSS-TTS-Nano 负责实时口语输出和音色克隆；录音和语音文字均不上传。</p></div><span className={`status-label ${voiceWakeStatus.listening ? 'online' : voiceWakeStatus.state === 'error' || voiceWakeStatus.state === 'unavailable' ? 'paused' : 'offline'}`}><i />{voiceWakeStatus.listening ? '正在监听' : voiceWakeStatus.state === 'starting' ? '正在启动' : draft.voiceWakeEnabled ? '等待启动' : '已关闭'}</span></div>
+            <div className="panel-header"><div><h2>语音唤醒与交流</h2><p>量化 Whisper 负责本地转写，轻量 MeloTTS 负责中文口语输出；录音和语音文字均不上传。</p></div><span className={`status-label ${voiceWakeStatus.listening ? 'online' : voiceWakeStatus.state === 'error' || voiceWakeStatus.state === 'unavailable' ? 'paused' : 'offline'}`}><i />{voiceWakeStatus.listening ? '正在监听' : voiceWakeStatus.state === 'starting' ? '正在启动' : draft.voiceWakeEnabled ? '等待启动' : '已关闭'}</span></div>
+            <ChatDictationShortcutSetting value={draft.chatDictationShortcut} onChange={(chatDictationShortcut) => setDraft((current) => ({ ...current, chatDictationShortcut }))} disabled={saving} />
             <div className={`voice-wake-overview ${voiceWakeStatus.state}`} aria-live="polite">
               <span className="voice-wake-orb"><Mic2 size={23} /></span>
               <span><small>当前唤醒词</small><strong>{draft.voiceWakePhrase || '你好 ZSense'}</strong><p>{draft.voiceWakeEnabled ? voiceWakeStatus.message : '开启并保存后，ZSense 会在应用运行期间监听唤醒词。'}</p></span>
@@ -897,18 +888,17 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
             </div>
             <SettingSwitch icon={AudioLines} title="启用语音唤醒" description="随 ZSense 启动和退出；关闭功能或退出应用后立即释放麦克风" checked={draft.voiceWakeEnabled} onChange={(checked) => setDraft({ ...draft, voiceWakeEnabled: checked })} />
             <SettingSwitch icon={MessageSquareMore} title="唤醒后进入语音交流" description={`听到“${draft.voiceWakePhrase || '你好 ZSense'}”后直接识别并发送到 AI 对话；关闭后只打开并聚焦文字输入框`} checked={draft.voiceConversationEnabled} onChange={(checked) => setDraft({ ...draft, voiceConversationEnabled: checked })} />
-            <SettingSwitch icon={Volume2} title="语音会话即时发声" description="语音提问会生成简短、自然的口语回答，并由内置 MOSS-TTS-Nano 边生成边按句播放；不是朗读普通长篇回复" checked={draft.voiceAutoSpeak} onChange={(checked) => setDraft({ ...draft, voiceAutoSpeak: checked })} />
+            <SettingSwitch icon={Volume2} title="语音会话即时发声" description="语音提问会生成简短、自然的口语回答，并由内置 MeloTTS 边生成边按句播放；不是朗读普通长篇回复" checked={draft.voiceAutoSpeak} onChange={(checked) => setDraft({ ...draft, voiceAutoSpeak: checked })} />
             <SettingSwitch icon={AudioLines} title="连续语音交流" description="每轮口语回答结束后自动重新聆听；你也可以在思考或说话时直接开口打断，过短声音会被拦截" checked={draft.voiceContinuousConversation} onChange={(checked) => setDraft({ ...draft, voiceContinuousConversation: checked })} />
             <div className="voice-wake-option-row voice-language-row"><span className="setting-icon"><Languages size={18} /></span><span><strong>语音语言</strong><small>识别、唤醒和播报目前只支持简体中文。</small></span><div className="voice-language-actions"><span className="voice-language-current">{VOICE_LANGUAGE_OPTIONS[0].label}</span><button type="button" className="button secondary small" aria-expanded={voiceLanguagesExpanded} aria-controls="voice-language-expansion" onClick={() => setVoiceLanguagesExpanded((current) => !current)}><Plus size={14} />扩展语种</button></div></div>
             {voiceLanguagesExpanded && <div id="voice-language-expansion" className="voice-language-expansion" role="region" aria-label="语音语种扩展"><strong>语种扩展入口</strong><p>当前只启用简体中文。其他语种尚未接入本地识别模型与播报音色，因此暂不可选择；后续完成对应语言包适配后，会在这里显示并启用。</p></div>}
-            <div className="voice-wake-option-row voice-tts-option-row"><span className="setting-icon"><Volume2 size={18} /></span><span><strong>MOSS 播报音色</strong><small>内置三种中文男声和三种中文女声，也可以导入参考音频克隆；macOS 与 Windows 使用同一套模型</small></span><div className="voice-tts-controls"><label htmlFor="voice-tts-voice"><span className="sr-only">选择 MOSS 播报音色</span><select id="voice-tts-voice" value={draft.voiceTtsVoice} disabled={loadingVoices || !localVoices.length} onChange={(event) => setDraft({ ...draft, voiceTtsVoice: event.target.value })}>{loadingVoices && <option value={draft.voiceTtsVoice}>正在读取 MOSS 音色…</option>}{!loadingVoices && !localVoices.length && <option value={draft.voiceTtsVoice}>MOSS 音色暂不可用</option>}{localVoices.map((voice) => <option key={voice.id} value={voice.id}>{voice.name}</option>)}</select></label><button type="button" className={`button secondary small ${previewingVoice ? 'active' : ''}`} onClick={() => void previewVoice()} disabled={loadingVoices || !localVoices.length} aria-label={previewingVoice ? '停止试听当前音色' : '试听当前音色'}>{previewingVoice ? '停止' : '试听'}</button></div></div>
-            <div className="voice-wake-option-row voice-clone-row"><span className="setting-icon"><Mic2 size={18} /></span><span><strong>克隆我的音色</strong><small>填写名称并导入一段 5–15 秒、无背景音乐的清晰 WAV/MP3；特征只保存在本机</small></span><div className="voice-clone-controls"><input value={customVoiceName} onChange={(event) => setCustomVoiceName(event.target.value)} placeholder="音色名称（可选）" maxLength={40} aria-label="自定义音色名称" /><input ref={customVoiceFileRef} className="sr-only" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg" onChange={(event) => void importVoice(event)} /><button type="button" className="button secondary small" disabled={importingVoice} onClick={() => customVoiceFileRef.current?.click()}>{importingVoice ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />}{importingVoice ? '正在提取' : '导入音频'}</button>{draft.voiceTtsVoice.startsWith('custom-') && <button type="button" className="button danger small" onClick={removeSelectedVoice}><Trash2 size={14} />删除当前音色</button>}</div></div>
+            <div className="voice-wake-option-row voice-tts-option-row"><span className="setting-icon"><Volume2 size={18} /></span><span><strong>本地中文音色</strong><small>采用轻量固定音色，macOS 与 Windows 使用同一套模型；不再提供音色克隆</small></span><div className="voice-tts-controls"><span className="voice-language-current" role="status">{loadingVoices ? '正在读取音色…' : localVoices[0]?.name || '本地音色暂不可用'}</span><button type="button" className={`button secondary small ${previewingVoice ? 'active' : ''}`} onClick={() => void previewVoice()} disabled={!previewingVoice && (loadingVoices || !localVoices.length)} aria-label={previewingVoice ? '停止试听本地中文音色' : '试听本地中文音色'} title={previewingVoice ? '正在合成或播放，点击停止' : '试听内置的本地中文音色'}>{previewingVoice ? <LoaderCircle className="spin" size={14} /> : <Volume2 size={14} />}{previewingVoice ? '停止试听' : '试听'}</button></div></div>
             <div className="voice-wake-option-row voice-wake-phrase-row"><span className="setting-icon"><Mic2 size={18} /></span><span><strong>自定义唤醒词</strong><small>建议使用 4–8 个中文字符，避免日常高频短语</small></span><div className="voice-wake-phrase-controls"><label htmlFor="voice-wake-phrase"><span className="sr-only">自定义唤醒词</span><input id="voice-wake-phrase" value={draft.voiceWakePhrase} maxLength={32} onChange={(event) => setDraft({ ...draft, voiceWakePhrase: event.target.value })} placeholder="例如：你好小智" /></label><button type="button" className="button secondary small" onClick={() => setWakePhraseSetupOpen(true)}><Mic2 size={15} />语音录入</button></div></div>
             <div className="voice-wake-option-row"><span className="setting-icon"><AudioLines size={18} /></span><span><strong>唤醒灵敏度</strong><small>越灵敏越容易在较远距离唤醒，也会略微增加误触发概率</small></span><label><span className="sr-only">唤醒灵敏度</span><select value={draft.voiceWakeSensitivity} onChange={(event) => setDraft({ ...draft, voiceWakeSensitivity: Number(event.target.value) })}><option value={0.2}>超高灵敏</option><option value={0.3}>高灵敏 · 推荐</option><option value={0.45}>均衡</option><option value={0.6}>稳健</option><option value={0.75}>严格</option></select></label></div>
             <div className="voice-wake-option-row"><span className="setting-icon"><AudioLines size={18} /></span><span><strong>唤醒确认速度</strong><small>确认帧越少，唤醒响应越快；嘈杂环境可以增加确认帧</small></span><label><span className="sr-only">唤醒确认帧数</span><select value={draft.voiceWakeConfirmationFrames} onChange={(event) => setDraft({ ...draft, voiceWakeConfirmationFrames: Number(event.target.value) })}><option value={1}>1 帧 · 最快（推荐）</option><option value={2}>2 帧 · 平衡</option><option value={3}>3 帧 · 稳定</option><option value={4}>4 帧 · 嘈杂环境</option></select></label></div>
             <SettingSwitch icon={Volume2} title="唤醒提示音" description="识别到唤醒词后播放一声系统提示音" checked={draft.voiceWakeSound} onChange={(checked) => setDraft({ ...draft, voiceWakeSound: checked })} />
             <SettingSwitch icon={MessageSquareMore} title="唤醒后新建 AI 对话" description="每次唤醒都打开一个新的 AI 对话；关闭后继续当前对话" checked={draft.voiceWakeStartNewConversation} onChange={(checked) => setDraft({ ...draft, voiceWakeStartNewConversation: checked })} />
-            <div className="voice-wake-privacy-note"><ShieldCheck size={17} /><span><strong>完全本地语音 · 无需语音 API</strong><small>STT 使用 Whisper base，TTS 使用 MOSS-TTS-Nano 100M ONNX 和 MOSS Audio Tokenizer Nano。模型随安装包提供，运行时不下载、不调用网络语音服务，也不读取模型 API Key。</small></span></div>
+            <div className="voice-wake-privacy-note"><ShieldCheck size={17} /><span><strong>完全本地语音 · 无需语音 API</strong><small>STT 使用 Whisper base Q5_1，TTS 使用轻量 MeloTTS 中文模型。模型随安装包提供，运行时不下载、不调用网络语音服务，也不读取模型 API Key。</small></span></div>
             {voiceWakeStatus.permission === 'denied' && <div className="scheduled-form-error display-settings-error" role="alert">麦克风权限已被拒绝。请前往系统设置 → 隐私与安全性 → 麦克风，允许 ZSense 使用麦克风。</div>}
             {localError && <div className="scheduled-form-error display-settings-error" role="alert">{localError}</div>}
             <WakePhraseSetupDialog open={wakePhraseSetupOpen} initialPhrase={draft.voiceWakePhrase} onClose={() => setWakePhraseSetupOpen(false)} onApply={(phrase) => setDraft((current) => ({ ...current, voiceWakePhrase: phrase }))} />
@@ -1015,11 +1005,16 @@ export function SettingsPage({ settings, voiceWakeStatus, storagePath, runtime, 
 
           {section === 'policies' && <div className="panel settings-block">
             <div className="panel-header"><div><h2>Bot 默认策略</h2><p>应用内对话与外部消息统一由 ZSense Agent Core 执行；长期记忆在本机整理和召回</p></div></div>
-            <SettingSwitch icon={Brain} title="自动提取长期记忆" description="回复完成后只保存明确的长期事实与偏好，按 Bot 隔离、去重并按需召回；全程本地处理" checked={draft.autoExtractMemory} onChange={(checked) => setDraft({ ...draft, autoExtractMemory: checked })} />
+            <SettingSwitch icon={Brain} title="自动提取长期记忆" description="本机筛选用户明确的长期事实与偏好，按 Bot、用户与项目隔离，并保留纠正历史" checked={draft.autoExtractMemory} onChange={(checked) => setDraft({ ...draft, autoExtractMemory: checked })} />
             <div className="runtime-details"><span><Database size={15} />内置本地记忆 <strong>{memoryEngineStatus?.ready ? '可用' : memoryEngineStatus?.error ? '暂不可用' : '初始化中'}</strong></span>{memoryEngineStatus?.error && <span title={memoryEngineStatus.error}>{memoryEngineStatus.error.slice(0, 160)}</span>}</div>
             <div className={`compression-settings memory-policy-settings ${draft.autoExtractMemory ? '' : 'disabled'}`} aria-label="长期记忆参数">
               <CompressionSettingRow title="单轮召回数量" description="本地相关性召回的条数上限；仍受上下文长度预算限制" value={draft.memoryRecallLimit} min={1} max={100} step={1} disabled={!draft.autoExtractMemory} onChange={(value) => setDraft({ ...draft, memoryRecallLimit: value })} />
+              <CompressionSettingRow title="每空间自动记忆上限" description="人工记忆不占额度。自动记忆达到上限后暂停新增并提示；提高上限或删除旧记忆后可继续" value={draft.memoryMaxItems} min={50} max={5000} step={10} disabled={!draft.autoExtractMemory} onChange={(value) => setDraft({ ...draft, memoryMaxItems: value })} />
             </div>
+            <SettingSwitch icon={Brain} title="周期增量整理" description="在本机重新整理最近已确认的候选，并重试因容量不足未保存的内容" checked={draft.memoryPeriodicReview} onChange={(checked) => setDraft({ ...draft, memoryPeriodicReview: checked })} />
+            <div className={`compression-settings memory-policy-settings ${draft.autoExtractMemory && draft.memoryPeriodicReview ? '' : 'disabled'}`} aria-label="增量整理参数"><CompressionSettingRow title="整理间隔" description="每处理多少轮用户消息进行一次本地增量整理" value={draft.memoryReviewInterval} min={2} max={100} step={1} disabled={!draft.autoExtractMemory || !draft.memoryPeriodicReview} onChange={(value) => setDraft({ ...draft, memoryReviewInterval: value })} /></div>
+            <SettingSwitch icon={Brain} title="模型精炼记忆" description="可选后台步骤，默认关闭。开启后会把筛选后的用户原话与相关记忆发送给当前配置的模型服务；云端服务会接收这些内容" checked={draft.memoryModelRefinement ?? false} onChange={(checked) => setDraft({ ...draft, memoryModelRefinement: checked })} />
+            <SettingSwitch icon={Brain} title="自动沉淀技能" description="独立后台模型请求，默认关闭。开启后会把本轮用户请求和执行摘要发送给当前配置的模型服务；云端服务会接收这些内容" checked={draft.autoDistillSkills ?? false} onChange={(checked) => setDraft({ ...draft, autoDistillSkills: checked })} />
             <SettingSwitch icon={Webhook} title="渠道身份绑定" description="外部用户在不同 Bot 中保持独立上下文" checked={draft.bindChannelIdentity} onChange={(checked) => setDraft({ ...draft, bindChannelIdentity: checked })} />
             <SettingSwitch icon={Power} title="锁屏时继续运行" description="允许 ZSense 在屏幕锁定或窗口处于后台时继续处理定时任务、消息网关和 Agent 任务；不会阻止电脑锁屏" checked={draft.runWhileLocked} onChange={(checked) => setDraft({ ...draft, runWhileLocked: checked })} />
             <SettingSwitch icon={Minimize2} title="启用上下文压缩" description="长对话达到设定阈值后，由 ZSense Core 自动压缩较早历史" checked={draft.contextAutoCompression} onChange={(checked) => setDraft({ ...draft, contextAutoCompression: checked })} />

@@ -2,7 +2,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { findSimilarMemory, isAutomaticMemory, scoreMemoryForQuery, selectRelevantMemories, unsafeAutomaticMemory } from './memory-intelligence.mjs'
+import { createMemoryRetrievalIndex, findSimilarMemory, isAutomaticMemory, searchRelevantMemories, selectRelevantMemories, unsafeAutomaticMemory } from './memory-intelligence.mjs'
+import { normalizeMemoryScope } from './memory-scope.mjs'
+import { classifyLegacyMemory } from './memory-upgrade-service.mjs'
 import { inferredContextWindow, resolvedContextWindow } from './model-metadata.mjs'
 
 const defaultBots = [
@@ -63,6 +65,8 @@ const defaultSettings = {
   // 局域网 Web 访问默认关闭：开启后同一局域网内可用浏览器打开完整界面（需要 6 位访问口令）。
   webAccessEnabled: false,
   autoExtractMemory: true,
+  memoryModelRefinement: false,
+  autoDistillSkills: false,
   memoryPeriodicReview: true,
   memoryReviewInterval: 10,
   memoryRecallLimit: 24,
@@ -101,6 +105,7 @@ const defaultSettings = {
   approvalDesktopNotification: false,
   completionDesktopNotification: false,
   chatInputHeight: 88,
+  chatDictationShortcut: 'CommandOrControl+Shift+M',
   voiceWakeEnabled: false,
   voiceWakePhrase: '你好 ZSense',
   voiceWakeSound: true,
@@ -110,7 +115,7 @@ const defaultSettings = {
   voiceConversationEnabled: true,
   voiceAutoSpeak: true,
   voiceContinuousConversation: true,
-  voiceTtsVoice: 'Xiaoyu',
+  voiceTtsVoice: 'melo-zh',
   voiceTtsSpeed: 1,
   responseLanguage: 'zh-CN',
 }
@@ -126,6 +131,32 @@ const defaultModelConfiguration = {
 
 function asBoolean(value) {
   return Boolean(Number(value))
+}
+
+// Mirror the renderer's portable, window-only shortcut grammar at persistence.
+function normalizeStoredChatDictationShortcut(value) {
+  if (typeof value !== 'string') return null
+  if (!value.trim()) return ''
+  const tokens = value.trim().split('+').map((token) => token.trim().toLowerCase())
+  const key = tokens.pop()?.toUpperCase() || ''
+  if (!/^(?:[A-Z0-9]|F(?:[1-9]|1[0-2]))$/.test(key)) return null
+  let primary = false
+  let shift = false
+  let alt = false
+  for (const token of tokens) {
+    if (['commandorcontrol', 'cmdorctrl', 'control', 'ctrl', 'command', 'cmd', 'meta'].includes(token)) {
+      if (primary) return null
+      primary = true
+    } else if (token === 'shift') {
+      if (shift) return null
+      shift = true
+    } else if (['alt', 'option'].includes(token)) {
+      if (alt) return null
+      alt = true
+    } else return null
+  }
+  if (!primary || !shift || ['W', 'Q'].includes(key) || (!alt && key === '8')) return null
+  return `CommandOrControl+${alt ? 'Alt+' : ''}Shift+${key}`
 }
 
 function plain(row) {
@@ -227,6 +258,16 @@ function memoryFromRow(row) {
     createdAt: row.created_at || row.updated_at,
     lastRecalledAt: row.last_recalled_at || null,
     recallCount: Number(row.recall_count || 0),
+    ownerKey: row.owner_key || 'local',
+    projectKey: row.project_key || '',
+    factKey: row.fact_key || '',
+    locked: Boolean(row.locked),
+    revision: Number(row.revision || 1),
+    messageId: row.message_id || '',
+    recallEligible: row.auto_recall_eligible !== 0,
+    recallReason: row.auto_recall_reason || '',
+    state: row.state || 'active',
+    history: row.history || [],
   }
 }
 
@@ -267,6 +308,7 @@ function scheduledTaskFromRow(row) {
     memorySummary: row.memory_summary || '',
     memorySummaryUpdatedAt: row.memory_summary_updated_at || null,
     memorySummaryRunCount: Number(row.memory_summary_run_count || 0),
+    memoryRevision: Number(row.memory_revision || 0),
     skillIds: parseJson(row.skill_ids_json || '[]', []),
     deliveryTarget: 'local',
     repeatCount: Number(row.repeat_count),
@@ -322,6 +364,8 @@ export class ZSenseDatabase {
     this.filePath = path.join(userDataDirectory, 'zsense.sqlite3')
     this.skillManager = skillManager
     this.memoryReviewClaims = new Map()
+    this.memoryIndexes = new Map()
+    this.existingWorkspace = fs.existsSync(this.filePath) && fs.statSync(this.filePath).size > 0
     this.db = new DatabaseSync(this.filePath)
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;')
     this.#migrate()
@@ -497,6 +541,7 @@ export class ZSenseDatabase {
         model TEXT NOT NULL DEFAULT '',
         duration_ms INTEGER,
         output_tokens INTEGER,
+        bookmarked INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
       CREATE TABLE IF NOT EXISTS deleted_external_messages (
@@ -597,6 +642,7 @@ export class ZSenseDatabase {
       CREATE INDEX IF NOT EXISTS scheduled_task_runs_task ON scheduled_task_runs(task_id, started_at DESC);
     `)
     const schemaVersion = Number(this.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0)
+    this.isUpgradeWorkspace = this.existingWorkspace && schemaVersion > 0
     this.#ensureColumn('channels', 'configured', 'INTEGER NOT NULL DEFAULT 0')
     this.#ensureColumn('channels', 'config_json', "TEXT NOT NULL DEFAULT '{}'")
     this.#ensureColumn('channels', 'secret_keys_json', "TEXT NOT NULL DEFAULT '[]'")
@@ -636,6 +682,7 @@ export class ZSenseDatabase {
     this.#ensureColumn('messages', 'model', "TEXT NOT NULL DEFAULT ''")
     this.#ensureColumn('messages', 'duration_ms', 'INTEGER')
     this.#ensureColumn('messages', 'output_tokens', 'INTEGER')
+    this.#ensureColumn('messages', 'bookmarked', 'INTEGER NOT NULL DEFAULT 0')
     this.#ensureColumn('deleted_external_messages', 'external_message_id', "TEXT NOT NULL DEFAULT ''")
     this.#ensureColumn('activities', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'")
     this.#ensureColumn('scheduled_task_runs', 'model_provider', "TEXT NOT NULL DEFAULT ''")
@@ -647,6 +694,47 @@ export class ZSenseDatabase {
     this.#ensureColumn('memories', 'created_at', "TEXT NOT NULL DEFAULT ''")
     this.#ensureColumn('memories', 'last_recalled_at', 'TEXT')
     this.#ensureColumn('memories', 'recall_count', 'INTEGER NOT NULL DEFAULT 0')
+    this.#ensureColumn('memories', 'owner_key', "TEXT NOT NULL DEFAULT 'local'")
+    this.#ensureColumn('memories', 'project_key', "TEXT NOT NULL DEFAULT ''")
+    this.#ensureColumn('memories', 'fact_key', "TEXT NOT NULL DEFAULT ''")
+    this.#ensureColumn('memories', 'locked', 'INTEGER NOT NULL DEFAULT 1')
+    this.#ensureColumn('memories', 'revision', 'INTEGER NOT NULL DEFAULT 1')
+    this.#ensureColumn('memories', 'message_id', "TEXT NOT NULL DEFAULT ''")
+    this.#ensureColumn('memories', 'state', "TEXT NOT NULL DEFAULT 'active'")
+    this.#ensureColumn('memories', 'auto_recall_eligible', 'INTEGER NOT NULL DEFAULT 1')
+    this.#ensureColumn('memories', 'auto_recall_reason', "TEXT NOT NULL DEFAULT ''")
+    this.#ensureColumn('scheduled_tasks', 'memory_revision', 'INTEGER NOT NULL DEFAULT 0')
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS memories_owner_project ON memories(bot_id, owner_key, project_key, state);
+      CREATE TABLE IF NOT EXISTS memory_versions (bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE, version INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS memory_revisions (
+        memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE, revision INTEGER NOT NULL,
+        title TEXT NOT NULL, excerpt TEXT NOT NULL, evidence TEXT NOT NULL, source TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(memory_id, revision)
+      );
+      CREATE TABLE IF NOT EXISTS memory_tombstones (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE, owner_key TEXT NOT NULL, project_key TEXT NOT NULL,
+        content_hash TEXT NOT NULL, fact_key TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(bot_id, owner_key, project_key, content_hash)
+      );
+      CREATE INDEX IF NOT EXISTS memory_tombstones_fact ON memory_tombstones(bot_id, owner_key, project_key, fact_key);
+    `)
+    if (schemaVersion < 43) {
+      // Historical callbacks did not record an authenticated sender. Keep those
+      // records visible for management, but never infer an owner from a group ID.
+      this.db.prepare(`UPDATE memories SET owner_key='legacy-unattributed'
+        WHERE (source LIKE 'ZSense 自动记忆%' OR source LIKE 'ZSense 周期复盘%' OR source LIKE 'Hindsight 自动记忆%' OR source LIKE 'Hermes ·%')
+          AND owner_key='local'
+          AND (EXISTS(SELECT 1 FROM conversations c WHERE c.id=memories.conversation_id AND c.channel_id NOT IN ('web','scheduled'))
+            OR (conversation_id='' AND bot_id<>?))`).run(NATIVE_BOT_ID)
+    }
+    if (schemaVersion < 44) {
+      // schema 43 曾漏掉 Hermes 自动来源；只隔离未证明归属的旧 local 项，不改已绑定用户的记录。
+      this.db.prepare(`UPDATE memories SET owner_key='legacy-unattributed'
+        WHERE source LIKE 'Hermes ·%' AND owner_key='local'
+          AND (EXISTS(SELECT 1 FROM conversations c WHERE c.id=memories.conversation_id AND c.channel_id NOT IN ('web','scheduled'))
+            OR (conversation_id='' AND bot_id<>?))`).run(NATIVE_BOT_ID)
+    }
     this.db.prepare("UPDATE memories SET created_at=COALESCE(NULLIF(created_at, ''), updated_at, CURRENT_TIMESTAMP) WHERE created_at='' OR created_at IS NULL").run()
     if (schemaVersion < 19) {
       this.db.prepare(`
@@ -945,7 +1033,7 @@ export class ZSenseDatabase {
       }
     }
     if (schemaVersion < 40) this.db.prepare("DELETE FROM settings WHERE key IN ('petFrameRate', 'petEnabled', 'petSelectedId')").run()
-    this.db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', '41')
+    this.db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('schema_version', '44')
   }
 
   #ensureColumn(table, column, definition) {
@@ -1036,6 +1124,7 @@ export class ZSenseDatabase {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `)
     for (const memory of memories) memoryStatement.run(memory.id, bot.id, memory.title, memory.excerpt, memory.type, memory.updatedAt, memory.source, Number(memory.confidence ?? 1), memory.evidence || '', memory.conversationId || '', memory.createdAt || new Date().toISOString())
+    this.#invalidateMemoryIndexes(bot.id)
   }
 
   #upsertChannel(channel) {
@@ -1142,6 +1231,7 @@ export class ZSenseDatabase {
     for (const row of this.db.prepare('SELECT key, value FROM settings').all()) {
       try { settings[row.key] = JSON.parse(row.value) } catch { settings[row.key] = row.value }
     }
+    settings.chatDictationShortcut = normalizeStoredChatDictationShortcut(settings.chatDictationShortcut) ?? defaultSettings.chatDictationShortcut
     return settings
   }
 
@@ -1157,8 +1247,9 @@ export class ZSenseDatabase {
   loadWorkspace({ includeMessages = true } = {}) {
     this.#ensureSkillAssignmentRows()
     const memoriesByBot = new Map()
-    for (const row of this.db.prepare('SELECT * FROM memories ORDER BY rowid DESC').all()) {
-      const memory = memoryFromRow(row)
+    const histories = this.#memoryHistories()
+    for (const row of this.db.prepare("SELECT * FROM memories WHERE state='active' ORDER BY rowid DESC").all()) {
+      const memory = memoryFromRow({...row,history:histories.get(row.id) || []})
       const list = memoriesByBot.get(row.bot_id) || []
       list.push(memory)
       memoriesByBot.set(row.bot_id, list)
@@ -1288,6 +1379,7 @@ export class ZSenseDatabase {
           model: row.model || '',
           durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
           outputTokens: row.output_tokens == null ? null : Number(row.output_tokens),
+          bookmarked: asBoolean(row.bookmarked),
           createdAt: row.created_at,
         })
         messagesByConversation.set(row.conversation_id, list)
@@ -1383,7 +1475,7 @@ export class ZSenseDatabase {
     return { bots, nativeBot, channels, gatewayConnections, skills, activities, conversations, conversationGroups, scheduledTasks, scheduledTaskRuns, settings, modelConfiguration, savedModelConfigurations, availableModelConfigurations, storagePath: this.filePath, skillsPath: this.skillManager?.rootPath }
   }
 
-  createBot(bot) {
+  createBot(bot, { returnWorkspace = true } = {}) {
     this.#transaction(() => {
       this.#insertBot(bot)
       const assignSkill = this.db.prepare('INSERT OR REPLACE INTO bot_skills (bot_id, skill_id, enabled) VALUES (?, ?, ?)')
@@ -1395,7 +1487,7 @@ export class ZSenseDatabase {
         model: bot.model || 'global-default',
       })
     })
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : undefined
   }
 
   duplicateBot(sourceBotId, duplicateBotId) {
@@ -1421,6 +1513,7 @@ export class ZSenseDatabase {
         INSERT INTO bot_skills (bot_id, skill_id, enabled)
         SELECT ?, skill_id, enabled FROM bot_skills WHERE bot_id=?
       `).run(duplicateBotId, sourceBotId)
+      this.#invalidateMemoryIndexes(duplicateBotId)
       this.#addActivity(duplicateBotId, 'system', 'Bot 已复制', `已从 ${source.name} 复制身份、模型与技能分配；私有数据和网关凭证未复制`, {
         operation: 'bot.duplicate',
         sourceBotId,
@@ -1430,7 +1523,7 @@ export class ZSenseDatabase {
     return this.loadWorkspace()
   }
 
-  updateBot(bot) {
+  updateBot(bot, { returnWorkspace = true } = {}) {
     this.#transaction(() => {
       const previous = this.db.prepare('SELECT * FROM bots WHERE id=?').get(bot.id)
       if (!previous) throw new Error('Bot 不存在')
@@ -1473,7 +1566,7 @@ export class ZSenseDatabase {
         })
       }
     })
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : undefined
   }
 
   deleteBot(botId) {
@@ -1483,16 +1576,111 @@ export class ZSenseDatabase {
       const result = this.db.prepare('DELETE FROM bots WHERE id=?').run(botId)
       if (!result.changes) throw new Error('Bot 不存在')
     })
+    this.#invalidateMemoryIndexes(botId)
+    // 删除/导入可复用旧 ID；取消旧维护及回合 token，不能继承旧身份的迟到写入。
+    this.memoryService?.cancelAllMaintenance?.()
     this.#synchronizeChannelMessageStats()
     return this.loadWorkspace()
   }
 
+  getMemoryVersion(botId) {
+    return Number(this.db.prepare('SELECT version FROM memory_versions WHERE bot_id=?').get(botId)?.version || 0)
+  }
+
+  #bumpMemoryVersion(botId) {
+    this.db.prepare('INSERT INTO memory_versions(bot_id, version) VALUES (?, 1) ON CONFLICT(bot_id) DO UPDATE SET version=version+1').run(botId)
+    this.#invalidateMemoryIndexes(botId)
+  }
+
+  #invalidateMemoryIndexes(botId) {
+    for (const key of this.memoryIndexes.keys()) if (key.startsWith(`${botId}\0`)) this.memoryIndexes.delete(key)
+  }
+
+  #saveMemoryRevision(row) {
+    this.db.prepare('INSERT OR IGNORE INTO memory_revisions(memory_id,revision,title,excerpt,evidence,source,updated_at) VALUES (?,?,?,?,?,?,?)')
+      .run(row.id, Number(row.revision || 1), row.title, row.excerpt, row.evidence || '', row.source, row.updated_at)
+    this.db.prepare('DELETE FROM memory_revisions WHERE memory_id=? AND revision NOT IN (SELECT revision FROM memory_revisions WHERE memory_id=? ORDER BY revision DESC LIMIT 5)').run(row.id, row.id)
+  }
+
+  #memoryContentHash(excerpt) {
+    return createHash('sha256').update(normalizedMemoryValue(excerpt)).digest('hex')
+  }
+
+  #forgetMemory(row) {
+    this.db.prepare('INSERT OR IGNORE INTO memory_tombstones(bot_id,owner_key,project_key,content_hash,fact_key) VALUES (?,?,?,?,?)')
+      .run(row.bot_id, row.owner_key || 'local', row.project_key || '', this.#memoryContentHash(row.excerpt), row.fact_key || '')
+    this.db.prepare('DELETE FROM memories WHERE id=? AND bot_id=?').run(row.id, row.bot_id)
+  }
+
+  #memoryHistories(botId = '') {
+    const records = botId
+      ? this.db.prepare('SELECT r.*,r.updated_at AS updatedAt FROM memory_revisions r JOIN memories m ON m.id=r.memory_id WHERE m.bot_id=? ORDER BY r.revision DESC').all(botId)
+      : this.db.prepare('SELECT *,updated_at AS updatedAt FROM memory_revisions ORDER BY revision DESC').all()
+    const histories = new Map()
+    for (const row of records) {
+      const items = histories.get(row.memory_id) || []
+      items.push({ title:row.title,excerpt:row.excerpt,evidence:row.evidence,source:row.source,updatedAt:row.updatedAt,revision:row.revision })
+      histories.set(row.memory_id,items)
+    }
+    return histories
+  }
+
+  memorySnapshot(botId, status = undefined) {
+    const memories = this.listMemories(botId)
+    return { botId, memories, memoryCount: memories.length, memorySize: formatMemorySize(memories.reduce((total, memory) => total + memoryContentSize(memory), 0)), ...(status ? { status } : {}) }
+  }
+
+  memoryUpgradeStatus(version = 'local-memory-quality-v1') {
+    const row = this.db.prepare('SELECT value FROM meta WHERE key=?').get(`memory_upgrade:${version}`)
+    if (!row) return null
+    try { return JSON.parse(row.value) } catch { return null }
+  }
+
+  applyMemoryUpgrade({ version, classify } = {}) {
+    if (!/^[a-z0-9-]{1,80}$/u.test(String(version || '')) || typeof classify !== 'function') throw new Error('记忆升级整理参数无效。')
+    const previous = this.memoryUpgradeStatus(version)
+    if (previous?.version === version && ['completed','new-device'].includes(previous.status)) return { ...previous, status:'already-completed' }
+    const result = { version, status:this.isUpgradeWorkspace ? 'completed' : 'new-device', scanned:0, excluded:0, preserved:0, automatic:0, completedAt:new Date().toISOString() }
+    const allowedReasons = new Set(['question','quoted','transient','tool-transcript','sensitive'])
+    this.#transaction(() => {
+      if (this.isUpgradeWorkspace) {
+        const records = this.db.prepare("SELECT * FROM memories WHERE state='active' ORDER BY rowid").all()
+        const update = this.db.prepare('UPDATE memories SET auto_recall_eligible=?,auto_recall_reason=? WHERE id=? AND bot_id=?')
+        const changedBots = new Set()
+        for (const row of records) {
+          result.scanned += 1
+          if (!isAutomaticMemory(row)) { result.preserved += 1; continue }
+          result.automatic += 1
+          // 只调整自动注入准入，不修改正文、来源、保护、归属或修订历史。
+          const policy = classify(memoryFromRow(row))
+          if (typeof policy?.eligible !== 'boolean' || (!policy.eligible && !allowedReasons.has(policy.reason))) throw new Error('记忆升级整理策略无效。')
+          const eligible = policy.eligible ? 1 : 0
+          const reason = policy.eligible ? '' : policy.reason
+          if (!eligible) result.excluded += 1
+          else result.preserved += 1
+          if (row.auto_recall_eligible !== eligible || row.auto_recall_reason !== reason) {
+            update.run(eligible, reason, row.id, row.bot_id)
+            changedBots.add(row.bot_id)
+          }
+        }
+        for (const botId of changedBots) this.#bumpMemoryVersion(botId)
+        this.#synchronizeMemoryStats()
+      }
+      // 完成标记和准入调整原子提交；失败全部回滚，下次启动仍可重试。
+      this.db.prepare('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)').run(`memory_upgrade:${version}`,JSON.stringify(result))
+    })
+    if (result.status === 'completed') { try { this.db.exec('PRAGMA optimize') } catch { /* 索引统计维护失败不影响已提交的准入规则。 */ } }
+    return result
+  }
+
   createMemory(botId, memory) {
+    const scope = normalizeMemoryScope(memory)
     this.#transaction(() => {
       this.db.prepare(`
-        INSERT INTO memories (id, bot_id, title, excerpt, type, updated_at, source, confidence, evidence, conversation_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(memory.id, botId, memory.title, memory.excerpt, memory.type, memory.updatedAt, memory.source, Number(memory.confidence ?? 1), memory.evidence || '', memory.conversationId || '', memory.createdAt || new Date().toISOString())
+        INSERT INTO memories (id, bot_id, title, excerpt, type, updated_at, source, confidence, evidence, conversation_id, created_at,owner_key,project_key,fact_key,locked,message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?)
+      `).run(memory.id, botId, memory.title, memory.excerpt, memory.type, memory.updatedAt, memory.source, Number(memory.confidence ?? 1), memory.evidence || '', memory.conversationId || '', memory.createdAt || new Date().toISOString(),scope.ownerKey,scope.projectKey,memory.factKey || '',memory.locked === false ? 0 : 1,memory.messageId || '')
+      this.#bumpMemoryVersion(botId)
       this.#synchronizeMemoryStats(botId)
       this.#addActivity(botId, 'memory', '新增长期记忆', `已新增“${memory.title}”，类型为 ${memory.type}，来源为 ${memory.source}。`, {
         operation: 'memory.create', memoryId: memory.id, memoryType: memory.type, source: memory.source,
@@ -1503,14 +1691,16 @@ export class ZSenseDatabase {
 
   updateMemory(botId, memory) {
     this.#transaction(() => {
-      const previous = this.db.prepare('SELECT confidence, evidence, conversation_id FROM memories WHERE id=? AND bot_id=?').get(memory.id, botId)
+      const previous = this.db.prepare('SELECT * FROM memories WHERE id=? AND bot_id=?').get(memory.id, botId)
       if (!previous) throw new Error('记忆不存在或不属于当前空间')
+      this.#saveMemoryRevision(previous)
       const result = this.db.prepare(`
         UPDATE memories
-        SET title=?, excerpt=?, type=?, updated_at=?, source=?, confidence=?, evidence=?, conversation_id=?
+        SET title=?, excerpt=?, type=?, updated_at=?, source=?, confidence=?, evidence=?, conversation_id=?,locked=?,revision=revision+1,auto_recall_eligible=1,auto_recall_reason=''
         WHERE id=? AND bot_id=?
-      `).run(memory.title, memory.excerpt, memory.type, memory.updatedAt, memory.source, Number(memory.confidence ?? previous.confidence ?? 1), memory.evidence ?? previous.evidence ?? '', memory.conversationId ?? previous.conversation_id ?? '', memory.id, botId)
+      `).run(memory.title, memory.excerpt, memory.type, memory.updatedAt, memory.source, Number(memory.confidence ?? previous.confidence ?? 1), memory.evidence ?? previous.evidence ?? '', memory.conversationId ?? previous.conversation_id ?? '', memory.locked === false ? 0 : 1, memory.id, botId)
       if (!result.changes) throw new Error('记忆不存在或不属于当前空间')
+      this.#bumpMemoryVersion(botId)
       this.#synchronizeMemoryStats(botId)
       this.#addActivity(botId, 'memory', '更新长期记忆', `已更新“${memory.title}”，类型为 ${memory.type}，来源为 ${memory.source}。`, {
         operation: 'memory.update', memoryId: memory.id, memoryType: memory.type, source: memory.source,
@@ -1519,28 +1709,35 @@ export class ZSenseDatabase {
     return this.loadWorkspace()
   }
 
-  upsertAutoMemories(botId, proposals, { conversationId = '', source = 'ZSense 自动记忆', maxItems = 500 } = {}) {
-    const result = { created: 0, updated: 0, skipped: 0, memoryIds: [] }
+  upsertAutoMemories(botId, proposals, { conversationId = '', messageId = '', ownerKey = 'local', projectKey = '', source = 'ZSense 自动记忆', maxItems = 500, expectedVersion, evidenceText } = {}) {
+    const scope = normalizeMemoryScope({ ownerKey, projectKey })
+    const result = { created: 0, updated: 0, skipped: 0, forgotten: 0, capacityReached: false, blocked: 0, reason: '', memoryIds: [] }
+    if (expectedVersion !== undefined && Number(expectedVersion) !== this.getMemoryVersion(botId)) return { ...result, reason: 'stale-version', blocked: 1 }
     const allowedTypes = new Set(['fact', 'preference', 'episode'])
     this.#transaction(() => {
       if (!this.db.prepare('SELECT id FROM bots WHERE id=?').get(botId)) throw new Error('记忆空间不存在。')
-      const rows = this.db.prepare('SELECT * FROM memories WHERE bot_id=? ORDER BY rowid DESC').all(botId)
+      const rows = this.db.prepare("SELECT * FROM memories WHERE bot_id=? AND owner_key=? AND (project_key='' OR project_key=?) AND state='active' ORDER BY rowid DESC").all(botId, scope.ownerKey, scope.projectKey)
       const byId = new Map(rows.map((row) => [row.id, row]))
       const byTitle = new Map(rows.map((row) => [normalizedMemoryValue(row.title), row]))
       const byExcerpt = new Map(rows.map((row) => [normalizedMemoryValue(row.excerpt), row]))
       const insert = this.db.prepare(`
-        INSERT INTO memories (id, bot_id, title, excerpt, type, updated_at, source, confidence, evidence, conversation_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memories (id, bot_id, title, excerpt, type, updated_at, source, confidence, evidence, conversation_id, created_at,owner_key,project_key,fact_key,locked,message_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?,?,?,?)
       `)
       const update = this.db.prepare(`
         UPDATE memories
-        SET title=?, excerpt=?, type=?, updated_at=?, source=?, confidence=?, evidence=?, conversation_id=?
+        SET title=?, excerpt=?, type=?, updated_at=?, source=?, confidence=?, evidence=?, conversation_id=?,message_id=?,revision=revision+1,auto_recall_eligible=?,auto_recall_reason=?
         WHERE id=? AND bot_id=?
       `)
       const updatedAt = new Date().toISOString()
       const safeSource = String(source || 'ZSense 自动记忆').trim().slice(0, 200) || 'ZSense 自动记忆'
       const capacity = Math.max(50, Math.min(5_000, Number(maxItems) || 500))
+      let automaticCount = this.db.prepare("SELECT source FROM memories WHERE bot_id=? AND state='active'").all(botId).filter(isAutomaticMemory).length
       for (const proposal of Array.isArray(proposals) ? proposals.slice(0, 5) : []) {
+        const candidateProject = proposal?.scope === 'project' ? scope.projectKey : ''
+        if (proposal?.scope === 'project' && !candidateProject) { result.skipped += 1; continue }
+        const factKey = String(proposal?.factKey || '')
+        if (factKey && !/^(?:answer\.language|identity\.(?:name|profession|company)|project\.name|output\.format|preference:[a-f0-9]{64})$/u.test(factKey)) { result.skipped += 1; continue }
         const title = String(proposal?.title || '').replace(/\s+/g, ' ').trim().slice(0, 200)
         const excerpt = String(proposal?.excerpt || '').replace(/\s+/g, ' ').trim().slice(0, 20_000)
         const type = allowedTypes.has(proposal?.type) ? proposal.type : ''
@@ -1549,23 +1746,48 @@ export class ZSenseDatabase {
         const confidence = Number.isFinite(rawConfidence) ? Math.max(0, Math.min(1, rawConfidence)) : 0
         const evidence = String(proposal?.evidence || '').replace(/\s+/g, ' ').trim().slice(0, 1_000)
         if (!evidence || confidence < 0.75) { result.skipped += 1; continue }
+        if (evidenceText !== undefined && !normalizedMemoryValue(evidenceText).includes(normalizedMemoryValue(evidence))) { result.skipped += 1; continue }
         const requestedTargetId = String(proposal?.matchId || '')
-        const updateRequested = proposal?.action === 'update'
+        const updateRequested = proposal?.action === 'update' || proposal?.action === 'forget'
         // 模型只能明确修订已存在的自动记忆；不能以“新增”或模糊相似度覆盖旧结论。
         if (updateRequested && !byId.has(requestedTargetId)) { result.skipped += 1; continue }
-        const exactTarget = byId.get(String(proposal?.matchId || '')) || byExcerpt.get(normalizedMemoryValue(excerpt)) || byTitle.get(normalizedMemoryValue(title))
-        const similarTarget = exactTarget ? null : findSimilarMemory(rows, { title, excerpt }, { threshold: 0.84 })?.memory
+        const scopedRows = rows.filter((row) => row.project_key === candidateProject)
+        const targetById = byId.get(requestedTargetId)
+        if (targetById && targetById.project_key !== candidateProject) { result.skipped += 1; continue }
+        const exactTarget = targetById || scopedRows.find((row) => (factKey && row.fact_key === factKey) || normalizedMemoryValue(row.excerpt) === normalizedMemoryValue(excerpt) || normalizedMemoryValue(row.title) === normalizedMemoryValue(title))
+        const similarTarget = exactTarget ? null : findSimilarMemory(scopedRows, { title, excerpt }, { threshold: 0.84 })?.memory
         const target = exactTarget || similarTarget
         if (target) {
           // 自动整理绝不能覆盖用户或 Agent 手动策展的记忆；相似时也不再制造副本。
-          if (!isAutomaticMemory(target)) { result.skipped += 1; continue }
+          if (target.locked) { result.skipped += 1; result.blocked += 1; result.reason = 'manual-protected'; continue }
+          if (factKey && target.fact_key && factKey !== target.fact_key) { result.skipped += 1; continue }
+          if (proposal?.action === 'forget') {
+            if (requestedTargetId !== target.id) { result.skipped += 1; continue }
+            this.#forgetMemory(target)
+            rows.splice(rows.findIndex((row) => row.id === target.id), 1)
+            byId.delete(target.id)
+            result.forgotten += 1
+            if (isAutomaticMemory(target)) automaticCount -= 1
+            continue
+          }
           const unchanged = normalizedMemoryValue(target.title) === normalizedMemoryValue(title)
             && normalizedMemoryValue(target.excerpt) === normalizedMemoryValue(excerpt)
             && target.type === type
           if (unchanged) { result.skipped += 1; continue }
           if (!updateRequested || requestedTargetId !== target.id) { result.skipped += 1; continue }
-          update.run(title, excerpt, type, updatedAt, safeSource, confidence, evidence, conversationId, target.id, botId)
-          const next = { ...target, title, excerpt, type, updated_at: updatedAt, source: safeSource, confidence, evidence, conversation_id: conversationId }
+          this.#saveMemoryRevision(target)
+          // 修订不改变来源归类，人工条目显式解锁后仍不占自动额度。
+          const revisionSource = target.source
+          let recallEligible = target.auto_recall_eligible !== 0
+          let recallReason = target.auto_recall_reason || ''
+          // 已暂停的旧事实经可信新原话明确纠正后重新判断；不能靠旧编辑历史或无原话的模型结果恢复。
+          if (!recallEligible && typeof evidenceText === 'string') {
+            const policy = classifyLegacyMemory({ source:revisionSource,title,excerpt,evidence,locked:false,revision:1,history:[] })
+            recallEligible = policy.eligible
+            recallReason = policy.eligible ? '' : policy.reason
+          }
+          update.run(title, excerpt, type, updatedAt, revisionSource, confidence, evidence, conversationId, messageId, recallEligible ? 1 : 0, recallReason, target.id, botId)
+          const next = { ...target, title, excerpt, type, updated_at: updatedAt, source: revisionSource, confidence, evidence, conversation_id: conversationId, message_id: messageId, revision: Number(target.revision || 1) + 1, auto_recall_eligible:recallEligible ? 1 : 0,auto_recall_reason:recallReason }
           if (byTitle.get(normalizedMemoryValue(target.title))?.id === target.id) byTitle.delete(normalizedMemoryValue(target.title))
           if (byExcerpt.get(normalizedMemoryValue(target.excerpt))?.id === target.id) byExcerpt.delete(normalizedMemoryValue(target.excerpt))
           const rowIndex = rows.findIndex((row) => row.id === target.id)
@@ -1577,18 +1799,22 @@ export class ZSenseDatabase {
           result.memoryIds.push(target.id)
           continue
         }
-        if (rows.length >= capacity) { result.skipped += 1; continue }
+        const tombstone = this.db.prepare("SELECT 1 FROM memory_tombstones WHERE bot_id=? AND owner_key=? AND project_key=? AND (content_hash=? OR (fact_key<>'' AND fact_key=?)) LIMIT 1").get(botId,scope.ownerKey,candidateProject,this.#memoryContentHash(excerpt),factKey)
+        if (tombstone) { result.skipped += 1; result.blocked += 1; result.reason = 'previously-forgotten'; continue }
+        if (automaticCount >= capacity) { result.skipped += 1; result.capacityReached = true; result.reason = 'capacity-reached'; continue }
         const memoryId = `auto-memory-${randomUUID()}`
-        insert.run(memoryId, botId, title, excerpt, type, updatedAt, safeSource, confidence, evidence, conversationId, updatedAt)
-        const next = { id: memoryId, title, excerpt, type, updated_at: updatedAt, source: safeSource, confidence, evidence, conversation_id: conversationId, created_at: updatedAt }
+        insert.run(memoryId, botId, title, excerpt, type, updatedAt, safeSource, confidence, evidence, conversationId, updatedAt,scope.ownerKey,candidateProject,factKey,0,messageId)
+        const next = { id: memoryId, bot_id: botId, title, excerpt, type, updated_at: updatedAt, source: safeSource, confidence, evidence, conversation_id: conversationId, created_at: updatedAt, owner_key:scope.ownerKey,project_key:candidateProject,fact_key:factKey,locked:0,revision:1,message_id:messageId }
         rows.push(next)
+        automaticCount += 1
         byId.set(memoryId, next)
         byTitle.set(normalizedMemoryValue(title), next)
         byExcerpt.set(normalizedMemoryValue(excerpt), next)
         result.created += 1
         result.memoryIds.push(memoryId)
       }
-      if (result.created || result.updated) {
+      if (result.created || result.updated || result.forgotten) {
+        this.#bumpMemoryVersion(botId)
         this.#synchronizeMemoryStats(botId)
         const detail = [result.created ? `新增 ${result.created} 条` : '', result.updated ? `更新 ${result.updated} 条` : ''].filter(Boolean).join('，')
         this.#addActivity(botId, 'memory', '自动整理长期记忆', `${detail}长期记忆；所有内容均保存在当前独立记忆空间。`, {
@@ -1599,7 +1825,7 @@ export class ZSenseDatabase {
     return result
   }
 
-  // Hindsight 是自动记忆的主数据源；SQLite 只保留供现有界面展示和编辑的投影。
+  // 兼容旧 Hindsight 投影导入；当前本地自动记忆流程不调用此入口。
   // 旧版/人工记忆不属于此投影，迁移期间始终保留原样。
   replaceHindsightMemoryProjection(botId, records) {
     this.#transaction(() => {
@@ -1625,6 +1851,7 @@ export class ZSenseDatabase {
           update.run(memory.title, memory.excerpt, memory.type, memory.updatedAt, memory.conversationId || '', memory.id, botId)
         }
       }
+      this.#bumpMemoryVersion(botId)
       this.#synchronizeMemoryStats(botId)
     })
     return this.loadWorkspace()
@@ -1632,9 +1859,10 @@ export class ZSenseDatabase {
 
   deleteMemory(botId, memoryId) {
     this.#transaction(() => {
-      const memory = this.db.prepare('SELECT title, type, source FROM memories WHERE id=? AND bot_id=?').get(memoryId, botId)
-      const result = this.db.prepare('DELETE FROM memories WHERE id=? AND bot_id=?').run(memoryId, botId)
-      if (!result.changes) throw new Error('记忆不存在或不属于该 Bot')
+      const memory = this.db.prepare('SELECT * FROM memories WHERE id=? AND bot_id=?').get(memoryId, botId)
+      if (!memory) throw new Error('记忆不存在或不属于该 Bot')
+      this.#forgetMemory(memory)
+      this.#bumpMemoryVersion(botId)
       this.#synchronizeMemoryStats(botId)
       this.#addActivity(botId, 'memory', '删除长期记忆', `“${memory?.title || memoryId}”已从独立命名空间移除。`, {
         operation: 'memory.delete', memoryId, memoryType: memory?.type || 'unknown', source: memory?.source || 'unknown',
@@ -1643,39 +1871,66 @@ export class ZSenseDatabase {
     return this.loadWorkspace()
   }
 
-  getMemory(botId, memoryId) {
+  getMemory(botId, memoryId, scope = undefined) {
     const row = this.db.prepare('SELECT * FROM memories WHERE id=? AND bot_id=?').get(memoryId, botId)
-    return memoryFromRow(row)
+    if (scope) {
+      const expected = normalizeMemoryScope(scope)
+      if (!row || row.owner_key !== expected.ownerKey || (row.project_key && row.project_key !== expected.projectKey)) return null
+    }
+    const memory = memoryFromRow(row)
+    if (memory) memory.history = this.db.prepare('SELECT title,excerpt,evidence,source,updated_at AS updatedAt,revision FROM memory_revisions WHERE memory_id=? ORDER BY revision DESC LIMIT 5').all(memoryId)
+    return memory
   }
 
-  listMemories(botId) {
-    return this.db.prepare('SELECT * FROM memories WHERE bot_id=? ORDER BY datetime(updated_at) DESC, rowid DESC').all(botId).map(memoryFromRow)
+  listMemories(botId, scope = undefined) {
+    const expected = scope ? normalizeMemoryScope(scope) : null
+    const rows = expected
+      ? this.db.prepare("SELECT * FROM memories WHERE bot_id=? AND owner_key=? AND (project_key='' OR project_key=?) AND state='active' ORDER BY datetime(updated_at) DESC, rowid DESC").all(botId,expected.ownerKey,expected.projectKey)
+      : this.db.prepare("SELECT * FROM memories WHERE bot_id=? AND state='active' ORDER BY datetime(updated_at) DESC, rowid DESC").all(botId)
+    const histories = this.#memoryHistories(botId)
+    return rows.map((row) => memoryFromRow({...row,history:histories.get(row.id) || []}))
   }
 
-  recallMemories(botId, query, { limit = 24, characterBudget = 4_800 } = {}) {
-    const selected = selectRelevantMemories(this.listMemories(botId), query, { limit, characterBudget })
+  #memoryIndex(botId, options, automatic = true) {
+    const scope = normalizeMemoryScope(options)
+    const key = `${botId}\0${scope.ownerKey}\0${scope.projectKey}\0${automatic ? 'automatic' : 'manual-search'}`
+    const version = this.getMemoryVersion(botId)
+    const cached = this.memoryIndexes.get(key)
+    if (cached?.version === version) return cached.index
+    const index = createMemoryRetrievalIndex(this.listMemories(botId, scope).filter((memory) => !automatic || memory.recallEligible !== false).map(({history,...memory}) => memory))
+    index.byId = new Map(index.entries.map((entry) => [entry.memory.id,entry.memory]))
+    if (this.memoryIndexes.size >= 32) this.memoryIndexes.delete(this.memoryIndexes.keys().next().value)
+    this.memoryIndexes.set(key, { version, index })
+    return index
+  }
+
+  recallMemories(botId, query, { limit = 24, characterBudget = 4_800, ownerKey = 'local', projectKey = '' } = {}) {
+    const index = this.#memoryIndex(botId, {ownerKey,projectKey})
+    const selected = selectRelevantMemories(index, query, { limit, characterBudget: Math.min(5_000,characterBudget) })
     if (!selected.memories.length) return selected
     const recalledAt = new Date().toISOString()
+    const counts = new Map()
     this.#transaction(() => {
       const update = this.db.prepare('UPDATE memories SET recall_count=recall_count+1, last_recalled_at=? WHERE id=? AND bot_id=?')
-      for (const memory of selected.memories) update.run(recalledAt, memory.id, botId)
+      const read = this.db.prepare('SELECT recall_count FROM memories WHERE id=? AND bot_id=?')
+      for (const memory of selected.memories) { update.run(recalledAt, memory.id, botId); counts.set(memory.id,Number(read.get(memory.id,botId)?.recall_count || 0)) }
     })
+    for (const [id,count] of counts) {
+      const cached = index.byId.get(id)
+      if (cached) { cached.recallCount=count;cached.lastRecalledAt=recalledAt }
+    }
     return {
       ...selected,
-      memories: selected.memories.map((memory) => ({ ...memory, recallCount: memory.recallCount + 1, lastRecalledAt: recalledAt })),
+      memories: selected.memories.map((memory) => ({ ...memory, recallCount: counts.get(memory.id), lastRecalledAt: recalledAt })),
     }
   }
 
-  searchMemories(botId, query, limit = 8) {
+  searchMemories(botId, query, limit = 8, scope = {}) {
     const term = String(query || '').trim().slice(0, 300)
     if (!term) return []
     const safeLimit = Math.max(1, Math.min(20, Number(limit) || 8))
-    return this.listMemories(botId)
-      .map((memory) => ({ memory, ...scoreMemoryForQuery(memory, term) }))
-      .filter((entry) => entry.lexicalHits > 0)
-      .sort((left, right) => right.score - left.score || right.lexicalHits - left.lexicalHits)
-      .slice(0, safeLimit)
-      .map(({ memory }) => ({ id: memory.id, title: memory.title, excerpt: memory.excerpt.slice(0, 1_200), type: memory.type, source: memory.source, updatedAt: memory.updatedAt }))
+    return searchRelevantMemories(this.#memoryIndex(botId,scope,false),term,{limit:safeLimit})
+      .map((memory) => ({ id: memory.id, title: memory.title, excerpt: memory.excerpt.slice(0, 1_200), type: memory.type, source: memory.source, updatedAt: memory.updatedAt }))
   }
 
   recentUserMessages(botId, limit = 24) {
@@ -1756,9 +2011,9 @@ export class ZSenseDatabase {
     return gatewayConnectionFromRow(this.db.prepare('SELECT * FROM gateway_connections WHERE bot_id=? AND provider=?').get(botId, provider), true)
   }
 
-  upsertGatewayConnection(connection) {
+  upsertGatewayConnection(connection, { returnWorkspace = true } = {}) {
     this.#upsertGatewayConnection(connection)
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : undefined
   }
 
   deleteGatewayConnection(connectionId) {
@@ -1787,7 +2042,7 @@ export class ZSenseDatabase {
     return this.loadWorkspace()
   }
 
-  upsertPortableModelConfiguration(configuration, setDefault = false) {
+  upsertPortableModelConfiguration(configuration, setDefault = false, { returnWorkspace = true } = {}) {
     this.#transaction(() => {
       this.db.prepare(`
         INSERT INTO saved_model_configurations (provider, model, base_url, api_key_name, api_key_configured, updated_at)
@@ -1804,7 +2059,7 @@ export class ZSenseDatabase {
         `).run(configuration.provider, configuration.model, configuration.baseUrl, configuration.apiKeyName, configuration.apiKeyConfigured ? 1 : 0, configuration.updatedAt)
       }
     })
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : undefined
   }
 
   syncModelCatalog(catalog, configuration) {
@@ -1859,20 +2114,20 @@ export class ZSenseDatabase {
     return this.loadWorkspace()
   }
 
-  createSkill(input) {
+  createSkill(input, { returnWorkspace = true } = {}) {
     if (!this.skillManager) throw new Error('技能文件管理器尚未就绪。')
     const skill = this.skillManager.createSkill(input)
     const assignedBotIds = this.#replaceSkillAssignments(skill, input.assignedBotIds || [])
     this.#upsertSkill({ ...skill, enabled: Boolean(assignedBotIds.length) })
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : skill
   }
 
-  updateSkill(skillId, input) {
+  updateSkill(skillId, input, { returnWorkspace = true } = {}) {
     if (!this.skillManager) throw new Error('技能文件管理器尚未就绪。')
     const skill = this.skillManager.updateSkill(skillId, input)
     const assignedBotIds = this.#replaceSkillAssignments(skill, input.assignedBotIds || [])
     this.#upsertSkill({ ...skill, enabled: Boolean(assignedBotIds.length) })
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : skill
   }
 
   restoreSkillVersion(skillId, snapshotId) {
@@ -1931,7 +2186,15 @@ export class ZSenseDatabase {
   updateSettings(settings) {
     this.#transaction(() => {
       const statement = this.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
-      for (const [key, value] of Object.entries(settings)) statement.run(key, JSON.stringify(value))
+      for (const [key, value] of Object.entries(settings)) {
+        if (key === 'chatDictationShortcut') {
+          // A legacy settings object may omit this optional field entirely.
+          if (value === undefined) continue
+          const shortcut = normalizeStoredChatDictationShortcut(value)
+          if (shortcut === null) throw new Error('听写快捷键需要 Ctrl/⌘ + Shift + 字母、数字或 F1–F12，可加 Alt；截图、关闭和退出组合已保留。')
+          statement.run(key, JSON.stringify(shortcut))
+        } else statement.run(key, JSON.stringify(value))
+      }
     })
     return this.loadWorkspace()
   }
@@ -2137,7 +2400,7 @@ export class ZSenseDatabase {
     return { archived: skill.id, name: skill.name }
   }
 
-  createScheduledTask(task) {
+  createScheduledTask(task, { returnWorkspace = true } = {}) {
     this.db.prepare(`
       INSERT INTO scheduled_tasks
         (id, name, frequency, time_of_day, weekday, day_of_month, cron_expression, model_provider, model, prompt, memory_enabled, skill_ids_json, delivery_target, repeat_count, run_count, enabled, status, workspace_path, next_run_at, last_run_at, created_at, updated_at)
@@ -2148,10 +2411,10 @@ export class ZSenseDatabase {
       task.enabled ? 'active' : 'paused', task.workspacePath, task.nextRunAt, task.createdAt, task.updatedAt,
     )
     this.db.prepare('UPDATE scheduled_tasks SET owner_bot_id=? WHERE id=?').run(task.ownerBotId || '', task.id)
-    return this.loadWorkspace()
+    return returnWorkspace ? this.loadWorkspace() : undefined
   }
 
-  updateScheduledTask(taskId, task) {
+  updateScheduledTask(taskId, task, { returnWorkspace = true } = {}) {
     const current = this.getScheduledTask(taskId)
     if (!current) throw new Error('定时任务不存在或已经被删除。')
     const resetCount = task.repeatCount > 0 && current.runCount >= task.repeatCount ? 0 : current.runCount
@@ -2167,10 +2430,12 @@ export class ZSenseDatabase {
       task.workspacePath, task.nextRunAt, task.updatedAt, taskId,
     )
     if (String(task.prompt || '').trim() !== String(current.prompt || '').trim()) {
-      this.db.prepare("UPDATE scheduled_tasks SET memory_summary='', memory_summary_updated_at=NULL, memory_summary_run_count=0 WHERE id=?").run(taskId)
+      this.db.prepare("UPDATE scheduled_tasks SET memory_summary='', memory_summary_updated_at=NULL, memory_summary_run_count=0,memory_revision=memory_revision+1 WHERE id=?").run(taskId)
+    } else if (Boolean(current.memoryEnabled) !== (task.memoryEnabled !== false)) {
+      this.db.prepare('UPDATE scheduled_tasks SET memory_revision=memory_revision+1 WHERE id=?').run(taskId)
     }
-    return this.loadWorkspace()
     this.db.prepare('UPDATE scheduled_tasks SET owner_bot_id=? WHERE id=?').run(task.ownerBotId || '', taskId)
+    return returnWorkspace ? this.loadWorkspace() : undefined
   }
 
   setScheduledTaskEnabled(taskId, enabled, nextRunAt) {
@@ -2228,7 +2493,7 @@ export class ZSenseDatabase {
     if (run.status === 'running') throw new Error('任务仍在运行，完成后才能删除这条记录。')
     this.#transaction(() => {
       this.db.prepare('DELETE FROM scheduled_task_runs WHERE id=?').run(runId)
-      if (run.status === 'success') this.db.prepare("UPDATE scheduled_tasks SET memory_summary='', memory_summary_updated_at=NULL, memory_summary_run_count=0 WHERE id=?").run(run.taskId)
+      if (run.status === 'success') this.db.prepare("UPDATE scheduled_tasks SET memory_summary='', memory_summary_updated_at=NULL, memory_summary_run_count=0,memory_revision=memory_revision+1 WHERE id=?").run(run.taskId)
       if (run.conversationId) this.db.prepare("DELETE FROM conversations WHERE id=? AND channel_id='scheduled'").run(run.conversationId)
     })
     return this.loadWorkspace()
@@ -2286,15 +2551,33 @@ export class ZSenseDatabase {
     return { memories, usedCharacters, totalCandidates: candidates.length }
   }
 
-  updateScheduledTaskMemorySummary(taskId, summary, updatedAt = new Date().toISOString()) {
+  getScheduledTaskRun(runId) {
+    return scheduledTaskRunFromRow(this.db.prepare('SELECT * FROM scheduled_task_runs WHERE id=?').get(runId))
+  }
+
+  clearScheduledTaskMemorySummary(taskId) {
+    const result = this.db.prepare("UPDATE scheduled_tasks SET memory_summary='',memory_summary_updated_at=NULL,memory_summary_run_count=0,memory_revision=memory_revision+1 WHERE id=?").run(taskId)
+    if (!result.changes) throw new Error('定时任务不存在或已经被删除。')
+    return this.loadWorkspace()
+  }
+
+  updateScheduledTaskMemorySummary(taskId, summary, options = {}) {
+    const { expectedRevision,sourceRunId = '' } = typeof options === 'object' ? options : {}
+    const updatedAt = typeof options === 'string' ? options : new Date().toISOString()
     const compactSummary = String(summary || '').trim().slice(0, 5_000)
-    if (!compactSummary) return this.loadWorkspace()
-    const successfulRunCount = Number(this.db.prepare("SELECT COUNT(*) AS count FROM scheduled_task_runs WHERE task_id=? AND status='success' AND output<>''").get(taskId)?.count || 0)
+    const task = this.getScheduledTask(taskId)
+    if (!task || (expectedRevision !== undefined && task.memoryRevision !== expectedRevision)) return null
+    const run = sourceRunId ? this.getScheduledTaskRun(sourceRunId) : null
+    if (sourceRunId && (!run || run.taskId !== taskId || run.status !== 'success')) return null
+    if (!compactSummary) return this.clearScheduledTaskMemorySummary(taskId)
+    const successfulRunCount = sourceRunId ? task.memorySummaryRunCount + 1 : Number(this.db.prepare("SELECT COUNT(*) AS count FROM scheduled_task_runs WHERE task_id=? AND status='success' AND output<>''").get(taskId)?.count || 0)
     const result = this.db.prepare(`
       UPDATE scheduled_tasks
-      SET memory_summary=?, memory_summary_updated_at=?, memory_summary_run_count=?, updated_at=CURRENT_TIMESTAMP
-      WHERE id=? AND memory_enabled=1
-    `).run(compactSummary, updatedAt, successfulRunCount, taskId)
+      SET memory_summary=?, memory_summary_updated_at=?, memory_summary_run_count=?,memory_revision=memory_revision+?, updated_at=CURRENT_TIMESTAMP
+      WHERE id=? AND memory_enabled=1 AND (? IS NULL OR memory_revision=?)
+        AND (?='' OR EXISTS(SELECT 1 FROM scheduled_task_runs WHERE id=? AND task_id=scheduled_tasks.id AND status='success'))
+    `).run(compactSummary, updatedAt, successfulRunCount,expectedRevision === undefined ? 1 : 0, taskId,expectedRevision ?? null,expectedRevision ?? null,sourceRunId,sourceRunId)
+    if (!result.changes && expectedRevision !== undefined) return null
     if (!result.changes && this.getScheduledTask(taskId)) throw new Error('任务记忆已关闭，未更新滚动摘要。')
     if (!result.changes) throw new Error('定时任务不存在或已经被删除。')
     return this.loadWorkspace()
@@ -2409,6 +2692,7 @@ export class ZSenseDatabase {
       model: message.model || '',
       durationMs: message.duration_ms == null ? null : Number(message.duration_ms),
       outputTokens: message.output_tokens == null ? null : Number(message.output_tokens),
+      bookmarked: asBoolean(message.bookmarked),
       createdAt: message.created_at,
     }))
     return {
@@ -2470,18 +2754,64 @@ export class ZSenseDatabase {
     return this.loadWorkspace()
   }
 
-  addMessage(conversationId, role, content, { reasoning = '', agentSteps = [], toolEvents = [], attachments = [], externalMessageId = '', modelProvider = '', model = '', durationMs = null, outputTokens = null, createdAt = '' } = {}) {
+  addMessage(conversationId, role, content, { reasoning = '', agentSteps = [], toolEvents = [], attachments = [], externalMessageId = '', modelProvider = '', model = '', durationMs = null, outputTokens = null, bookmarked = false, createdAt = '' } = {}) {
     const id = `message-${Date.now()}-${Math.random().toString(16).slice(2)}`
     const numericDurationMs = durationMs === null || durationMs === undefined ? NaN : Number(durationMs)
     const storedDurationMs = Number.isFinite(numericDurationMs) && numericDurationMs >= 0 ? Math.round(numericDurationMs) : null
     const numericOutputTokens = outputTokens === null || outputTokens === undefined ? NaN : Number(outputTokens)
     const storedOutputTokens = Number.isFinite(numericOutputTokens) && numericOutputTokens >= 0 ? Math.round(numericOutputTokens) : null
     this.db.prepare(`
-      INSERT INTO messages (id, conversation_id, role, content, reasoning, agent_steps_json, tool_events_json, attachments_json, external_message_id, model_provider, model, duration_ms, output_tokens, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
-    `).run(id, conversationId, role, content, reasoning, JSON.stringify(agentSteps || []), JSON.stringify(toolEvents || []), JSON.stringify(attachmentMetadata(attachments)), externalMessageId, modelProvider, model, storedDurationMs, storedOutputTokens, createdAt)
+      INSERT INTO messages (id, conversation_id, role, content, reasoning, agent_steps_json, tool_events_json, attachments_json, external_message_id, model_provider, model, duration_ms, output_tokens, bookmarked, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+    `).run(id, conversationId, role, content, reasoning, JSON.stringify(agentSteps || []), JSON.stringify(toolEvents || []), JSON.stringify(attachmentMetadata(attachments)), externalMessageId, modelProvider, model, storedDurationMs, storedOutputTokens, role === 'user' && bookmarked === true ? 1 : 0, createdAt)
     this.db.prepare('UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(conversationId)
     return id
+  }
+
+  setConversationMessageBookmark(conversationId, messageId, bookmarked) {
+    if (typeof bookmarked !== 'boolean') throw new Error('书签状态必须是布尔值。')
+    this.#transaction(() => {
+      const message = this.db.prepare('SELECT role FROM messages WHERE id=? AND conversation_id=?').get(messageId, conversationId)
+      if (!message) throw new Error('消息不存在、尚未保存，或不属于这个会话。')
+      if (message.role !== 'user') throw new Error('只能为用户消息设置书签。')
+      // 书签仅是界面导航元数据：不刷新会话时间、排序或运行状态。
+      this.db.prepare('UPDATE messages SET bookmarked=? WHERE id=? AND conversation_id=?').run(bookmarked ? 1 : 0, messageId, conversationId)
+    })
+    return { conversationId, messageId, bookmarked }
+  }
+
+  forkConversationMessage(conversationId, messageId) {
+    const forkId = this.#transaction(() => {
+      const source = this.db.prepare('SELECT * FROM conversations WHERE id=?').get(conversationId)
+      if (!source) throw new Error('会话不存在或已经被删除。')
+      const target = this.db.prepare('SELECT role, content FROM messages WHERE id=? AND conversation_id=?').get(messageId, conversationId)
+      if (!target) throw new Error('消息不存在、尚未保存，或不属于这个会话。')
+      if (target.role !== 'assistant' || !String(target.content || '').trim()) throw new Error('只能从已保存且内容非空的助手回复创建分支。')
+
+      // 与会话读取使用同一排序；相同时间戳按原 rowid 截断，不能带入后续轮次。
+      const messages = this.db.prepare('SELECT * FROM messages WHERE conversation_id=? ORDER BY datetime(created_at), rowid').all(conversationId)
+      const cutoff = messages.findIndex((message) => message.id === messageId)
+      if (cutoff < 0) throw new Error('分支消息已经被删除。')
+      const id = `conversation-${randomUUID()}`
+      const suffix = '（分支）'
+      const title = `${String(source.title || '新对话').slice(0, 80 - suffix.length)}${suffix}`
+      // 只继承对话配置。外部身份、运行/压缩游标、使用量和界面归档/分组状态均用新会话默认值。
+      this.db.prepare(`
+        INSERT INTO conversations (id, bot_id, title, channel_id, model_provider, model, reasoning_effort, workspace_path)
+        VALUES (?, ?, ?, 'web', ?, ?, ?, ?)
+      `).run(id, source.bot_id, title, source.model_provider, source.model, source.reasoning_effort, source.workspace_path)
+      const copyMessage = this.db.prepare(`
+        INSERT INTO messages (id, conversation_id, role, content, reasoning, agent_steps_json, tool_events_json, attachments_json, model_provider, model, duration_ms, output_tokens, bookmarked, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const message of messages.slice(0, cutoff + 1)) {
+        // 附件只复制已有元数据，不读取、复制或删除其路径对应的文件；外部消息 ID 不继承。
+        copyMessage.run(`message-${randomUUID()}`, id, message.role, message.content, message.reasoning, message.agent_steps_json, message.tool_events_json, message.attachments_json, message.model_provider, message.model, message.duration_ms, message.output_tokens, message.bookmarked, message.created_at)
+      }
+      this.#synchronizeChannelMessageStats()
+      return id
+    })
+    return { conversationId: forkId, workspace: this.loadWorkspace() }
   }
 
   deleteConversationMessage(conversationId, messageId) {
@@ -2630,9 +2960,9 @@ export class ZSenseDatabase {
           const messageHash = createHash('sha256').update(`${record.externalThreadId}\0${message.externalMessageId}`).digest('hex').slice(0, 28)
           const result = this.db.prepare(`
             INSERT OR IGNORE INTO messages
-              (id, conversation_id, role, content, reasoning, tool_events_json, attachments_json, external_message_id, created_at)
-            VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)
-          `).run(`external-${messageHash}`, conversationId, message.role, message.content, message.reasoning || '', JSON.stringify(attachmentMetadata(message.attachments)), String(message.externalMessageId), message.createdAt || createdAt)
+              (id, conversation_id, role, content, reasoning, tool_events_json, attachments_json, external_message_id, bookmarked, created_at)
+            VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)
+          `).run(`external-${messageHash}`, conversationId, message.role, message.content, message.reasoning || '', JSON.stringify(attachmentMetadata(message.attachments)), String(message.externalMessageId), message.role === 'user' && message.bookmarked === true ? 1 : 0, message.createdAt || createdAt)
           if (result.changes) importedMessages += 1
         }
         if (record.connectionId) touchedConnections.set(record.connectionId, (touchedConnections.get(record.connectionId) || 0) + visibleMessages.length)

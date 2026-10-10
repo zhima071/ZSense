@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { redactSensitiveText } from './redaction.mjs'
 import { classifyOfficeTaskError } from './office-task-service.mjs'
+import { createMemoryScope } from './memory-scope.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -1151,10 +1152,14 @@ export class ZSenseGatewayService {
       throw new Error(`${bot.name} 当前模型缺少 API Key。`)
     }
     const requestId = `gateway:${connection.id}:${randomUUID()}`
+    const memoryScope = createMemoryScope({channel:'gateway',connectionId:connection.id,userId:senderId,workspacePath})
+    const memoryRetentionVersion = this.database.getMemoryVersion(bot.id)
+    const memoryRetentionGeneration = this.database.memoryService.captureRetentionGeneration?.()
     await status('thinking', '已接收，ZSense Agent 正在思考…\n\n正在处理请求，需要时将调用工具。').catch(() => undefined)
     const memories = (await this.database.memoryService.recallMemories(bot.id, redacted, {
+      ...memoryScope,
       limit: imported.workspace.settings.memoryRecallLimit,
-      characterBudget: Math.max(8_000, Math.min(24_000, Number(imported.workspace.settings.memoryRecallLimit || 24) * 600)),
+      characterBudget: 5_000,
     })).memories
     const skills = imported.workspace.skills.filter((skill) => skill.assignedBotIds.includes(bot.id))
     const legacyMessages = conversation.messages.slice(0, -1)
@@ -1177,6 +1182,7 @@ export class ZSenseGatewayService {
         legacyMessages,
         skills,
         memories,
+        memoryScope,
         settings: imported.workspace.settings,
         appContext: {
           currentBot: { id: bot.id, name: bot.name, status: bot.status, modelProvider: configuration.provider, model: configuration.model },
@@ -1259,11 +1265,15 @@ export class ZSenseGatewayService {
         })
       }
       if (imported.workspace.settings.autoExtractMemory) {
-        void this.database.memoryService.retainUserMessage(bot.id, redacted, {
+        // 引用内容、附件与工具说明只是资料，不是该发送者的身份或偏好。
+        void this.database.memoryService.retainUserMessage(bot.id, initialContent, {
+          ...memoryScope,
           conversationId: conversation.id, messageId: externalMessageId,
+          expectedVersion:memoryRetentionVersion,expectedGeneration:memoryRetentionGeneration,
+          modelContext:{model:configuration.model,modelProvider:configuration.provider,apiKey:credential.apiKey || '',baseUrl:configuration.baseUrl || ''},
         }).then((result) => {
-          if (result.stored) this.onChanged(this.database.loadWorkspace())
-        }).catch((error) => console.warn('消息网关自动记忆整理失败：', error instanceof Error ? error.message : error))
+          if (result.stored || result.capacityReached || result.blocked) this.database.memoryService.onChanged?.(bot.id,result)
+        }).catch(() => this.database.memoryService.onChanged?.(bot.id,{reason:'渠道自动记忆整理失败，原回复不受影响。'}))
       }
       this.onChanged(this.database.loadWorkspace())
       this.notify('completion', shouldReview ? `${bot.name} 的结果等待审核` : `${bot.name} 已回复外部消息`, `${connection.name} · ${userName || senderId}`)

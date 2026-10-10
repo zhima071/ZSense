@@ -53,6 +53,7 @@ try {
   const task = workspace.scheduledTasks.find((item) => item.name === '每日工作摘要')
   assert(task)
   assert.equal(task.memoryEnabled, true, '新定时任务没有默认开启任务记忆')
+  assert.equal(task.memoryRevision, 0, '新定时任务记忆应有独立的初始版本')
   assert.equal(task.workspacePath, selectedWorkspacePath, '任务没有保存用户指定的工作区')
   assert(task.nextRunAt, '启用任务没有下次执行时间')
 
@@ -83,6 +84,7 @@ try {
   const updatedTask = workspace.scheduledTasks.find((item) => item.id === task.id)
   assert.match(updatedTask?.memorySummary || '', /最新状态/, '成功运行后没有生成滚动摘要')
   assert.equal(updatedTask?.memorySummaryRunCount, 1, '滚动摘要没有记录已合并的成功运行数量')
+  assert.equal(updatedTask?.memoryRevision, task.memoryRevision, '正常摘要更新不应使后续排队请求失效')
   assert.equal(coreCalls.some((item) => item.type === 'summary'), true, '成功运行后没有触发后台摘要整理')
   const taskMemories = database.recallScheduledTaskMemories(task.id, task.prompt)
   assert.equal(taskMemories.memories.length, 2, '滚动摘要和近期结果没有同时进入后续记忆')
@@ -135,6 +137,7 @@ try {
   assert.equal(database.loadWorkspace().scheduledTaskRuns.length, 0, '单条运行记录删除后仍然存在')
   assert.equal(database.getConversation(scheduledConversationId), null, '删除运行记录后遗留了无法访问的内部任务对话')
   assert.equal(database.getScheduledTask(task.id)?.memorySummary, '', '删除成功运行记录后仍残留包含该结果的滚动摘要')
+  assert.equal(database.getScheduledTask(task.id)?.memoryRevision, task.memoryRevision + 1, '删除成功运行记录必须使后台旧摘要失效')
   // 总览展示开关：默认展示，关掉后只在总览页消失（任务本身照常运行）
   assert.equal(database.getScheduledTask(task.id)?.showOnOverview, true, '新建任务应默认在总览页展示')
   const hiddenWorkspace = database.setScheduledTaskOverviewVisibility(task.id, false)
@@ -145,6 +148,10 @@ try {
   database.setScheduledTaskOverviewVisibility(task.id, true)
   assert.equal(database.loadWorkspace().scheduledTasks.find((item) => item.id === task.id)?.showOnOverview, true, '重新打开后应恢复展示')
   assert.throws(() => database.setScheduledTaskOverviewVisibility('not-a-task', false), /不存在/, '不存在的任务应报错')
+
+  const reassignedTask = { ...database.getScheduledTask(task.id), ownerBotId: 'review-owner-bot', updatedAt: new Date().toISOString() }
+  database.updateScheduledTask(task.id, reassignedTask, { returnWorkspace: false })
+  assert.equal(database.getScheduledTask(task.id)?.ownerBotId, 'review-owner-bot', '编辑任务后所属 Bot 应持久化')
 
   database.deleteScheduledTask(task.id)
 

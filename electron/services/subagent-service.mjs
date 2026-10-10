@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { MAX_CONCURRENT_SUBAGENTS } from './agent-task-scheduler.mjs'
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const MAX_STORED_TASKS = 500
@@ -39,6 +40,10 @@ function publicTask(task, { includeOutput = true } = {}) {
     finishedAt: task.finishedAt,
     durationMs: task.durationMs,
     toolCallCount: task.toolCallCount,
+    phase: task.phase || '',
+    orchestrationPlanId: task.orchestrationPlanId || '',
+    planTaskId: task.planTaskId || '',
+    usage: task.usage || {},
     messages: (task.messages || []).slice(-50),
     ...(includeOutput ? { output: task.output, error: task.error, toolEvents: task.toolEvents } : {}),
   }
@@ -47,24 +52,29 @@ function publicTask(task, { includeOutput = true } = {}) {
 function visibleToContext(task, context = {}) {
   const requestId = String(context.requestId || '')
   const rootRequestId = String(context.rootRequestId || '')
-  if ((requestId && (task.parentRequestId === requestId || task.rootRequestId === requestId)) || (rootRequestId && task.rootRequestId === rootRequestId)) return true
   const sameBot = task.botId === String(context.botId || '__zsense_native__')
   const conversationId = String(context.conversationId || '')
-  return sameBot && (!conversationId || !task.conversationId || task.conversationId === conversationId)
+  if (!sameBot || (conversationId && task.conversationId !== conversationId)) return false
+  // A running model can see only its own request tree, not another run in the same conversation.
+  if (requestId || rootRequestId) return (requestId && (task.parentRequestId === requestId || task.rootRequestId === requestId)) || (rootRequestId && task.rootRequestId === rootRequestId)
+  return true
 }
 
 export class SubagentService {
-  constructor({ rootPath, maxConcurrent = 3, maxPerParent = 4, maxDepth = 4 } = {}) {
+  constructor({ rootPath, maxConcurrent = MAX_CONCURRENT_SUBAGENTS, maxPerParent = 5, maxDepth = 4 } = {}) {
     this.filePath = path.join(rootPath, 'capabilities', 'delegations.json')
-    this.maxConcurrent = Math.max(1, Math.min(8, Number(maxConcurrent) || 3))
-    this.maxPerParent = Math.max(1, Math.min(12, Number(maxPerParent) || 4))
+    this.maxConcurrent = Math.max(1, Math.min(MAX_CONCURRENT_SUBAGENTS, Number(maxConcurrent) || MAX_CONCURRENT_SUBAGENTS))
+    this.maxPerParent = Math.max(1, Math.min(12, Number(maxPerParent) || 5))
     this.maxDepth = Math.max(1, Math.min(8, Number(maxDepth) || 4))
-    this.maxTreeConcurrent = Math.min(12, this.maxConcurrent * 2)
     this.tasks = []
     this.queue = []
     this.running = new Map()
     this.runtimeContexts = new Map()
     this.waiters = new Map()
+    this.waitingParents = new Set()
+    this.parentWaitCounts = new Map()
+    this.resumeWaiters = new Set()
+    this.completedToolIds = new Map()
     this.runner = null
     this.closed = false
     fs.mkdirSync(path.dirname(this.filePath), { recursive: true })
@@ -101,17 +111,35 @@ export class SubagentService {
     this.waiters.delete(task.id)
   }
 
+  #publish(task) {
+    try { this.runtimeContexts.get(task.id)?.onTaskUpdate?.(publicTask(task)) } catch { /* Progress cannot stop execution. */ }
+  }
+
   #recordEvent(task, event) {
-    if (event?.type !== 'tool' || !['complete', 'error'].includes(event.status)) return
+    if (event?.type === 'status' || event?.type === 'agent-state') {
+      task.phase = String(event.phase || event.message || '')
+      this.#publish(task)
+      return
+    }
+    if (event?.type !== 'tool') return
+    task.phase = `${String(event.name || '')}:${String(event.status || '')}`
+    if (!['complete', 'error'].includes(event.status)) { this.#publish(task); return }
+    if (event.toolId) {
+      const completed = this.completedToolIds.get(task.id) || new Set()
+      if (completed.has(event.toolId)) return
+      completed.add(event.toolId)
+      this.completedToolIds.set(task.id, completed)
+    }
     task.toolEvents = [...(task.toolEvents || []), {
       name: String(event.name || ''),
       status: event.status,
       durationMs: Number(event.durationMs || 0),
       detail: clipped(event.detail || '', 500),
     }].slice(-50)
-    task.toolCallCount = task.toolEvents.length
+    task.toolCallCount = Number(task.toolCallCount || 0) + 1
     task.updatedAt = new Date().toISOString()
     this.#save()
+    this.#publish(task)
   }
 
   setRunner(runner) {
@@ -131,7 +159,8 @@ export class SubagentService {
     const parentTaskId = String(context.parentTaskId || '')
     const rootRequestId = String(context.rootRequestId || parentRequestId)
     const createdThisTurn = this.tasks.filter((item) => (parentTaskId ? item.parentTaskId === parentTaskId : item.parentRequestId === parentRequestId)).length
-    if (createdThisTurn >= this.maxPerParent) throw new Error(`单轮最多创建 ${this.maxPerParent} 个子 Agent 任务。`)
+    const perParentLimit = context.orchestrationPlanId ? 6 : this.maxPerParent
+    if (createdThisTurn >= perParentLimit) throw new Error(`单轮最多创建 ${perParentLimit} 个子 Agent 任务。`)
 
     const now = new Date().toISOString()
     const task = {
@@ -151,6 +180,10 @@ export class SubagentService {
       modelProvider: String(context.modelProvider || ''),
       model: String(context.model || ''),
       reasoningEffort: String(context.reasoningEffort || 'high'),
+      orchestrationPlanId: String(context.orchestrationPlanId || ''),
+      planTaskId: String(input.planTaskId || ''),
+      phase: '',
+      usage: {},
       createdAt: now,
       updatedAt: now,
       startedAt: '',
@@ -178,15 +211,10 @@ export class SubagentService {
   async #drain() {
     if (this.closed || !this.runner) return
     while (this.queue.length) {
-      let queueIndex = this.running.size < this.maxConcurrent ? 0 : -1
-      if (queueIndex < 0 && this.running.size < this.maxTreeConcurrent) {
-        queueIndex = this.queue.findIndex((id) => {
-          const candidate = this.tasks.find((item) => item.id === id)
-          return Boolean(candidate?.parentTaskId && this.running.has(candidate.parentTaskId))
-        })
-      }
-      if (queueIndex < 0) break
-      const [id] = this.queue.splice(queueIndex, 1)
+      // Nested children use the same worker limit. A parent must first enter
+      // status(waitMs) and yield its slot; resumption is gated below as well.
+      if (this.running.size - this.waitingParents.size >= this.maxConcurrent) break
+      const [id] = this.queue.splice(0, 1)
       const task = this.tasks.find((item) => item.id === id)
       if (!task || task.status !== 'queued') continue
       void this.#run(task)
@@ -200,19 +228,28 @@ export class SubagentService {
     task.updatedAt = task.startedAt
     this.running.set(task.id, task.agentRequestId)
     this.#save()
+    this.#publish(task)
     try {
       const result = await this.runner.run({ task: publicTask(task), requestId: task.agentRequestId, runtime: this.runtimeContexts.get(task.id) || {}, onEvent: (event) => this.#recordEvent(task, event) })
       task.status = task.cancelRequested ? 'cancelled' : 'completed'
       task.output = clipped(result?.output || result?.stdout || '', 120_000)
       task.error = ''
+      task.usage = result?.usage && typeof result.usage === 'object' ? { inputTokens: Number(result.usage.inputTokens || 0), outputTokens: Number(result.usage.outputTokens || 0), totalTokens: Number(result.usage.totalTokens || 0), contextUsed: Number(result.usage.contextUsed || 0), contextMax: Number(result.usage.contextMax || 0) } : {}
     } catch (error) {
       task.status = task.cancelRequested ? 'cancelled' : 'failed'
       task.error = clipped(error instanceof Error ? error.message : '子 Agent 执行失败。', 20_000)
+      task.usage = error?.usage && typeof error.usage === 'object' ? { ...error.usage } : {}
     } finally {
       task.finishedAt = new Date().toISOString()
       task.updatedAt = task.finishedAt
       task.durationMs = Date.now() - startedAt
       this.running.delete(task.id)
+      this.waitingParents.delete(task.id)
+      this.parentWaitCounts.delete(task.id)
+      this.completedToolIds.delete(task.id)
+      for (const resume of this.resumeWaiters) resume()
+      this.resumeWaiters.clear()
+      this.#publish(task)
       this.runtimeContexts.delete(task.id)
       this.#save()
       this.#notify(task)
@@ -225,7 +262,16 @@ export class SubagentService {
     if (!input.taskId) return this.list(context)
     const task = this.#find(input.taskId, context)
     if (waitMs && !TERMINAL_STATUSES.has(task.status)) {
-      await new Promise((resolve) => {
+      const parentId = String(context.parentTaskId || '')
+      const waitingParent = parentId && this.running.has(parentId) && parentId !== task.id
+      if (waitingParent) {
+        this.parentWaitCounts.set(parentId, (this.parentWaitCounts.get(parentId) || 0) + 1)
+        this.waitingParents.add(parentId)
+        for (const resume of this.resumeWaiters) resume()
+        this.resumeWaiters.clear()
+        void this.#drain()
+      }
+      try { await new Promise((resolve) => {
         const listeners = this.waiters.get(task.id) || []
         const timer = setTimeout(() => {
           const current = this.waiters.get(task.id) || []
@@ -235,7 +281,17 @@ export class SubagentService {
         const done = () => { clearTimeout(timer); resolve() }
         listeners.push(done)
         this.waiters.set(task.id, listeners)
-      })
+      }) } finally {
+        if (waitingParent) {
+          const count = (this.parentWaitCounts.get(parentId) || 1) - 1
+          if (count) this.parentWaitCounts.set(parentId, count)
+          else {
+            this.parentWaitCounts.delete(parentId)
+            // Keep status(waitMs) bounded. If no worker slot is free, the Core waits before its next model/tool step.
+            if (this.running.size - this.waitingParents.size < this.maxConcurrent) this.waitingParents.delete(parentId)
+          }
+        }
+      }
     }
     return publicTask(task)
   }
@@ -286,12 +342,16 @@ export class SubagentService {
   async cancel(input = {}, context = {}) {
     const task = this.#find(input.taskId, context)
     if (TERMINAL_STATUSES.has(task.status)) return publicTask(task)
+    if (task.cancelRequested) return publicTask(task)
     task.cancelRequested = true
+    // Explicit task cancellation also invalidates its queued/running descendants.
+    for (const child of this.tasks.filter((candidate) => candidate.parentTaskId === task.id && !TERMINAL_STATUSES.has(candidate.status))) await this.cancel({ taskId: child.id }, context)
     if (task.status === 'queued') {
       task.status = 'cancelled'
       task.finishedAt = new Date().toISOString()
       task.updatedAt = task.finishedAt
       this.queue = this.queue.filter((id) => id !== task.id)
+      this.#publish(task)
       this.runtimeContexts.delete(task.id)
       this.#save()
       this.#notify(task)
@@ -300,6 +360,36 @@ export class SubagentService {
     const requestId = this.running.get(task.id)
     if (requestId && typeof this.runner?.cancel === 'function') await this.runner.cancel(requestId)
     return publicTask(task)
+  }
+
+  async cancelRequest(requestId) {
+    const direct = this.tasks.filter((task) => task.parentRequestId === requestId && !TERMINAL_STATUSES.has(task.status))
+    for (const task of direct) await this.cancel({ taskId: task.id }, { requestId, rootRequestId: task.rootRequestId, conversationId: task.conversationId, botId: task.botId })
+  }
+
+  async waitForExecutionSlot(taskId, signal) {
+    if (!taskId || !this.waitingParents.has(taskId)) return
+    while (!this.closed && this.running.has(taskId) && this.running.size - this.waitingParents.size >= this.maxConcurrent) {
+      if (signal?.aborted) throw signal.reason || new Error('子任务等待已取消。')
+      await new Promise((resolve, reject) => {
+        const resume = () => { signal?.removeEventListener('abort', abort); this.resumeWaiters.delete(resume); resolve() }
+        const abort = () => { this.resumeWaiters.delete(resume); reject(signal.reason || new Error('子任务等待已取消。')) }
+        this.resumeWaiters.add(resume)
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+      })
+    }
+    if (signal?.aborted) throw signal.reason || new Error('子任务等待已取消。')
+    this.waitingParents.delete(taskId)
+  }
+
+  async steerRequest(requestId, message, { intent = 'supplement' } = {}) {
+    const direct = this.tasks.filter((task) => task.parentRequestId === requestId && !TERMINAL_STATUSES.has(task.status))
+    for (const task of direct) {
+      if (intent === 'adjust') { await this.cancel({ taskId: task.id }, { requestId, rootRequestId: task.rootRequestId, conversationId: task.conversationId, botId: task.botId }); continue }
+      await this.message({ taskId: task.id, message }, { requestId, rootRequestId: task.rootRequestId, conversationId: task.conversationId, botId: task.botId })
+      await this.steerRequest(this.running.get(task.id) || task.agentRequestId, message, { intent })
+    }
   }
 
   inspect() {
@@ -320,6 +410,8 @@ export class SubagentService {
   shutdown() {
     this.closed = true
     this.queue = []
+    for (const resume of this.resumeWaiters) resume()
+    this.resumeWaiters.clear()
     for (const [taskId, requestId] of this.running.entries()) {
       const task = this.tasks.find((item) => item.id === taskId)
       if (task) task.cancelRequested = true

@@ -92,8 +92,11 @@ for (const [label, source] of [['ChatDialog', dialogSource], ['NativeChatPage', 
 }
 assert(dialogSource.includes('后面接着写要交给它的指令'), '只写 /bot 名字时缺少补指令提示')
 
-// 8) App：不再有跳转式 openBotChat
-assert(!appSource.includes('openBotChat'), 'App 还留着会跳转的 openBotChat')
+// 8) App：斜杠委派不能跳转；普通会话入口可复用受保护的导航函数。
+assert.doesNotMatch(appSource, /onOpenBotChat=/, 'App 不能把跳转回调接回斜杠委派入口')
+if (appSource.includes('const openBotChat =')) {
+  assert.match(appSource, /const openBotChat = [^\n]*guardedNavigation\(/, '普通 Bot 会话跳转必须尊重未保存文件确认')
+}
 assert(!appSource.includes('botInstructionRequest'), 'App 还留着跳转用的指令请求状态')
 assert(appSource.includes('delegateBotId?: string'), 'App 的发送选项缺少 delegateBotId')
 
@@ -103,7 +106,7 @@ assert(ipcSource.includes("database.getConversation(requestedConversationId, del
 assert(ipcSource.includes('database.memoryService.recallMemories(bot.id, safeText(message)'), '委派时应召回被委派 Bot 的记忆')
 assert(ipcSource.includes('workspace.skills.filter((skill) => native && !delegateBotId ?'), '委派时应按被委派 Bot 过滤技能')
 assert(ipcSource.includes('if (!delegateBotId) database.updateConversationOptions(conversationId, botId, { modelProvider'), '委派不该改当前会话的模型设置')
-assert(ipcSource.includes('database.memoryService.retainUserMessage(bot.id, memorySourceMessage'), '委派产生的记忆应记在被委派 Bot 的 Hindsight 空间')
+assert(ipcSource.includes('database.memoryService.retainUserMessage(bot.id, memorySourceMessage'), '委派产生的记忆应记在被委派 Bot 的独立记忆空间')
 assert(ipcSource.includes('memoryConversationId = database.mirrorDelegatedExchange(') && ipcSource.includes('conversationId: memoryConversationId'), '委派记忆不能引用源空间的会话 ID')
 assert(ipcSource.includes('if (delegateBotId && conversation && conversation.botId !== botId)'), '委派时缺少会话归属校验')
 

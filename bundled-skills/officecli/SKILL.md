@@ -415,3 +415,9 @@ Example: a fundraising deck task → `officecli load_skill pitch-deck` → use t
 - **Excel exception**: for `add --type row` and `add --type col`, `--index N` is **1-based** (matches OOXML RowIndex / column letter index). `--index 5` inserts at row 5 / column 5.
 - After modifications, verify with `validate` and/or `view issues`
 - **When unsure**, run `officecli help <format> <element>` instead of guessing
+
+## ZSense integration: preserve Word editing sessions
+
+When running inside ZSense, prefer its `read_word_document`, `edit_word_document`, and `save_word_document` tools for DOCX edits. Read the current session first, retain the returned file hash and session revision, and use the selected paragraph path plus 0-based, end-exclusive UTF-16 character offsets for range edits. These tools share the desktop editor's working draft, preserve untouched text runs and hyperlinks, and reject conflicting external-file changes. Save explicitly after verifying the draft; staging alone does not modify the original file.
+
+Do not use a whole-paragraph `set --prop text=...` to replace only a few words: it can flatten rich text or duplicate hyperlink text. If structured ZSense tools are unavailable, use scoped `--find`/`--replace` for text changes and `range=START:END` for formatting, then verify the resulting content and formatting. Never start a separate terminal/resident `open` session for a document already open in ZSense, and do not overwrite the original while the desktop editor reports unsaved changes.

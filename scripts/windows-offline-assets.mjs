@@ -2,11 +2,12 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { meloBundleRoot, verifyVoiceBundle } from './voice-assets.mjs'
+export { meloBundleRoot } from './voice-assets.mjs'
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url))
 export const projectDirectory = path.resolve(scriptDirectory, '..')
 export const windowsBundleRoot = path.join(projectDirectory, 'bundled-tools', 'win32-x64')
-export const mossBundleRoot = path.join(projectDirectory, 'bundled-tools', 'shared', 'tts', 'moss')
 
 const optionalMirror = String(process.env.ZSENSE_WINDOWS_TOOLS_MIRROR || '').replace(/\/+$/, '')
 const mirrorUrl = (relativePath) => optionalMirror ? `${optionalMirror}/${relativePath.replace(/^\/+/, '')}` : ''
@@ -96,6 +97,13 @@ export const windowsSourceAssets = Object.freeze([
   },
 ])
 
+export const windowsLicenseAssets = Object.freeze([
+  { id: 'license-officecli', version: 'v1.0.149', file: 'licenses/LICENSE.officecli', archiveName: 'LICENSE.officecli', sha256: '7e282402a5a6db33995fe638bb3fe79013f9884d8f7d15a42e481c1e86aadda1', urls: ['https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/v1.0.149/LICENSE'] },
+  { id: 'license-whisper.cpp', version: 'b5130', file: 'stt/LICENSE.whisper.cpp', archiveName: 'LICENSE.whisper.cpp', sha256: '94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d', urls: ['https://raw.githubusercontent.com/ggml-org/whisper.cpp/b5130/LICENSE'] },
+  { id: 'license-openai-whisper', version: 'v20240930', file: 'stt/LICENSE.openai-whisper', archiveName: 'LICENSE.openai-whisper', sha256: 'b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d', urls: ['https://raw.githubusercontent.com/openai/whisper/v20240930/LICENSE'] },
+  { id: 'license-lark-cli', version: 'v1.0.95', file: 'licenses/LICENSE.lark-cli', archiveName: 'LICENSE.lark-cli', sha256: 'c969fc7e3af68e6bf40b0d8dd9c3dcc377eb685a2139535b203b39fdcad739ee', urls: ['https://raw.githubusercontent.com/larksuite/cli/v1.0.95/LICENSE'] },
+])
+
 export const windowsRequiredFiles = Object.freeze([
   'cloudflared.exe',
   'officecli.exe',
@@ -116,7 +124,8 @@ export const windowsRequiredFiles = Object.freeze([
   'stt/ggml-cpu-skylakex.dll',
   'stt/ggml-cpu-sse42.dll',
   'stt/ggml-cpu-x64.dll',
-  'stt/ggml-base.bin',
+  'stt/ggml-base-q5_1.bin',
+  'stt/manifest.json',
   'stt/LICENSE.whisper.cpp',
   'stt/LICENSE.openai-whisper',
   'redist/VC_redist.x64.exe',
@@ -154,6 +163,10 @@ export function listFiles(rootPath, relativePath = '') {
   return files.sort()
 }
 
+export function isWindowsToolManifestFile(file) {
+  return file !== 'manifest.json' && !file.startsWith('tts/') && !['uv.exe', 'hindsight-uv.json', 'licenses/LICENSE.uv-apache', 'licenses/LICENSE.uv-mit'].includes(file)
+}
+
 export function assertWindowsX64Pe(filePath, label = filePath) {
   const data = fs.readFileSync(filePath)
   if (data.length < 128 || data[0] !== 0x4d || data[1] !== 0x5a) throw new Error(`${label} 不是有效的 Windows PE 文件。`)
@@ -162,23 +175,7 @@ export function assertWindowsX64Pe(filePath, label = filePath) {
   if (data.readUInt16LE(header + 4) !== 0x8664) throw new Error(`${label} 不是 Windows x64 二进制。`)
 }
 
-function verifyMossBundle(rootPath = mossBundleRoot) {
-  const manifestPath = path.join(rootPath, 'manifest.json')
-  if (!fs.existsSync(manifestPath)) throw new Error('缺少 MOSS-TTS-Nano 离线模型清单。')
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
-  if (!manifest.offline || !Array.isArray(manifest.files) || !manifest.files.length) throw new Error('MOSS-TTS-Nano 清单不是完整离线清单。')
-  for (const entry of manifest.files) {
-    const repositoryDirectory = String(entry.repository || '').includes('Audio-Tokenizer') ? 'MOSS-Audio-Tokenizer-Nano-ONNX' : 'MOSS-TTS-Nano-100M-ONNX'
-    const filePath = path.join(rootPath, 'models', repositoryDirectory, String(entry.file || ''))
-    if (!fs.existsSync(filePath)) throw new Error(`MOSS-TTS-Nano 缺少：${repositoryDirectory}/${entry.file}`)
-    const stats = fs.statSync(filePath)
-    if (stats.size !== Number(entry.size)) throw new Error(`MOSS-TTS-Nano 文件大小不匹配：${entry.file}`)
-    if (sha256File(filePath) !== entry.sha256) throw new Error(`MOSS-TTS-Nano 文件校验失败：${entry.file}`)
-  }
-  return manifest.files.length
-}
-
-export function verifyWindowsOfflineBundle({ rootPath = windowsBundleRoot, mossRootPath = mossBundleRoot } = {}) {
+export function verifyWindowsOfflineBundle({ rootPath = windowsBundleRoot, meloRootPath = meloBundleRoot } = {}) {
   const manifestPath = path.join(rootPath, 'manifest.json')
   if (!fs.existsSync(manifestPath)) throw new Error('Windows 完整离线工具清单不存在，请先运行 npm run tools:prepare:win。')
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
@@ -197,7 +194,7 @@ export function verifyWindowsOfflineBundle({ rootPath = windowsBundleRoot, mossR
   for (const relativePath of windowsRequiredFiles) {
     if (!manifestFiles[relativePath]) throw new Error(`Windows 清单缺少必需文件：${relativePath}`)
   }
-  const actualFiles = listFiles(rootPath).filter((file) => file !== 'manifest.json' && !file.startsWith('tts/'))
+  const actualFiles = listFiles(rootPath).filter(isWindowsToolManifestFile)
   const declaredFiles = Object.keys(manifestFiles).sort()
   if (actualFiles.join('\n') !== declaredFiles.join('\n')) {
     const actualSet = new Set(actualFiles)
@@ -207,15 +204,15 @@ export function verifyWindowsOfflineBundle({ rootPath = windowsBundleRoot, mossR
     throw new Error(`Windows 离线目录与清单不一致：缺失 ${missing.slice(0, 6).join('、') || '无'}；未登记 ${extra.slice(0, 6).join('、') || '无'}。`)
   }
   for (const relativePath of declaredFiles) {
+    if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).some((part) => !part || part === '.' || part === '..')) throw new Error('Windows 清单文件路径无效。')
     const filePath = path.join(rootPath, relativePath)
     const stats = fs.statSync(filePath)
     const expected = manifestFiles[relativePath]
     if (stats.size !== expected.size || sha256File(filePath) !== expected.sha256) throw new Error(`Windows 文件校验失败：${relativePath}`)
   }
   for (const relativePath of windowsX64PeFiles) assertWindowsX64Pe(path.join(rootPath, relativePath), relativePath)
-  if (sha256File(path.join(rootPath, 'stt', 'ggml-base.bin')) !== '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe') {
-    throw new Error('Windows Whisper 多语言模型校验失败。')
-  }
-  const mossFiles = verifyMossBundle(mossRootPath)
-  return { files: declaredFiles.length, bytes: declaredFiles.reduce((sum, relativePath) => sum + manifestFiles[relativePath].size, 0), mossFiles }
+  for (const asset of windowsLicenseAssets) if (sha256File(path.join(rootPath, asset.file)) !== asset.sha256) throw new Error(`Windows 原始许可证校验失败：${asset.file}`)
+  const voice = verifyVoiceBundle({ platformKey: 'win32-x64', rootPath, meloRootPath })
+  for (const file of ['sherpa-onnx-offline-tts.exe', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll']) assertWindowsX64Pe(path.join(rootPath, 'tts', file), `tts/${file}`)
+  return { files: declaredFiles.length, bytes: declaredFiles.reduce((sum, relativePath) => sum + manifestFiles[relativePath].size, 0), ...voice }
 }

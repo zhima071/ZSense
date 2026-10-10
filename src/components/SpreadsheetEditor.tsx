@@ -81,6 +81,7 @@ interface UniverRangeFacade {
   splitTextToColumns: (treatMultipleDelimitersAsOne?: boolean, delimiter?: unknown) => void
   setHyperLink: (url: string, label?: string) => Promise<boolean>
   setDataValidation: (rule: unknown) => unknown
+  activate: () => unknown
   attachRangePopup: (popup: {
     componentKey: () => React.ReactNode
     direction?: 'bottom-center' | 'top-center'
@@ -92,6 +93,7 @@ interface UniverRangeFacade {
 }
 
 interface UniverWorksheetFacade {
+  activate: () => unknown
   getSheetName: () => string
   getActiveRange: () => UniverRangeFacade | null
   getRange: (notation: string) => UniverRangeFacade
@@ -109,11 +111,14 @@ interface UniverWorksheetFacade {
 }
 
 interface UniverWorkbookFacade {
+  getId: () => string
   getActiveSheet: () => UniverWorksheetFacade
+  getSheetByName: (name: string) => UniverWorksheetFacade | null
 }
 
 interface UniverFacade {
   getActiveWorkbook: () => UniverWorkbookFacade | null
+  syncExecuteCommand: (id: string, params: Record<string, unknown>) => boolean
   newDataValidation: () => {
     requireValueInList: (values: string[]) => unknown
     requireNumberBetween: (minimum: number, maximum: number) => unknown
@@ -194,6 +199,7 @@ const officeThemeToUniver: Record<string, number> = {
 }
 const univerThemeToOffice = ['DK1', 'LT1', 'DK2', 'LT2', 'ACCENT1', 'ACCENT2', 'ACCENT3', 'ACCENT4', 'ACCENT5', 'ACCENT6', 'HLINK', 'FOLHLINK']
 const styleKeys: Array<keyof OfficeSheetCellStyle> = ['fontName', 'fontSize', 'bold', 'italic', 'underline', 'strike', 'fontColor', 'fill', 'numberFormat', 'horizontalAlignment', 'verticalAlignment', 'wrapText']
+const cellStyleDefaults: OfficeSheetCellStyle = { fontName: 'Calibri', fontSize: 11, bold: false, italic: false, underline: 'none', strike: false, fontColor: '#000000', fill: 'none', numberFormat: 'General', horizontalAlignment: 'left', verticalAlignment: 'bottom', wrapText: false }
 
 function addressFromPosition(row: number, column: number) {
   let current = column + 1
@@ -326,15 +332,41 @@ function sameValue(left: unknown, right: unknown) {
   return left === right || String(left ?? '') === String(right ?? '')
 }
 
+function comparableStyleValue(style: OfficeSheetCellStyle | undefined, key: keyof OfficeSheetCellStyle) {
+  const value = style?.[key]
+  return value === undefined || value === '' ? cellStyleDefaults[key] : value
+}
+
 function sameCellState(left?: OfficeSheetCellChange, right?: OfficeSheetCellChange) {
   if (!left || !right || !sameValue(left.value, right.value) || (left.formula || '') !== (right.formula || '')) return false
-  return styleKeys.every((key) => left.style?.[key] === right.style?.[key])
+  return styleKeys.every((key) => comparableStyleValue(left.style, key) === comparableStyleValue(right.style, key))
+}
+
+function canApplyWorkbookIncrementally(previous: OfficeWorkbookGrid, next: OfficeWorkbookGrid, operations?: unknown[]) {
+  // Structural/feature edits still use a full reload; ordinary Agent cell edits
+  // must not recreate Univer, its formula worker, selection, or undo stack.
+  return !operations?.length && previous.sheets.length === next.sheets.length && previous.sheets.every((sheet, index) => {
+    const nextSheet = next.sheets[index]
+    return sheet.id === nextSheet.id && sheet.sheet === nextSheet.sheet
+      && sheet.rowCount === nextSheet.rowCount && sheet.columnCount === nextSheet.columnCount
+  })
+}
+
+function incrementalCellData(state: OfficeSheetCellChange): ICellData {
+  const style = univerStyle(state.style)
+  return {
+    v: state.formula ? null : state.value ?? '',
+    f: state.formula || null,
+    // Explicit nulls remove a previous formula/known style instead of merging
+    // its stale fields. Leave unsupported metadata (e.g. cell notes) untouched.
+    s: style ? { ff: null, fs: null, bl: null, it: null, ul: null, st: null, cl: null, bg: null, n: null, ht: null, vt: null, tb: null, ...style } as unknown as IStyleData : null,
+  }
 }
 
 function changedCellState(baseline: OfficeSheetCellChange | undefined, current: OfficeSheetCellChange) {
   const original = baseline || { sheet: current.sheet, cell: current.cell, value: '', formula: '', style: undefined }
   const contentChanged = !sameValue(original.value, current.value) || (original.formula || '') !== (current.formula || '')
-  const style = Object.fromEntries(styleKeys.flatMap((key) => original.style?.[key] === current.style?.[key] ? [] : [[key, current.style?.[key]]])) as OfficeSheetCellStyle
+  const style = Object.fromEntries(styleKeys.flatMap((key) => comparableStyleValue(original.style, key) === comparableStyleValue(current.style, key) ? [] : [[key, comparableStyleValue(current.style, key)]])) as OfficeSheetCellStyle
   if (!contentChanged && !Object.keys(style).some((key) => style[key as keyof OfficeSheetCellStyle] !== undefined)) return null
   return { ...current, contentChanged, style: Object.keys(style).length ? style : undefined }
 }
@@ -427,13 +459,21 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
   const clientIdRef = useRef(`editor-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`}`)
   const pendingChangesRef = useRef(new Map<string, OfficeSheetCellChange>())
   const baselineCellsRef = useRef(new Map<string, OfficeSheetCellChange>())
+  const renderedCellsRef = useRef(new Map<string, OfficeSheetCellChange>())
   const usedCellKeysRef = useRef(new Set<string>())
   const stageQueueRef = useRef<Promise<void>>(Promise.resolve())
   const stageErrorRef = useRef<unknown>(null)
+  const failedStageChangesRef = useRef(new Map<string, OfficeSheetCellChange>())
   const sessionPendingCountRef = useRef(0)
   const sessionRevisionRef = useRef(0)
   const activeFileRef = useRef(document.filePath)
   const mountedRef = useRef(true)
+  const generationRef = useRef(0)
+  const queuedStageCountRef = useRef(0)
+  const saveInFlightRef = useRef(false)
+  const restoreSelectionRef = useRef<{ sheet: string; notation: string } | null>(null)
+  const callbacksRef = useRef({ onDocumentChange, onFeedback, onDirtyChange, workspacePath })
+  callbacksRef.current = { onDocumentChange, onFeedback, onDirtyChange, workspacePath }
   const aiPopupRef = useRef<{ dispose: () => void } | null>(null)
   const onAskAIRef = useRef(onAskAI)
   const [reloadKey, setReloadKey] = useState(0)
@@ -454,82 +494,105 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
   useEffect(() => { onAskAIRef.current = onAskAI }, [onAskAI])
 
   const updateSessionState = useCallback((count: number, revision?: number) => {
+    if (revision && revision < sessionRevisionRef.current) return
     const normalizedCount = Math.max(0, Number(count || 0))
     sessionPendingCountRef.current = normalizedCount
-    setPendingCount(normalizedCount)
+    const visibleCount = Math.max(normalizedCount, pendingChangesRef.current.size, failedStageChangesRef.current.size, queuedStageCountRef.current ? 1 : 0)
+    setPendingCount(visibleCount)
     if (Number.isFinite(revision) && Number(revision) > 0) {
       sessionRevisionRef.current = Number(revision)
       setSessionRevision(Number(revision))
     }
-    onDirtyChange?.(normalizedCount > 0)
-  }, [onDirtyChange])
+    callbacksRef.current.onDirtyChange?.(visibleCount > 0)
+  }, [])
 
   const stageChanges = useCallback((changes: OfficeSheetCellChange[]) => {
     if (!changes.length || !window.zsenseDesktop) return
+    const filePath = activeFileRef.current
+    const generation = generationRef.current
+    const isCurrent = () => mountedRef.current && generation === generationRef.current && filePath === activeFileRef.current
+    queuedStageCountRef.current += 1
     stageQueueRef.current = stageQueueRef.current.catch(() => undefined).then(async () => {
-      stageErrorRef.current = null
       const result = await unwrapDesktop(window.zsenseDesktop!.office.stageCells({
-        filePath: activeFileRef.current,
+        filePath,
         changes,
         clientId: clientIdRef.current,
       }))
-      if (!mountedRef.current) return
+      if (!isCurrent()) return
+      for (const change of changes) {
+        const key = `${change.sheet}!${change.cell}`
+        if (sameCellState(failedStageChangesRef.current.get(key), change)) failedStageChangesRef.current.delete(key)
+      }
+      if (!failedStageChangesRef.current.size) stageErrorRef.current = null
+      queuedStageCountRef.current = Math.max(0, queuedStageCountRef.current - 1)
       updateSessionState(result.pendingCount, result.revision)
+      if (!saveInFlightRef.current) setSaveState(failedStageChangesRef.current.size ? 'error' : result.dirty || pendingChangesRef.current.size || queuedStageCountRef.current ? 'dirty' : 'ready')
     }).catch((reason) => {
+      if (!isCurrent()) return
+      queuedStageCountRef.current = Math.max(0, queuedStageCountRef.current - 1)
       stageErrorRef.current = reason
-      if (!mountedRef.current) return
+      for (const change of changes) {
+        const key = `${change.sheet}!${change.cell}`
+        failedStageChangesRef.current.set(key, renderedCellsRef.current.get(key) || change)
+      }
       setSaveState('error')
-      onDirtyChange?.(true)
-      onFeedback({ tone: 'error', message: `表格实时会话同步失败：${errorMessage(reason)}` })
+      callbacksRef.current.onDirtyChange?.(true)
+      callbacksRef.current.onFeedback({ tone: 'error', message: `表格实时会话同步失败：${errorMessage(reason)}` })
     })
-  }, [onDirtyChange, onFeedback, updateSessionState])
+  }, [updateSessionState])
 
   const persistChanges = useCallback(async () => {
-    const pendingSnapshot = new Map(pendingChangesRef.current)
-    const nextChanges = [...pendingSnapshot.entries()].flatMap(([key, current]) => {
-      const changed = changedCellState(baselineCellsRef.current.get(key), current)
-      return changed ? [changed] : []
-    })
-    if (!window.zsenseDesktop) return
-    if (!nextChanges.length && !sessionPendingCountRef.current) {
-      pendingChangesRef.current.clear()
-      if (mountedRef.current) {
-        updateSessionState(0)
-        setSaveState('saved')
-      }
-      return
-    }
-    if (mountedRef.current) setSaveState('saving')
+    if (!window.zsenseDesktop || saveInFlightRef.current) return
+    const filePath = activeFileRef.current
+    const generation = generationRef.current
+    const isCurrent = () => mountedRef.current && generation === generationRef.current && filePath === activeFileRef.current
+    saveInFlightRef.current = true
+    setSaveState('saving')
     try {
-      if (nextChanges.length) stageChanges(nextChanges)
-      await stageQueueRef.current
+      // Every user edit (including an undo back to baseline) is already staged.
+      // Restaging here would both double IPC work and overwrite newer Agent edits.
+      let queuedStage: Promise<void>
+      do {
+        queuedStage = stageQueueRef.current
+        await queuedStage
+        if (!isCurrent()) return
+      } while (queuedStage !== stageQueueRef.current)
+      if (!isCurrent()) return
+      if (failedStageChangesRef.current.size) {
+        stageChanges([...failedStageChangesRef.current.values()])
+        await stageQueueRef.current
+        if (!isCurrent()) return
+      }
       if (stageErrorRef.current) throw stageErrorRef.current
-      const result = await unwrapDesktop(window.zsenseDesktop.office.saveWorkbook({ filePath: activeFileRef.current, clientId: clientIdRef.current }))
-      if (!mountedRef.current) return
-      if (result.document) onDocumentChange(result.document)
+      const pendingSnapshot = new Map(pendingChangesRef.current)
+      const result = await unwrapDesktop(window.zsenseDesktop.office.saveWorkbook({ filePath, clientId: clientIdRef.current }))
+      if (!isCurrent()) return
+      if (result.document) callbacksRef.current.onDocumentChange(result.document)
       for (const [key, state] of pendingSnapshot) {
         baselineCellsRef.current.set(key, state)
         if (sameCellState(pendingChangesRef.current.get(key), state)) pendingChangesRef.current.delete(key)
       }
       setLastSavedAt(new Date())
       updateSessionState(result.pendingCount, result.revision)
-      setSaveState(result.dirty ? 'dirty' : 'saved')
-      onFeedback(null)
+      setSaveState(result.dirty || pendingChangesRef.current.size || queuedStageCountRef.current ? 'dirty' : 'saved')
+      callbacksRef.current.onFeedback(null)
     } catch (reason) {
-      if (!mountedRef.current) return
+      if (!isCurrent()) return
       const message = errorMessage(reason)
       setSaveState('error')
-      onDirtyChange?.(true)
-      onFeedback({ tone: 'error', message: `表格保存失败：${message}` })
+      callbacksRef.current.onDirtyChange?.(true)
+      callbacksRef.current.onFeedback({ tone: 'error', message: `表格保存失败：${message}` })
+    } finally {
+      if (isCurrent()) saveInFlightRef.current = false
     }
-  }, [onDirtyChange, onDocumentChange, onFeedback, stageChanges, updateSessionState])
+  }, [stageChanges, updateSessionState])
 
   const markDirty = useCallback(() => {
-    const count = Math.max(sessionPendingCountRef.current, pendingChangesRef.current.size)
+    const count = Math.max(sessionPendingCountRef.current, pendingChangesRef.current.size, queuedStageCountRef.current ? 1 : 0)
     setPendingCount(count)
     setSaveState('dirty')
-    onDirtyChange?.(true)
-  }, [onDirtyChange])
+    callbacksRef.current.onDirtyChange?.(true)
+  }, [])
 
   const activeSheetContext = useCallback(() => {
     const api = univerApiRef.current
@@ -544,13 +607,17 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
     if (!window.zsenseDesktop) throw new Error('Excel 功能只能在 ZSense 桌面应用中使用。')
     const stageOperations = window.zsenseDesktop.office.stageOperations
     if (typeof stageOperations !== 'function') throw new Error('Excel 功能桥接版本不一致。请完全退出 ZSense（包括仍在运行的旧版本）后重新打开新版应用。')
+    const filePath = activeFileRef.current
+    const generation = generationRef.current
     const result = await unwrapDesktop(stageOperations({
-      filePath: activeFileRef.current,
+      filePath,
       operations: [operation],
       clientId: clientIdRef.current,
     }))
-    updateSessionState(result.pendingCount, result.revision)
-    setSaveState('dirty')
+    if (mountedRef.current && generation === generationRef.current && filePath === activeFileRef.current) {
+      updateSessionState(result.pendingCount, result.revision)
+      setSaveState('dirty')
+    }
     return result
   }, [updateSessionState])
 
@@ -788,20 +855,39 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
   useEffect(() => {
     mountedRef.current = true
     activeFileRef.current = document.filePath
-    const host = containerRef.current
+    const generation = ++generationRef.current
+    const container = containerRef.current
+    // Univer owns a nested React root. Give every generation its own child so
+    // deferred teardown cannot remove nodes belonging to the next workbook.
+    const host = container ? globalThis.document.createElement('div') : null
+    if (container && host) container.replaceChildren(host)
     let disposed = false
     let eventDisposable: { dispose: () => void } | null = null
     let selectionDisposable: { dispose: () => void } | null = null
     let unsubscribeSession: (() => void) | null = null
     let univerInstance: { dispose: () => void } | null = null
     let worker: Worker | null = null
+    let applyingExternalCells = false
+    let externalQueue = Promise.resolve()
+    let loadedWorkbook: OfficeWorkbookGrid | null = null
+    sessionRevisionRef.current = 0
+    sessionPendingCountRef.current = 0
+    queuedStageCountRef.current = 0
+    stageQueueRef.current = Promise.resolve()
+    stageErrorRef.current = null
+    failedStageChangesRef.current.clear()
+    saveInFlightRef.current = false
     setSaveState('loading')
     setLoadError('')
+    setLastSavedAt(null)
+    setEditorDark(localStorage.getItem(`zsense:sheet-dark:${document.filePath}`) === '1')
+    setGridlinesHidden(localStorage.getItem(`zsense:sheet-gridlines:${document.filePath}`) === '1')
     setPendingCount(0)
     setSessionRevision(0)
     setWorkbookSummary({ sheets: 0, usedCells: 0 })
     pendingChangesRef.current.clear()
     baselineCellsRef.current.clear()
+    renderedCellsRef.current.clear()
     usedCellKeysRef.current.clear()
 
     const initialize = async () => {
@@ -818,6 +904,8 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
         for (const [address, cell] of Object.entries(sheet.cells)) baselineCells.set(`${sheet.sheet}!${address}`, editorCellState(sheet.sheet, address, cell))
       }
       baselineCellsRef.current = baselineCells
+      renderedCellsRef.current = new Map(baselineCells)
+      loadedWorkbook = workbookData
       updateSessionState(workbookData.pendingCount || 0, workbookData.sessionRevision)
       setWorkbookSummary({ sheets: workbookData.sheets.length, usedCells: usedCellKeys.size })
       const formulaWorker = new UniverWorker()
@@ -872,6 +960,13 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
       univerApiRef.current = univerAPI as unknown as UniverFacade
       const workbook = univerAPI.createWorkbook(workbookSnapshot(workbookData, document.name))
       if (localStorage.getItem(`zsense:sheet-gridlines:${document.filePath}`) === '1') workbook.getActiveSheet().setHiddenGridlines(true)
+      const restoreSelection = restoreSelectionRef.current
+      restoreSelectionRef.current = null
+      if (restoreSelection) {
+        const worksheet = workbook.getSheetByName(restoreSelection.sheet)
+        worksheet?.activate()
+        worksheet?.getRange(restoreSelection.notation).activate()
+      }
       if (onAskAIRef.current) {
         selectionDisposable = univerAPI.addEvent(univerAPI.Event.SelectionChanged, ({ worksheet, selections }) => {
           aiPopupRef.current?.dispose()
@@ -884,7 +979,7 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
           const popup = worksheet.getRange(notation).attachRangePopup({
             componentKey: () => <SpreadsheetSelectionAI
               filePath={activeFileRef.current}
-              workspacePath={workspacePath}
+              workspacePath={callbacksRef.current.workspacePath}
               sheet={sheet}
               notation={notation}
               onAskAI={(prompt, behavior) => onAskAIRef.current?.(prompt, behavior)}
@@ -899,20 +994,81 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
         })
       }
       unsubscribeSession = window.zsenseDesktop.office.onSessionChanged((sessionEvent) => {
-        if (disposed || sessionEvent.filePath !== activeFileRef.current || sessionEvent.sourceClientId === clientIdRef.current) return
-        if (sessionEvent.revision <= sessionRevisionRef.current) return
-        sessionRevisionRef.current = sessionEvent.revision
-        updateSessionState(sessionEvent.pendingCount, sessionEvent.revision)
-        setSaveState(sessionEvent.dirty ? 'dirty' : 'saved')
-        void stageQueueRef.current.finally(() => {
-          if (!disposed) setReloadKey((value) => value + 1)
+        if (disposed || sessionEvent.filePath !== activeFileRef.current) return
+        if (sessionEvent.sourceClientId === clientIdRef.current && sessionEvent.kind !== 'saved') return
+        // Reconcile our own saves too: disk writeback can recompute formulas or
+        // shift cells, so a saved revision is the new undo/diff baseline.
+        if (sessionEvent.revision < sessionRevisionRef.current || sessionEvent.revision === sessionRevisionRef.current && sessionEvent.kind !== 'saved') return
+        externalQueue = externalQueue.catch(() => undefined).then(async () => {
+          await stageQueueRef.current
+          if (disposed || generation !== generationRef.current) return
+          const localAtRead = new Map(pendingChangesRef.current)
+          const externallyTouched = new Set((sessionEvent.changes || []).map(change => `${change.sheet}!${change.cell}`))
+          const next = await unwrapDesktop(window.zsenseDesktop!.office.getWorkbook({ filePath: document.filePath }))
+          if (disposed || generation !== generationRef.current) return
+          if (!loadedWorkbook || sessionEvent.kind === 'discarded' || !canApplyWorkbookIncrementally(loadedWorkbook, next, sessionEvent.operations)) {
+            const worksheet = workbook.getActiveSheet()
+            const range = worksheet.getActiveRange()
+            restoreSelectionRef.current = range ? { sheet: worksheet.getSheetName(), notation: range.getA1Notation() } : null
+            setReloadKey((value) => value + 1)
+            return
+          }
+          // The backend session is authoritative, but a newer local edit made
+          // while getWorkbook was in flight must not be erased by its response.
+          applyingExternalCells = true
+          try {
+            for (const sheet of next.sheets) {
+              const oldSheet = loadedWorkbook.sheets.find((item) => item.id === sheet.id)!
+              const addresses = new Set([...Object.keys(oldSheet.cells), ...Object.keys(sheet.cells)])
+              const patch: Record<number, Record<number, ICellData>> = {}
+              for (const address of addresses) {
+                const key = `${sheet.sheet}!${address}`
+                const state = editorCellState(sheet.sheet, address, sheet.cells[address])
+                const currentLocal = pendingChangesRef.current.get(key)
+                const capturedLocal = localAtRead.get(key)
+                const newerLocalEdit = Boolean(currentLocal && !sameCellState(currentLocal, capturedLocal))
+                  || Boolean(capturedLocal && !currentLocal && !sameCellState(renderedCellsRef.current.get(key), state))
+                if (sessionEvent.kind === 'saved' && !next.dirty) baselineCellsRef.current.set(key, state)
+                // A failed local sync is still a recoverable draft. An Agent
+                // update to another cell cannot silently discard that draft.
+                if (newerLocalEdit || failedStageChangesRef.current.has(key) && !externallyTouched.has(key)) continue
+                if (externallyTouched.has(key)) failedStageChangesRef.current.delete(key)
+                if (!sameCellState(renderedCellsRef.current.get(key), state)) {
+                  const { row, column } = positionFromAddress(address)
+                  ;(patch[row] ||= {})[column] = incrementalCellData(state)
+                  baselineCellsRef.current.set(key, state)
+                  pendingChangesRef.current.delete(key)
+                  renderedCellsRef.current.set(key, state)
+                } else if (sessionEvent.kind === 'saved' && !next.dirty && sameCellState(currentLocal, state)) {
+                  pendingChangesRef.current.delete(key)
+                }
+                if (isUsedCell(state)) usedCellKeysRef.current.add(key)
+                else usedCellKeysRef.current.delete(key)
+              }
+              if (Object.keys(patch).length && !univerAPI.syncExecuteCommand('sheet.mutation.set-range-values', {
+                unitId: workbook.getId(), subUnitId: sheet.id, cellValue: patch,
+              })) throw new Error('表格增量更新未能应用，请重新读取工作簿。')
+            }
+          } finally {
+            applyingExternalCells = false
+          }
+          loadedWorkbook = next
+          if (!failedStageChangesRef.current.size) stageErrorRef.current = null
+          setWorkbookSummary({ sheets: next.sheets.length, usedCells: usedCellKeysRef.current.size })
+          updateSessionState(next.pendingCount || 0, next.sessionRevision)
+          if (!saveInFlightRef.current) setSaveState(failedStageChangesRef.current.size ? 'error' : next.dirty || pendingChangesRef.current.size || queuedStageCountRef.current ? 'dirty' : 'saved')
+          if (sessionEvent.kind === 'saved') setLastSavedAt(new Date())
+        }).catch((reason) => {
+          if (disposed) return
+          callbacksRef.current.onFeedback({ tone: 'error', message: `表格同步更新失败：${errorMessage(reason)}` })
+          setSaveState('error')
         })
       })
       eventDisposable = univerAPI.addEvent(univerAPI.Event.SheetValueChanged, ({ effectedRanges }) => {
-        if (disposed) return
-        // workbook.save() 会序列化整本工作簿；大型表格里即使只输入一个字符也可能卡顿。
-        // 大多数变更直接带样式对象，只有 Univer 返回样式 ID 时才按需取一次样式表。
-        let styleSnapshot: ReturnType<typeof workbook.save> | null = null
+        if (disposed || applyingExternalCells) return
+        // Resolve style IDs only for the touched cells. Serializing the whole
+        // workbook just to obtain its style table makes formatted sheets lag.
+        const resolvedStyles = new Map<string, IStyleData | null>()
         let queued = 0
         const stagedChanges: OfficeSheetCellChange[] = []
         for (const effectedRange of effectedRanges) {
@@ -925,15 +1081,17 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
               queued += 1
               if (queued > MAX_PENDING_CELLS) {
                 setSaveState('error')
-                onDirtyChange?.(true)
-                onFeedback({ tone: 'error', message: `一次修改超过 ${MAX_PENDING_CELLS} 个单元格，无法完整加入待保存列表，请撤销后缩小选择范围再操作。` })
+                callbacksRef.current.onDirtyChange?.(true)
+                callbacksRef.current.onFeedback({ tone: 'error', message: `一次修改超过 ${MAX_PENDING_CELLS} 个单元格，无法完整加入待保存列表，请撤销后缩小选择范围再操作。` })
                 return
               }
               const cellData = dataGrid[row - startRow]?.[column - startColumn] || null
               const rawStyle = cellData?.s
-              const resolvedStyle = typeof rawStyle === 'string'
-                ? (styleSnapshot ||= workbook.save()).styles?.[rawStyle]
-                : rawStyle
+              let resolvedStyle = typeof rawStyle === 'string' ? resolvedStyles.get(rawStyle) : rawStyle
+              if (typeof rawStyle === 'string' && !resolvedStyles.has(rawStyle)) {
+                resolvedStyle = worksheet.getRange(addressFromPosition(row, column)).getCellStyleData('cell')
+                resolvedStyles.set(rawStyle, resolvedStyle || null)
+              }
               const formula = typeof cellData?.f === 'string' ? cellData.f : ''
               const value = formula ? null : cellData?.v ?? ''
               const change: OfficeSheetCellChange = {
@@ -942,15 +1100,21 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
                 value: typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? value : '',
                 formula,
                 style: cellStyle(resolvedStyle),
+                styleSnapshot: true,
               }
               const changeKey = `${change.sheet}!${change.cell}`
-              pendingChangesRef.current.set(changeKey, change)
-              const stagedChange = changedCellState(baselineCellsRef.current.get(changeKey), change)
-              if (stagedChange) stagedChanges.push(stagedChange)
-              if (isUsedCell(change)) usedCellKeysRef.current.add(changeKey)
-              else usedCellKeysRef.current.delete(changeKey)
+              if (!sameCellState(renderedCellsRef.current.get(changeKey), change)) stagedChanges.push(change)
             }
           }
+        }
+        if (!stagedChanges.length) return
+        for (const change of stagedChanges) {
+          const key = `${change.sheet}!${change.cell}`
+          renderedCellsRef.current.set(key, change)
+          if (changedCellState(baselineCellsRef.current.get(key), change)) pendingChangesRef.current.set(key, change)
+          else pendingChangesRef.current.delete(key)
+          if (isUsedCell(change)) usedCellKeysRef.current.add(key)
+          else usedCellKeysRef.current.delete(key)
         }
         setWorkbookSummary((current) => ({ ...current, usedCells: usedCellKeysRef.current.size }))
         stageChanges(stagedChanges)
@@ -974,12 +1138,19 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
       aiPopupRef.current = null
       unsubscribeSession?.()
       pendingChangesRef.current.clear()
+      renderedCellsRef.current.clear()
       univerApiRef.current = null
-      univerInstance?.dispose()
-      worker?.terminate()
-      host?.replaceChildren()
+      // A nested React root must not synchronously unmount inside the parent
+      // root's effect cleanup; that can race the new render and removeChild.
+      const retiredUniver = univerInstance
+      const retiredWorker = worker
+      queueMicrotask(() => {
+        retiredUniver?.dispose()
+        retiredWorker?.terminate()
+        host?.remove()
+      })
     }
-  }, [document.filePath, document.name, markDirty, onDirtyChange, onFeedback, reloadKey, stageChanges, updateSessionState, workspacePath])
+  }, [document.filePath, markDirty, reloadKey, stageChanges, updateSessionState])
 
   useEffect(() => () => { mountedRef.current = false }, [])
 
@@ -987,10 +1158,10 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return
       event.preventDefault()
-      if ((sessionPendingCountRef.current || pendingChangesRef.current.size) && saveState !== 'saving') void persistChanges()
+      if ((sessionPendingCountRef.current || pendingChangesRef.current.size || queuedStageCountRef.current) && saveState !== 'saving') void persistChanges()
     }
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
-      if (!sessionPendingCountRef.current && !pendingChangesRef.current.size) return
+      if (!sessionPendingCountRef.current && !pendingChangesRef.current.size && !queuedStageCountRef.current && !failedStageChangesRef.current.size) return
       event.preventDefault()
       event.returnValue = ''
     }
@@ -1005,14 +1176,20 @@ export function SpreadsheetEditor({ document, workspacePath, onDocumentChange, o
   const refresh = async () => {
     if ((sessionPendingCountRef.current || pendingChangesRef.current.size) && !window.confirm('重新读取会放弃当前未保存的修改，确定继续吗？')) return
     if (!window.zsenseDesktop) return
+    const filePath = activeFileRef.current
+    const generation = generationRef.current
+    const isCurrent = () => mountedRef.current && generation === generationRef.current && filePath === activeFileRef.current
     setSaveState('loading')
     try {
       await stageQueueRef.current
-      const workbook = await unwrapDesktop(window.zsenseDesktop.office.discardWorkbook({ filePath: activeFileRef.current, clientId: clientIdRef.current }))
+      if (!isCurrent()) return
+      const workbook = await unwrapDesktop(window.zsenseDesktop.office.discardWorkbook({ filePath, clientId: clientIdRef.current }))
+      if (!isCurrent()) return
       pendingChangesRef.current.clear()
       updateSessionState(0, workbook.sessionRevision)
       setReloadKey((value) => value + 1)
     } catch (reason) {
+      if (!isCurrent()) return
       setSaveState('error')
       onFeedback({ tone: 'error', message: `重新读取 Excel 失败：${errorMessage(reason)}` })
     }

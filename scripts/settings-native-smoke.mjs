@@ -167,7 +167,9 @@ try {
   const modelPage = fs.readFileSync(new URL('../src/components/ModelPage.tsx', import.meta.url), 'utf8')
   const app = fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8')
   const composerToolbar = fs.readFileSync(new URL('../src/components/ChatComposerToolbar.tsx', import.meta.url), 'utf8')
+  const composerControlTooltip = fs.readFileSync(new URL('../src/components/ChatComposerControlTooltip.tsx', import.meta.url), 'utf8')
   const composerResizeHandle = fs.readFileSync(new URL('../src/components/ChatComposerResizeHandle.tsx', import.meta.url), 'utf8')
+  const chatSendActions = fs.readFileSync(new URL('../src/components/ChatSendActions.tsx', import.meta.url), 'utf8')
   const chatMessageMeta = fs.readFileSync(new URL('../src/components/ChatMessageMeta.tsx', import.meta.url), 'utf8')
   const clipboardService = fs.readFileSync(new URL('../src/services/clipboard.ts', import.meta.url), 'utf8')
   const officeArtifacts = fs.readFileSync(new URL('../src/services/office-artifacts.ts', import.meta.url), 'utf8')
@@ -221,9 +223,9 @@ try {
   assert(app.includes('setAvailableModelConfigurations') && app.includes('applySnapshot(await unwrapDesktop(window.zsenseDesktop.data.loadWorkspace()))'), '前端获取官网模型后没有刷新统一可用模型状态')
   assert(app.includes('savedModelConfigurations={availableModelConfigurations}') && app.includes('models={availableModelConfigurations}'), '官网模型没有同步到对话、Bot 与定时任务选择器')
   assert(composerToolbar.includes('selectedModelOption?.contextWindow') && composerToolbar.includes('synchronizedContextMax'), '对话框没有使用已同步模型的上下文长度覆盖旧用量上限')
-  assert(/function compactUsageLabel\(usage\?: ChatUsage\) \{[\s\S]*?return `\$\{Math\.round\(percent\)\}%`[\s\S]*?\}/.test(composerToolbar), '上下文缩略信息没有只显示使用百分比')
-  const compactUsageBody = composerToolbar.match(/function compactUsageLabel\(usage\?: ChatUsage\) \{([\s\S]*?)\n\}/)?.[1] || ''
-  assert(!compactUsageBody.includes('compactTokens'), '上下文缩略信息仍显示已使用 Token 数')
+  assert(composerToolbar.includes('className="chat-context-ring"') && composerToolbar.includes('viewBox="0 0 28 28"') && composerToolbar.includes('className="chat-context-ring-value"') && composerToolbar.includes('pathLength={100}') && composerToolbar.includes('strokeDashoffset={100 - percent}'), '上下文使用量没有以规范化圆形进度条显示')
+  assert(composerToolbar.includes('Number.isFinite(value)') && composerToolbar.includes('contextPercent(effectiveUsage?.contextPercent)'), '上下文进度条没有清理非法用量或限制在 0–100 范围')
+  assert(!composerToolbar.includes('compactUsageLabel') && !composerToolbar.includes('<Gauge'), '上下文按钮仍残留旧的仪表图标和百分比文字')
   assert(composerToolbar.includes('const fullUsageLabel = usageLabel(effectiveUsage)'), '上下文悬浮详情没有保留完整使用量')
   assert(modelPage.includes('上下文 ${compactContextWindow'), '模型页没有展示官网同步的上下文长度')
   assert(app.includes('availableConfigurations={availableModelConfigurations}') && modelPage.includes('<h2>可用模型</h2>') && modelPage.includes('visibleAvailableConfigurations.map'), 'AI 模型设置页没有展示官网同步后的统一可用模型')
@@ -270,23 +272,26 @@ try {
   for (const text of ['工具调用', '输入参数', '返回结果', 'chat-tool-group', 'chat-tool-detail']) assert(chatToolCalls.includes(text), `工具调用详情缺少${text}`)
   assert(botChat.includes('createChatQuote(bot.name') && nativeChat.includes("createChatQuote('ZSense Agent'") && botChat.includes('composerRef.current?.focus()') && nativeChat.includes('composerRef.current?.focus()'), '两类对话的 AI 回复引用功能没有写入并聚焦输入框')
   assert(styles.includes('.chat-message-meta') && styles.includes('.chat-message-actions button'), '消息时间与操作区缺少界面样式')
-  assert(styles.includes('--sidebar-width: 208px') && styles.includes('.native-chat-sidebar-list { min-height: 0; max-height: none') && styles.includes('.native-chat-sidebar-section { min-height: 0;'), '左侧 AI 对话列表没有填满右下角剩余空间')
-  for (const text of ['conversation-action-fan', 'conversation-action-toggle', 'aria-expanded={expanded}', 'conversation-action-item delete', 'conversation-action-item rename', 'conversation-action-item archive', 'title="删除对话"']) {
-    assert(conversationActions.includes(text), `会话操作扇形菜单缺少：${text}`)
+  assert(styles.includes('--sidebar-rail-width: 56px') && styles.includes('.native-chat-sidebar-list { min-height: 0; max-height: none') && styles.includes('.native-chat-sidebar-section { min-height: 0;'), '左侧 AI 对话列表没有使用双栏导航或填满剩余空间')
+  for (const text of ['conversation-context-menu', 'role="menu"', 'role="menuitem"', "row.addEventListener('contextmenu'", "event.key === 'F10'", "event.pointerType !== 'touch'", '重命名', '归档对话', '删除对话']) {
+    assert(conversationActions.includes(text), `会话右键菜单缺少：${text}`)
   }
   assert(conversationActions.includes('onRename(conversation.id') && conversationActions.includes('onArchive(conversation.id') && conversationActions.includes('onDelete(conversation.id)'), '会话操作没有保留重命名、归档和删除的真实操作')
-  assert(styles.includes('.native-chat-sidebar-row:is(:hover, :focus-within) .conversation-action-toggle') && styles.includes('.conversation-actions:is(:hover, :focus-within, .is-expanded) .conversation-action-item') && styles.includes('translateX(calc(var(--conversation-action-step) * -2))') && styles.includes('.conversation-action-fan > button > svg { transition: none; }'), '会话操作缺少三点入口、悬浮展开动画或减少动态效果适配')
-  assert(styles.includes('.conversation-action-toggle {') && styles.includes('opacity: 1;\n  pointer-events: auto;\n  visibility: visible;'), '会话列表的三点操作入口没有常驻显示')
-  assert(styles.includes('0 0 40px color-mix(in srgb, var(--primary) 12%, transparent)') && styles.includes('background: var(--primary);\n  color: #fff;'), '会话列表三点按钮缺少与主题一致的蓝色发光悬停效果')
+  assert(!conversationActions.includes('MoreHorizontal') && !conversationActions.includes('conversation-action-toggle') && conversationActions.includes('className="conversation-context-anchor" hidden'), '会话列表不应显示三点或预留按钮占位')
+  assert(styles.includes('.conversation-context-menu') && styles.includes('.conversation-context-menu > button:focus-visible'), '会话菜单缺少视觉样式或键盘选中反馈')
+  assert(conversationActions.includes('window.innerWidth - bounds.width - 8') && conversationActions.includes('window.innerHeight - bounds.height - 8'), '右键菜单没有处理窗口边缘裁剪')
   assert(!conversationActions.includes('conversation-delete-direct') && !styles.includes('.conversation-delete-direct'), '删除按钮不应直接占用左侧会话列表空间')
-  assert(styles.includes('--conversation-action-size: 30px') && styles.includes('--conversation-action-step: 34px') && styles.includes('.conversation-action-fan::before') && styles.includes('.conversation-actions:is(:hover, :focus-within, .is-expanded) .conversation-action-fan::before { pointer-events: auto; }'), '会话操作按钮没有缩小，或悬浮菜单缺少连续命中区域')
-  assert(conversationActions.includes('<Pencil size={13}') && conversationActions.includes('<MoreHorizontal size={15}'), '会话操作图标没有使用紧凑尺寸')
+  assert(conversationActions.includes("event.key === 'ArrowDown'") && conversationActions.includes("event.key === 'Escape'") && conversationActions.includes("window.addEventListener('scroll'"), '会话菜单没有方向键导航、Escape 或滚动关闭')
+  assert(conversationActions.includes('<Pencil size={15}'), '会话操作图标没有使用紧凑尺寸')
   assert(!app.includes('className="top-create-button"'), '顶部不应保留重复的创建 Bot 按钮')
   assert(overview.includes('!voiceWakeEnabled && <button type="button" className="overview-voice-prompt"'), '语音未开启提示没有放在总览页右上角或没有按关闭状态显示')
   assert(overview.includes('语音唤醒未开启') && overview.includes('点击进入语音设置') && overview.includes('onOpenVoiceSettings'), '总览页语音提示没有提供清晰文案或语音设置入口')
   assert(app.includes("voiceInteraction.state !== 'idle' && <VoiceInteractionStatus"), '空闲时不应在侧栏额外显示语音交流状态条')
-  assert(sidebar.indexOf('className={`icon-button workspace-settings') < sidebar.indexOf('<VoiceWakeToggle enabled='), '语音唤醒开关必须与设置同排并位于其右侧')
-  assert(styles.includes('.workspace-switcher .workspace-settings { margin-left: auto; }') && styles.includes('.voice-wake-toggle.enabled'), '语音唤醒开关没有右对齐或缺少开启状态')
+  assert(sidebar.includes('className="sidebar-rail-bottom"') && sidebar.includes('<VoiceWakeToggle enabled=') && sidebar.includes('className={`icon-button workspace-settings'), '语音唤醒与设置必须保留在图标栏底部')
+  assert(sidebar.includes('currentUser.displayName.trim() || currentUser.username') && sidebar.includes('className="sidebar-account-name" title={accountName}>{accountName}'), '侧栏顶部没有显示当前账号名称或缺少完整名称悬浮说明')
+  assert(!sidebar.includes('sidebar-current-user') && !styles.includes('.sidebar-current-user'), '侧栏底部仍重复显示账号名称或保留旧名称样式')
+  assert(styles.includes('.sidebar-account-name { min-width: 0; flex: 1 1 auto; overflow: hidden;') && styles.includes('text-overflow: ellipsis; white-space: nowrap;'), '侧栏长账号名没有省略显示或挤压操作按钮')
+  assert(styles.includes('.sidebar-rail-bottom') && styles.includes('.voice-wake-toggle.enabled'), '底部语音唤醒开关缺少开启状态')
   assert(app.includes('voiceWakeEnabled: !settings.voiceWakeEnabled') && app.includes('onToggleVoiceWake={() => void toggleVoiceWake()}'), '侧栏语音图标没有切换并保存真实唤醒设置')
   assert(styles.includes('.overview-voice-prompt:focus-visible') && styles.includes('.overview-voice-prompt { width: 100%; }'), '总览语音提示缺少键盘焦点或窄窗口适配')
   assert(settings.includes('锁屏时继续运行') && settings.includes('不会阻止电脑锁屏') && settings.includes('draft.runWhileLocked'), '设置界面缺少锁屏运行开关或说明')
@@ -306,7 +311,7 @@ try {
   assert(capabilitySource.includes("category: 'filesystem:external-write'") && capabilitySource.includes('protectedDestructiveTarget'), '完全访问下文件工具安全边界仍然生效')
   assert(desktopMain.includes("powerSaveBlocker.start('prevent-app-suspension')") && desktopMain.includes('setBackgroundThrottling(!shouldKeepRunning)') && desktopMain.includes('onRunWhileLockedChanged: applyRunWhileLocked'), '锁屏运行设置没有连接桌面后台运行策略')
   assert(ipcSource.includes('onRunWhileLockedChanged(workspace.settings.runWhileLocked)'), '锁屏运行设置保存后没有立即应用')
-  for (const text of ['工作区', '选择文件夹', '添加附件', '上下文', '当前模型', '推理强度', "value: 'none'", "value: 'low'", "value: 'high'", "value: 'max'"]) {
+  for (const text of ['工作区', '选择会话工作区', '添加附件', '上下文', '当前模型', '推理强度', "value: 'none'", "value: 'low'", "value: 'high'", "value: 'max'"]) {
     assert(composerToolbar.includes(text), `对话输入区缺少${text}`)
   }
   assert(nativeChat.includes('<ChatComposerToolbar') && botChat.includes('<ChatComposerToolbar'), 'AI 对话和 Bot 对话必须共用完整输入工具栏')
@@ -314,8 +319,13 @@ try {
   assert(attachmentService.includes('resolveDroppedAttachments(files)') && attachmentService.includes('mergeChatAttachments') && preloadSource.includes('webUtils.getPathForFile(file)') && ipcSource.includes("'zsense:chat:resolve-dropped-attachments'"), '拖入文件没有通过 Electron 安全路径解析与统一附件校验')
   assert(nativeChat.includes('useChatAttachmentPaste') && botChat.includes('useChatAttachmentPaste') && nativeChat.includes('onPaste={onPasteAttachments}') && botChat.includes('onPaste={onPasteAttachments}'), 'Bot 与 AI 对话输入框没有接入图片粘贴')
   assert(attachmentService.includes('resolvePastedAttachments(images, workspacePath)') && preloadSource.includes("invoke('zsense:chat:resolve-pasted-attachments'") && ipcSource.includes("'zsense:chat:resolve-pasted-attachments'") && desktopAttachmentService.includes('stagePastedImageAttachments'), '剪贴板图片没有通过 Electron 本地保存链路进入会话工作区')
-  assert(botChat.includes('className="chat-composer bot-composer unified-composer"'), 'Bot 对话输入区没有与对话框等宽停靠')
-  assert(nativeChat.includes('className="chat-composer native unified-composer"'), 'AI 对话没有使用统一输入布局')
+  assert(botChat.includes('chat-composer bot-composer unified-composer'), 'Bot 对话输入区没有与对话框等宽停靠')
+  assert(nativeChat.includes('chat-composer native unified-composer'), 'AI 对话没有使用统一输入布局')
+  for (const chatSource of [botChat, nativeChat]) {
+    assert(chatSource.includes('<ChatSendActions sending={sending}') && chatSource.includes("sending ? 'is-running' : ''"), '两类对话没有共用横向发送操作组或动态预留空间')
+  }
+  assert(chatSendActions.includes('停止当前轮次') && chatSendActions.includes("sending ? '调整本轮' : '发送消息'") && chatSendActions.includes('type="button"') && chatSendActions.includes('type="submit"'), '停止和发送按钮缺少独立语义或操作说明')
+  assert(styles.includes('.chat-send-actions { display: flex; flex-direction: row; flex-wrap: nowrap;') && styles.includes('--chat-action-dock-width: calc(var(--chat-action-button-size) * 2 + 8px)') && styles.includes('calc(var(--chat-action-dock-width) + 24px)'), '运行中操作组没有横向并排或没有为工具栏和手机输入留出安全空间')
   assert(botChat.includes('layout="composer"') && nativeChat.includes('layout="composer"'), '两类对话没有启用统一组合式布局')
   assert(styles.includes('linear-gradient(#ffffff, #ffffff) padding-box') && styles.includes('linear-gradient(135deg, #dbeafe') && styles.includes('.unified-composer .chat-send:active:not(:disabled)'), '对话输入框没有应用蓝色主题的参考样式和按压反馈')
   assert(styles.includes('--bg: #ffffff') && styles.includes('--primary: #2563eb') && styles.includes('--primary-soft: #eff6ff'), '应用没有统一使用白色背景与蓝色主题变量')
@@ -328,9 +338,10 @@ try {
   }
   assert(botChat.includes('transcriptRef={scrollRef}') && nativeChat.includes('transcriptRef={transcriptRef}'), 'Bot 与 AI 对话没有把历史滚动区接入输入框自动收缩')
   assert(settings.includes('向上浏览历史时会临时收缩') && styles.includes('.is-scroll-collapsed .chat-composer-resize-handle'), '显示设置未说明自动收缩，或收缩状态缺少视觉反馈')
-  for (const text of ['chat-compact-control', 'chat-control-summary', 'chat-control-detail', 'chat-workspace-detail', 'chat-reasoning-detail', 'chat-model-detail', 'chat-context-detail']) assert(composerToolbar.includes(text), `输入区底部控件缺少缩略或完整信息结构：${text}`)
-  assert(styles.includes('.composer-layout .chat-compact-control:is(:hover, :focus-visible, :focus-within) > .chat-control-detail') && styles.includes('transform: translateY(0) scale(1)') && styles.includes('opacity: 1'), '输入区底部控件没有同时支持悬浮和键盘聚焦展开')
-  assert(styles.includes('.composer-layout .chat-control-detail') && styles.includes('transition: opacity 160ms ease-out, transform 220ms') && styles.includes('@media (prefers-reduced-motion: reduce)') && styles.includes('.composer-layout .chat-control-detail,'), '底部控件展开动效没有使用稳定动画或适配减少动态效果')
+  for (const text of ['chat-compact-control', 'chat-control-summary', 'chat-control-detail', 'chat-workspace-detail', 'chat-reasoning-detail', 'chat-model-detail', 'chat-context-detail']) assert(`${composerToolbar}\n${composerControlTooltip}`.includes(text), `输入区底部控件缺少缩略或完整信息结构：${text}`)
+  for (const text of ['createPortal', 'document.body', 'role="tooltip"', 'aria-describedby', "addEventListener('pointerenter'", "addEventListener('focusin'", "event.key === 'Escape'", 'ResizeObserver', 'window.innerWidth', 'window.innerHeight']) assert(composerControlTooltip.includes(text), `输入区状态气泡缺少可访问交互或防裁切定位：${text}`)
+  assert(styles.includes('.chat-control-tooltip {') && styles.includes('position: fixed') && styles.includes('max-width: calc(100vw - 16px)') && styles.includes('overflow-wrap: anywhere'), '状态气泡没有采用独立定位、视口限宽和长内容换行')
+  assert(styles.includes('@media (prefers-reduced-motion: reduce)') && styles.includes('.chat-control-tooltip,') && styles.includes('.chat-context-ring-value,'), '状态气泡和圆环没有适配减少动态效果')
   assert(!styles.includes('.chat-composer.unified-composer::before') && !styles.includes('@keyframes chat-composer-trail'), '整个输入框仍残留错误的悬浮描边或扫光动效')
   assert(styles.includes('.chat-composer.unified-composer > .chat-composer-resize-handle') && styles.includes('min-height: 0') && styles.includes('padding: 0') && styles.includes('justify-items: center') && styles.includes('cursor: ns-resize') && styles.includes('touch-action: none') && styles.includes('grid-template-rows: var(--chat-input-height, 88px) auto'), '输入框缺少顶部居中的拖拽边缘、通用样式隔离或紧凑默认高度')
   assert(databaseSource.includes("if (schemaVersion < 23)") && databaseSource.includes("UPDATE settings SET value='88'") && settings.includes('直接拖动输入框上边缘调整'), '旧版输入框高度没有迁移到紧凑默认值，或显示设置缺少拖拽说明')
@@ -343,9 +354,9 @@ try {
   }
   assert(!nativeChat.includes('<button className="button primary" onClick={startNew}'), 'AI 对话新建页仍保留重复的新对话按钮')
   assert(!nativeChat.includes('onStartNew'), '已删除的 AI 对话新建按钮仍遗留无效回调')
-  assert(composerToolbar.includes("<Plus size={layout === 'composer' ? 19 : 15}") && composerToolbar.includes('className="chat-control-summary attachment-summary"') && composerToolbar.includes("aria-label={picking ? '正在选择附件'"), '统一输入区的附件操作没有改成可访问的加号按钮')
+  assert(composerToolbar.includes('<Plus size={18}') && composerToolbar.includes('className="chat-control-summary attachment-summary"') && composerToolbar.includes("aria-label={picking ? '正在选择附件'"), '统一输入区的附件操作没有改成可访问的加号按钮')
   assert(styles.includes('.chat-attachment-button > .attachment-summary') && styles.includes('position: absolute') && styles.includes('place-items: center') && styles.includes('place-content: center'), '附件加号没有使用按钮内绝对居中定位')
-  assert(composerToolbar.indexOf('className="chat-attachment-button"') < composerToolbar.indexOf('className={`chat-workspace-button'), '添加附件按钮没有放在输入工具栏最左侧')
+  assert(composerToolbar.indexOf('className="chat-attachment-button chat-compact-control"') >= 0 && composerToolbar.indexOf('className="chat-attachment-button chat-compact-control"') < composerToolbar.indexOf('className={`chat-workspace-button'), '添加附件按钮没有放在输入工具栏最左侧')
   assert(composerToolbar.indexOf('chat-reasoning-select') < composerToolbar.indexOf('chat-model-select') && composerToolbar.indexOf('chat-model-select') < composerToolbar.indexOf('chat-context-usage'), '输入区控件源码顺序与视觉顺序不一致')
   assert(nativeChat.includes('<ConversationJumpNav') && botChat.includes('<ConversationJumpNav'), 'AI 对话和 Bot 对话没有共用快速跳转导航')
   assert(nativeChat.includes('<ChatScrollToBottomButton') && botChat.includes('<ChatScrollToBottomButton'), '两类会话都必须提供一键返回最底部按钮')
@@ -354,7 +365,9 @@ try {
   assert(chatRunStore.includes("const runs = new Map<string, ChatRunSnapshot>()") && chatRunStore.includes('useSyncExternalStore') && chatRunStore.includes('moveChatRun'), '后台会话执行状态没有脱离单个对话组件持久保存')
   assert(!nativeChat.includes('onConversationChange(activeConversationId); onCancel') && /const close = \(\) => \{\s*onClose\(\)\s*\}/.test(botChat), '切换会话或关闭 Bot 对话仍可能隐式取消后台执行')
   assert(nativeChat.includes('updateChatRun(activeViewKeyRef.current') && botChat.includes('updateChatRun(activeViewKeyRef.current'), '追加指令或停止状态没有同步到后台会话执行状态')
-  assert(botChat.includes("message.modelProvider || initialProvider") && botChat.includes("message.model || initialModel"), 'Bot 历史回复没有使用会话或全局模型兜底')
+  assert(botChat.includes('savedBotTranscript(conversation, initialProvider, initialModel)') && botChat.includes('message.modelProvider || provider') && botChat.includes('message.model || model'), 'Bot 历史回复没有使用会话或全局模型兜底')
+  assert(botChat.includes('savedBotTranscript(savedConversation, initialProvider, initialModel)') && botChat.includes('messages: savedMessages || run.messages.map'), 'Bot 新轮次保存后没有替换临时消息 ID')
+  assert(app.includes('const sendingTarget = chatTarget') && app.includes('current === sendingTarget') && app.includes('key={chatTarget?.dialogKey || chatConversation?.id'), 'Bot 保存结果没有使用切换守卫或稳定的对话组件 key')
   assert(botChat.includes("showModel={message.role === 'assistant'}") && nativeChat.includes("showModel={message.role === 'assistant'}"), 'AI 回复在模型缺失时仍可能完全隐藏模型栏')
   assert(conversationJumpNav.includes('对话信息快速跳转') && conversationJumpNav.includes('scrollIntoView') && conversationJumpNav.includes("message.role !== 'user'"), '对话快速跳转没有按用户提问轮次建立导航')
   assert(conversationJumpNav.includes('IntersectionObserver') && conversationJumpNav.includes('chat-jump-preview') && conversationJumpNav.includes("aria-current={active ? 'step' : undefined}"), '历史对话导航没有实现刻度跟随、摘要预览和当前轮次状态')
@@ -363,8 +376,14 @@ try {
   assert(!nativeChat.includes('NATIVE CHAT') && !nativeChat.includes('className="page-heading native-chat-heading"'), 'AI 对话新建页仍保留冗余抬头')
   assert(nativeChat.includes("const conversationTitle = activeConversation?.title.trim() || '新对话'") && nativeChat.includes('title={conversationTitle}>{conversationTitle}'), 'AI 对话页抬头没有显示当前会话名称')
   assert(!nativeChat.includes('<strong>ZSense AI</strong><small>'), 'AI 对话页仍在顶部显示固定 AI 名称和模型描述')
-  assert(styles.includes('.composer-layout .chat-model-select') && styles.includes('max-width: 160px') && styles.includes('.composer-layout .chat-control-summary > strong') && styles.includes('text-overflow: ellipsis'), '对话模型选择器没有统一限宽和省略显示')
-  assert(composerToolbar.includes('title={selectedModelLabel}'), '超长模型名省略后没有保留完整名称提示')
+  assert(styles.includes('.composer-layout .chat-workspace-button') && styles.includes('width: 136px') && styles.includes('width: 82px') && styles.includes('max-width: 160px') && styles.includes('.composer-layout .chat-control-summary > strong') && styles.includes('text-overflow: ellipsis'), '工作区、推理强度和模型摘要没有恢复紧凑可变宽与长文字省略')
+  const controlSummaryBodies = [...composerToolbar.matchAll(/<span className="chat-control-summary(?: attachment-summary)?"[^>]*>([\s\S]*?)<\/span>/g)].map((match) => match[1])
+  assert.equal(controlSummaryBodies.length, 5, '五个对话底部控件必须保留一致的图标摘要结构')
+  assert([0, 4].every((index) => !controlSummaryBodies[index].includes('<strong') && !controlSummaryBodies[index].includes('<ChevronDown')), '附件与上下文控件必须继续只显示图标，不带状态文字或箭头')
+  assert(controlSummaryBodies[1].includes('workspaceName(workspacePath)') && controlSummaryBodies[1].includes('<strong>') && !controlSummaryBodies[1].includes('<ChevronDown'), '工作区摘要必须显示所选文件夹名称且不带下拉箭头')
+  assert(controlSummaryBodies[2].includes('<strong>{reasoningEffort}</strong>') && controlSummaryBodies[3].includes('<strong>{selectedModelSummary}</strong>'), '推理强度或模型摘要没有显示当前状态，模型只应显示 ID')
+  assert([2, 3].every((index) => (controlSummaryBodies[index].match(/<ChevronDown/g) || []).length === 1), '只有推理强度与模型选择器应各保留一个下拉箭头')
+  assert(composerToolbar.includes('<ChatComposerControlTooltip className="chat-model-detail">') && composerToolbar.includes('<strong>{selectedModelLabel}</strong>'), '模型状态气泡没有保留完整供应商和模型名称')
   assert(styles.includes('.page.native-chat-page') && styles.includes('height: calc(100dvh - var(--topbar-height))') && styles.includes('.native-chat-page .native-chat-main'), 'AI 对话没有贴齐工作区边界')
   assert(styles.includes('.chat-message-list .chat-message.user') && styles.includes('flex-direction: row-reverse') && styles.includes('.chat-message-list .chat-message.assistant'), '对话消息没有按用户右侧、AI 左侧排列')
   assert(styles.includes('.chat-message:focus { outline: none; }') && styles.includes('.chat-message:focus-visible { outline: 2px solid var(--primary);'), '鼠标点击消息仍会显示焦点边框，或键盘焦点缺少可见反馈')
@@ -375,7 +394,7 @@ try {
   assert(!overview.includes("'跟随全局默认模型'"), '总览不应再显示“跟随全局默认模型”')
   assert(app.includes('SessionProgressCenter') && app.includes('trackSessionEvent'), '铃铛没有接入会话流式进度')
   assert(sidebar.includes('aria-label={`查看会话进度') && !sidebar.includes('aria-label="查看运行记录"'), '左栏铃铛仍然指向运行记录')
-  assert(sidebar.indexOf('className={`icon-button notification-button') < sidebar.indexOf('className={`icon-button workspace-settings'), '会话进度入口必须位于左栏设置按钮左侧')
+  assert(sidebar.includes('className="sidebar-rail-bottom"') && sidebar.includes('className={`icon-button notification-button'), '会话进度入口必须保留在图标栏底部')
   assert(styles.includes('--topbar-height: 0px') && styles.includes('.topbar {') && styles.includes('display: none;'), '桌面展开左栏时不应保留空白顶栏')
   for (const text of ['会话进度', '进行中', '已完成', '清除已结束']) assert(sessionProgressCenter.includes(text), `会话通知中心缺少${text}`)
   for (const text of ["addEventListener('pointerdown', dismissOutside, true)", "target.closest('.notification-button')", 'panelRef.current?.contains(target)', "event.key !== 'Escape'"]) {
@@ -442,10 +461,10 @@ try {
   for (const tool of ['list_files', 'read_file', 'write_file', 'patch_file', 'copy_file', 'move_file', 'delete_path', 'terminal', 'process_manage', 'web_extract', 'browser_navigate', 'checkpoint_manage', 'session_search', 'context_reference', 'tool_search', 'toolset_manage', 'mcp_manage', 'todo_manage', 'goal_manage', 'loop_manage', 'heartbeat_manage']) assert(capabilitySource.includes(`tool('${tool}'`), `Agent Core 缺少迁移工具 ${tool}`)
   assert(autonomySource.includes("task.kind === 'heartbeat'") && autonomySource.includes('NO_CHANGE') && autonomySource.includes("channelId: 'scheduled'"), '自治任务恢复、静默心跳或隐藏会话未实现')
   assert(styles.includes('.skills-source-tabs') && styles.includes('.autonomy-list'), '技能范围与自主任务面板缺少界面样式')
-  assert(app.includes('SIDEBAR_COLLAPSED_STORAGE_KEY') && app.includes("sidebarCollapsed ? 'sidebar-collapsed' : ''") && app.includes('aria-label="展开左侧导航"'), '左侧导航折叠状态未持久化或缺少恢复按钮')
-  assert(styles.includes('.app-shell.sidebar-collapsed { --sidebar-width: 0px; --topbar-height: 48px; }') && styles.includes('width: 208px') && styles.includes('.app-shell.sidebar-collapsed .sidebar { visibility: hidden; transform: translateX(-100%); pointer-events: none;'), '左侧导航折叠后没有完整隐藏或释放主内容区域')
-  assert(styles.includes('.sidebar-collapse') && styles.includes('.desktop-sidebar-open'), '左侧导航缺少折叠或展开按钮样式')
-  assert(sidebar.includes("collapsed && !mobileOpen ? { inert: '' } : {}"), '折叠后的左侧导航仍可能被键盘焦点访问')
+  assert(app.includes('SIDEBAR_COLLAPSED_STORAGE_KEY') && app.includes("sidebarCollapsed ? 'sidebar-collapsed' : ''") && sidebar.includes('aria-label="展开会话侧栏"'), '左侧导航折叠状态未持久化或缺少图标栏恢复按钮')
+  assert(styles.includes('--sidebar-width: var(--sidebar-rail-width)') && styles.includes('.sidebar-panel') && styles.includes('.sidebar-rail'), '折叠后没有释放会话面板空间并保留图标栏')
+  assert(!app.includes('className="icon-button desktop-sidebar-open"'), '桌面折叠不应重复显示顶部展开栏')
+  assert(sidebar.includes('id="sidebar-panel"') && sidebar.includes('inert') && sidebar.includes('aria-hidden'), '收起面板与关闭的移动导航没有隔离键盘焦点')
 
   console.log(JSON.stringify({
     ok: true,
@@ -459,7 +478,7 @@ try {
     liveBotSnapshotAfterDeletion: true,
     markdownRendererConnected: true,
     chatMessageTimestampCopyAndQuoteShared: true,
-    conversationActionFanAccessible: true,
+    conversationContextMenuAccessible: true,
     duplicateTopCreateRemoved: true,
     composerControlsShared: true,
     composerAutoCollapseOnHistoryScroll: true,

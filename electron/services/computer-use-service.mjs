@@ -58,19 +58,56 @@ function scaledThumbnailSize(display) {
 }
 
 export class ComputerUseService {
-  constructor({ dryRun = false } = {}) {
+  constructor({ dryRun = false, platform = process.platform, runtime = {} } = {}) {
     this.dryRun = Boolean(dryRun)
+    this.platform = platform
+    this.runtime = { desktopCapturer, screen, systemPreferences, ...runtime }
+    this.screenPermissionRequestAttempted = false
+    this.lastObservedScreenPermission = null
+    this.screenCaptureFailure = ''
   }
 
-  supported() { return ['darwin', 'win32'].includes(process.platform) }
+  supported() { return ['darwin', 'win32'].includes(this.platform) }
+
+  #screenPermission() {
+    if (this.platform !== 'darwin') return this.supported() ? 'granted' : 'unsupported'
+    let status = 'unknown'
+    try {
+      const value = this.runtime.systemPreferences.getMediaAccessStatus('screen')
+      if (['not-determined', 'granted', 'denied', 'restricted'].includes(value)) status = value
+    } catch { /* An unavailable status must not permit model-driven capture. */ }
+    if (this.lastObservedScreenPermission !== null && status !== this.lastObservedScreenPermission) this.screenCaptureFailure = ''
+    this.lastObservedScreenPermission = status
+    return status
+  }
+
+  #screenPermissionError() {
+    return new Error('当前 ZSense 尚未获得有效录屏权限，未读取屏幕。请在“系统设置 → 隐私与安全性 → 录屏与系统录音”中允许 ZSense，然后完整退出并重开应用；首次使用也可在设置中的 Computer Use 主动申请权限。')
+  }
+
+  #assertScreenPermission() {
+    if (this.platform === 'darwin') {
+      if (this.#screenPermission() !== 'granted') throw this.#screenPermissionError()
+      if (this.screenCaptureFailure) throw new Error(this.screenCaptureFailure)
+    }
+  }
+
+  #screenCaptureError(error) {
+    if (this.platform !== 'darwin') return error
+    if (this.#screenPermission() !== 'granted') return this.#screenPermissionError()
+    this.screenCaptureFailure = 'macOS 显示已授权，但未能取得屏幕画面；可能是权限尚未生效或系统录屏服务异常。为避免重复系统弹窗，Computer Use 已暂停自动重试。请完整退出并重开 ZSense，或在系统设置重新允许录屏后主动点击 Computer Use 的权限检查按钮。'
+    return new Error(this.screenCaptureFailure, { cause: error })
+  }
 
   inspect(enabled = false) {
-    const mac = process.platform === 'darwin'
+    const mac = this.platform === 'darwin'
+    const { systemPreferences } = this.runtime
     return {
       supported: this.supported(),
       enabled: Boolean(enabled),
-      platform: process.platform,
-      screenCapturePermission: mac ? systemPreferences.getMediaAccessStatus('screen') : this.supported() ? 'granted' : 'unsupported',
+      platform: this.platform,
+      screenCapturePermission: this.#screenPermission(),
+      screenCaptureNeedsRestart: Boolean(this.screenCaptureFailure),
       accessibilityPermission: mac ? (systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'denied') : this.supported() ? 'granted' : 'unsupported',
       dryRun: this.dryRun,
       checkedAt: new Date().toISOString(),
@@ -78,17 +115,26 @@ export class ComputerUseService {
   }
 
   async requestPermissions(enabled = false) {
-    if (!this.supported()) return this.inspect(enabled)
-    if (process.platform === 'darwin') {
+    if (!this.supported() || this.dryRun) return this.inspect(enabled)
+    if (this.platform === 'darwin') {
+      const { systemPreferences, desktopCapturer } = this.runtime
       systemPreferences.isTrustedAccessibilityClient(true)
-      try { await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 2, height: 2 } }) }
-      catch { /* The returned status below explains denied screen recording access. */ }
+      const permission = this.#screenPermission()
+      if (permission === 'granted') this.screenCaptureFailure = ''
+      // Only an explicit first-time permission request may enter the screen
+      // capture API before consent; denied/restricted must use System Settings.
+      if (permission === 'not-determined' && !this.screenPermissionRequestAttempted) {
+        this.screenPermissionRequestAttempted = true
+        try { await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 2, height: 2 } }) }
+        catch { /* The returned status below explains missing recording access. */ }
+      }
     }
     return this.inspect(enabled)
   }
 
   screenInfo() {
     if (!this.supported()) throw new Error('Computer Use 目前只支持 macOS 和 Windows。')
+    const { screen } = this.runtime
     const primaryId = screen.getPrimaryDisplay().id
     const cursor = screen.getCursorScreenPoint()
     return {
@@ -106,6 +152,7 @@ export class ComputerUseService {
   }
 
   #display(value) {
+    const { screen } = this.runtime
     const displays = screen.getAllDisplays()
     const requested = String(value || '')
     const display = requested ? displays.find((item) => String(item.id) === requested) : screen.getPrimaryDisplay()
@@ -114,6 +161,7 @@ export class ComputerUseService {
   }
 
   #assertPoint(xValue, yValue) {
+    const { screen } = this.runtime
     const x = integer(xValue, '横坐标')
     const y = integer(yValue, '纵坐标')
     const display = screen.getDisplayNearestPoint({ x, y })
@@ -124,6 +172,7 @@ export class ComputerUseService {
 
   async screenshot(displayId = '') {
     if (!this.supported()) throw new Error('Computer Use 目前只支持 macOS 和 Windows。')
+    if (!this.dryRun) this.#assertScreenPermission()
     const display = this.#display(displayId)
     const thumbnailSize = scaledThumbnailSize(display)
     if (this.dryRun) return {
@@ -131,9 +180,13 @@ export class ComputerUseService {
       displayId: String(display.id), bounds: { ...display.bounds }, imageSize: thumbnailSize,
       __zsenseImage: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', name: 'computer-screen.png' },
     }
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize, fetchWindowIcons: false })
+    const { desktopCapturer, screen } = this.runtime
+    let sources
+    try { sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize, fetchWindowIcons: false }) }
+    catch (error) { throw this.#screenCaptureError(error) }
+    this.#assertScreenPermission()
     const source = sources.find((item) => String(item.display_id) === String(display.id)) || sources[screen.getAllDisplays().findIndex((item) => item.id === display.id)]
-    if (!source || source.thumbnail.isEmpty()) throw new Error('没有取得屏幕画面。请在系统设置中允许 ZSense 录制屏幕后重试。')
+    if (!source || source.thumbnail.isEmpty()) throw this.#screenCaptureError(new Error('没有取得屏幕画面。请在系统设置中允许 ZSense 录制屏幕后重试。'))
     const imageSize = source.thumbnail.getSize()
     return {
       summary: `已截取显示器 ${display.id}。图像 ${imageSize.width}×${imageSize.height}；对应全局桌面坐标 x=${display.bounds.x}..${display.bounds.x + display.bounds.width - 1}，y=${display.bounds.y}..${display.bounds.y + display.bounds.height - 1}。后续点击请使用全局桌面坐标。`,
@@ -157,7 +210,7 @@ export class ComputerUseService {
   #assertControlPermission() {
     if (!this.supported()) throw new Error('Computer Use 目前只支持 macOS 和 Windows。')
     if (this.dryRun) return
-    if (process.platform === 'darwin' && !systemPreferences.isTrustedAccessibilityClient(false)) throw new Error('ZSense 尚未获得辅助功能权限。请到“系统设置 → 隐私与安全性 → 辅助功能”中允许 ZSense。')
+    if (this.platform === 'darwin' && !this.runtime.systemPreferences.isTrustedAccessibilityClient(false)) throw new Error('ZSense 尚未获得辅助功能权限。请到“系统设置 → 隐私与安全性 → 辅助功能”中允许 ZSense。')
   }
 
   async click(xValue, yValue, button = 'left', count = 1) {
@@ -166,7 +219,7 @@ export class ComputerUseService {
     const normalizedButton = button === 'right' ? 'right' : 'left'
     const normalizedCount = Math.max(1, Math.min(2, integer(count || 1, '点击次数')))
     if (!this.dryRun) {
-      if (process.platform === 'darwin') {
+      if (this.platform === 'darwin') {
         const clickCommand = normalizedButton === 'right' ? 'perform action "AXShowMenu" of process 1' : `click at {${point.x}, ${point.y}}`
         if (normalizedButton === 'right') {
           const script = `ObjC.import('CoreGraphics'); function run(argv){ const x=Number(argv[0]), y=Number(argv[1]); const p=$.CGPointMake(x,y); const d=$.CGEventCreateMouseEvent(null,$.kCGEventRightMouseDown,p,$.kCGMouseButtonRight); const u=$.CGEventCreateMouseEvent(null,$.kCGEventRightMouseUp,p,$.kCGMouseButtonRight); $.CGEventPost($.kCGHIDEventTap,d); $.CGEventPost($.kCGHIDEventTap,u); }`
@@ -188,7 +241,7 @@ export class ComputerUseService {
     const amount = Math.max(80, Math.min(2400, integer(amountValue || 640, '滚动距离')))
     const delta = direction === 'up' ? amount : -amount
     if (!this.dryRun) {
-      if (process.platform === 'darwin') {
+      if (this.platform === 'darwin') {
         const script = `ObjC.import('CoreGraphics'); function run(argv){ const delta=Number(argv[0]); const e=$.CGEventCreateScrollWheelEvent(null,$.kCGScrollEventUnitPixel,1,delta); $.CGEventPost($.kCGHIDEventTap,e); }`
         await this.#runMacJxa(script, [delta])
       } else {
@@ -202,7 +255,7 @@ export class ComputerUseService {
     this.#assertControlPermission()
     const chord = normalizedChord(chordValue)
     if (!this.dryRun) {
-      if (process.platform === 'darwin') {
+      if (this.platform === 'darwin') {
         const modifiers = macModifierList(chord.modifiers)
         if (MAC_KEY_CODES[chord.key]) await this.#runMacAppleScript(`tell application "System Events" to key code ${MAC_KEY_CODES[chord.key]}${modifiers}`)
         else await this.#runMacAppleScript(`tell application "System Events" to keystroke "${chord.key.toLowerCase()}"${modifiers}`)
@@ -222,7 +275,7 @@ export class ComputerUseService {
       const previous = clipboard.readText()
       clipboard.writeText(text)
       try {
-        await this.key(process.platform === 'darwin' ? 'META+V' : 'CTRL+V')
+        await this.key(this.platform === 'darwin' ? 'META+V' : 'CTRL+V')
         await new Promise((resolve) => setTimeout(resolve, 120))
       } finally {
         clipboard.writeText(previous)

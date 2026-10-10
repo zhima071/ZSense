@@ -23,7 +23,7 @@ ZSense 是一个本地优先的多 Bot 桌面 Agent 工作台。应用内置自�
 - 网关守护：随 ZSense 启动和退出，每 30 秒检测健康状态，断线后自动重建。
 - 设备互联：同一局域网内的 ZSense 自动发现、输入配对码后建立受信任连接；可以在设置里逐台开启“允许对方读取本机状态”和“允许对方在本机执行任务”，远程任务在本机 AI 对话空间中留痕，且不能代替本机用户批准敏感操作。
 - 软件更新：默认检查官方 GitHub Release，在应用内下载新安装包、显示速度与进度；暂停保留缓存并支持断点续传，取消清理缓存，完成后核对 SHA-256；macOS 可替换并重启应用，Windows 在应用退出后启动安装向导。自定义更新源仍支持 `latest-mac.yml` / `latest.yml` / JSON，但无法验证官方安装包时须手动安装。
-- 语音：可自定义唤醒词并通过录入向导测试；STT 使用内置 whisper.cpp 多语言模型，TTS 使用内置 MOSS-TTS-Nano，均在本地执行且跨 macOS/Windows。
+- 语音：可自定义唤醒词并通过录入向导测试；STT 使用内置 whisper.cpp Base Q5 多语言模型，TTS 使用轻量 MeloTTS 固定中文音色，均在本地执行且跨 macOS/Windows，无需额外下载语音组件。
 - 定时任务：独立工作区、固定模型和技能，任务对话不进入普通会话列表，可在运行历史查看、复制和删除；AI 对话和 Bot 对话里直接说“每天/每周定时做某事”，Agent 会用 `scheduled_task` 工具创建和管理同一份定时任务数据（需逐次确认），不会去改系统的 launchd 或 cron。每个任务在卡片上都有一个眼睛按钮，可以单独开关「是否在总览页展示」；总览页只列打开开关的任务，全部关掉时整块不显示。
 - 文件侧栏：HTML 可视化编辑，以及 Excel 本地共享会话、手动保存和 Agent 实时读取/修改。
 - 本地安全：账号登录态、系统安全存储中的 API Key、敏感信息脱敏、重大操作逐次审批和本机 SQLite 数据库。Agent 固定为完全访问（可读写任意本机路径、访问本机与局域网地址），但删除、工作区外写入、安装发布和外部提交仍会逐次确认；可在“设置 → 工具与 MCP”开启“自动审批（模型判断）”，由模型先判断这类操作是否放行，判断为拒绝或不可用时仍然弹窗，并保留最近判断记录。
@@ -81,7 +81,7 @@ npm run tools:verify:win
 npm run desktop:build:win
 ```
 
-macOS 与 Windows 产物都位于 `release/`。Windows NSIS 安装包必须在原生 Windows x64 环境构建；在 macOS 上执行 `desktop:build:win` 会直接停止，避免产生归档完整却启动即崩溃的交叉构建包。Windows 安装包内置固定版本并经过 SHA-256 校验的 OfficeCLI、dws、kdocs-cli、Whisper STT、MOSS-TTS 以及 VC++ 离线运行库；安装时不下载 Python、Node.js、Git 或单独 Runtime。GitHub Actions 构建后会在真正的 Windows x64 环境中安装产物，再上传供发布使用。
+macOS 与 Windows 产物都位于 `release/`。Windows NSIS 安装包必须在原生 Windows x64 环境构建；在 macOS 上执行 `desktop:build:win` 会直接停止，避免产生归档完整却启动即崩溃的交叉构建包。Windows 安装包内置固定版本并经过 SHA-256 校验的 OfficeCLI、dws、kdocs-cli、Whisper Base Q5、MeloTTS、原生语音引擎及 VC++ 离线运行库；安装时不下载 Python、Node.js、Git 或单独 Runtime。GitHub Actions 构建后会在真正的 Windows x64 环境中安装产物，再上传供发布使用。
 
 单项测试仍可单独运行，例如 `npm run test:agent-core`、`npm run test:gateway`；完整清单见 `package.json` 的 `test:*` 脚本。任务执行效率的度量方法与基线数字见 `docs/efficiency.md`。
 

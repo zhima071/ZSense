@@ -4,7 +4,12 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatComposerDraftKey, moveChatComposerDraft, readChatComposerDraft, updateChatComposerDraft } from '../src/services/chat-composer-drafts.ts'
+import { chatComposerDraftKey, insertChatDictation, moveChatComposerDraft, readChatComposerDraft, updateChatComposerDraft } from '../src/services/chat-composer-drafts.ts'
+
+assert.deepEqual(insertChatDictation('第一行\n最后一行', '听写内容', 4, 4), { text: '第一行\n听写内容最后一行', caret: 8 })
+assert.deepEqual(insertChatDictation('请替换这段文字。', '听写', 1, 7), { text: '请听写。', caret: 3 })
+assert.deepEqual(insertChatDictation('已有草稿', '追加'), { text: '已有草稿追加', caret: 6 })
+assert.deepEqual(insertChatDictation('草稿', '   '), { text: '草稿', caret: 2 })
 
 const first = chatComposerDraftKey('native', 'conversation-first')
 const second = chatComposerDraftKey('native', 'conversation-second')

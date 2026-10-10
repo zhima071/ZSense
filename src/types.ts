@@ -89,6 +89,26 @@ export interface MemoryItem {
   createdAt?: string
   lastRecalledAt?: string | null
   recallCount?: number
+  /** 自动注入准入与内容保护分开；暂停时原记录仍可管理和手动检索。 */
+  recallEligible?: boolean
+  recallReason?: string
+  /** 由本机已验证的会话归属确定，模型输出不能设置这些字段。 */
+  ownerKey?: string
+  projectKey?: string
+  factKey?: string
+  locked?: boolean
+  revision?: number
+  messageId?: string
+  state?: 'active' | 'superseded' | 'forgotten'
+  history?: { title?: string; excerpt: string; evidence?: string; source?: string; updatedAt: string; revision?: number }[]
+}
+
+export interface MemoryChangedEvent {
+  botId: string
+  memories: MemoryItem[]
+  memoryCount: number
+  memorySize: string
+  status?: { capacityReached?: boolean; message?: string }
 }
 
 export interface Bot {
@@ -322,6 +342,9 @@ export interface OfficeWordOperation {
   text?: string
   filePath?: string
   url?: string
+  /** UTF-16 character offsets, zero-based and end-exclusive, within path. */
+  range?: { start: number; end: number }
+  baseText?: string
   options?: Record<string, string | number | boolean>
 }
 
@@ -332,6 +355,9 @@ export interface WordDocumentSession {
   dirty: boolean
   pendingCount: number
   modifiedAt: string
+  baseContentHash: string
+  previewHtml?: string
+  conflict?: { code: 'OFFICE_EXTERNAL_CONFLICT'; message: string }
   operations: OfficeWordOperation[]
   document: OfficeDocumentState
 }
@@ -387,6 +413,8 @@ export interface OfficeSheetCellChange {
   formula?: string
   contentChanged?: boolean
   style?: OfficeSheetCellStyle
+  /** Editor sends the complete current style, including clearing a style. */
+  styleSnapshot?: boolean
 }
 
 export type OfficeWorkbookOperationAction =
@@ -449,6 +477,9 @@ export interface OfficeSessionResult {
   savedAt?: string
   bytesWritten?: number
   contentHash?: string
+  baseContentHash?: string
+  previewHtml?: string
+  conflict?: { code: 'OFFICE_EXTERNAL_CONFLICT'; message: string }
   document?: OfficeDocumentState
   message: string
 }
@@ -614,6 +645,7 @@ export interface ChatMessageRecord {
   model: string
   durationMs: number | null
   outputTokens: number | null
+  bookmarked?: boolean
   createdAt: string
 }
 
@@ -711,6 +743,30 @@ export interface AgentLoopStep {
   durationMs?: number
   toolCallCount?: number
   error?: string
+  orchestration?: AgentTaskPlanSnapshot
+}
+
+export interface AgentTaskRecord {
+  id: string
+  title: string
+  goal: string
+  dependencies: string[]
+  expectedOutputs: string[]
+  writeResources: string[]
+  status: 'pending' | 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'blocked' | 'cancelled'
+  toolCallCount?: number
+  durationMs?: number
+  output?: string
+  error?: string
+  startedAt?: string
+  finishedAt?: string
+}
+
+export interface AgentTaskPlanSnapshot {
+  planId: string
+  phase: 'planning' | 'scheduled' | 'running' | 'validating' | 'complete' | 'error' | 'cancelled'
+  tasks: AgentTaskRecord[]
+  message?: string
 }
 
 
@@ -739,6 +795,7 @@ export interface ChatClarificationAnswer {
 }
 
 export type ChatStreamEvent =
+  | ({ requestId: string; conversationId: string; type: 'orchestration' } & AgentTaskPlanSnapshot)
   | { requestId: string; conversationId: string; type: 'conversation-ready' }
   | { requestId: string; conversationId: string; type: 'started'; sessionId: string; runtimeSessionId: string }
   | { requestId: string; conversationId: string; type: 'status'; phase: string; message: string }
@@ -821,6 +878,8 @@ export interface AppSettings {
   strictMemory: boolean
   autoApprovalEnabled: boolean
   autoExtractMemory: boolean
+  memoryModelRefinement: boolean
+  autoDistillSkills: boolean
   memoryPeriodicReview: boolean
   memoryReviewInterval: number
   memoryRecallLimit: number
@@ -859,6 +918,8 @@ export interface AppSettings {
   approvalDesktopNotification: boolean
   completionDesktopNotification: boolean
   chatInputHeight: number
+  /** 应用内听写快捷键；缺省使用默认组合，空字符串表示关闭。 */
+  chatDictationShortcut?: string
   voiceWakeEnabled: boolean
   voiceWakePhrase: string
   voiceWakeSound: boolean
@@ -1135,8 +1196,8 @@ export interface LocalVoiceOption {
   id: string
   name: string
   language: Exclude<ResponseLanguage, 'auto'>
-  gender: 'female' | 'male' | 'custom'
-  engine: 'moss-tts-nano'
+  gender: 'female' | 'male' | 'custom' | 'neutral'
+  engine: 'melo-tts'
   local: true
   bundled: boolean
 }
@@ -1167,6 +1228,11 @@ export interface LocalVoiceSpeechResult {
   offline: true
   audioBase64?: string
   audioMimeType?: 'audio/wav'
+}
+
+export interface LocalVoiceSynthesisResult extends LocalVoiceSpeechResult {
+  audioBase64: string
+  audioMimeType: 'audio/wav'
 }
 
 export interface WorkspaceSnapshot {

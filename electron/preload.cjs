@@ -94,6 +94,8 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
   screenshot: Object.freeze({
     captureRegion: (rectangle) => invoke('zsense:screenshot:capture-region', rectangle),
     globalStatus: () => invoke('zsense:global-screenshot:status').then((data) => ({ ok: true, data })),
+    recheckGlobalPermissions: () => invoke('zsense:global-screenshot:recheck-permissions').then((data) => ({ ok: true, data })),
+    requestGlobalPermissions: () => invoke('zsense:global-screenshot:request-permissions').then((data) => ({ ok: true, data })),
     setGlobalShortcut: (shortcut) => invoke('zsense:global-screenshot:set-shortcut', shortcut).then((data) => ({ ok: true, data })),
     startGlobal: () => invoke('zsense:global-screenshot:start').then((data) => ({ ok: true, data })),
     onGlobalError: (callback) => {
@@ -143,6 +145,11 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
       ipcRenderer.on('zsense:data:changed', listener)
       return () => ipcRenderer.removeListener('zsense:data:changed', listener)
     },
+    onMemoryChanged: (callback) => {
+      const listener = (_event, payload) => callback(payload)
+      ipcRenderer.on('zsense:workspace:memory-changed', listener)
+      return () => ipcRenderer.removeListener('zsense:workspace:memory-changed', listener)
+    },
   }),
   officeTasks: Object.freeze({
     list: (filter = {}) => invoke('zsense:office-tasks:list', filter),
@@ -163,7 +170,8 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
     status: () => invoke('zsense:office:status'),
     recent: () => invoke('zsense:office:recent'),
     pick: () => invoke('zsense:office:pick'),
-    open: (filePath) => invoke('zsense:office:open', filePath),
+    open: (filePath, options) => invoke('zsense:office:open', options?.requestId ? { filePath, requestId: options.requestId } : filePath),
+    cancelOpen: (requestId) => invoke('zsense:office:cancel-open', requestId),
     inlineImage: (request) => invoke('zsense:office:inline-image', request),
     refresh: (filePath) => invoke('zsense:office:refresh', filePath),
     imageThumbnail: (filePath) => invoke('zsense:office:image-thumbnail', filePath),
@@ -175,6 +183,10 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
     stageWordOperations: (request) => invoke('zsense:office:stage-word-operations', request),
     saveWord: (request) => invoke('zsense:office:save-word', request),
     discardWord: (request) => invoke('zsense:office:discard-word', request),
+    getPresentation: (request) => invoke('zsense:office:get-presentation', request),
+    stagePresentation: (request) => invoke('zsense:office:stage-presentation', request),
+    savePresentation: (request) => invoke('zsense:office:save-presentation', request),
+    discardPresentation: (request) => invoke('zsense:office:discard-presentation', request),
     getHtml: (request) => invoke('zsense:office:get-html', request),
     stageHtml: (request) => invoke('zsense:office:stage-html', request),
     saveHtml: (request) => invoke('zsense:office:save-html', request),
@@ -223,6 +235,8 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
     archive: (conversationId, archived) => invoke('zsense:conversations:archive', { conversationId, archived }),
     setWorkspace: (conversationId, workspacePath) => invoke('zsense:conversations:set-workspace', { conversationId, workspacePath }),
     deleteMessage: (conversationId, messageId) => invoke('zsense:conversations:delete-message', { conversationId, messageId }),
+    bookmarkMessage: (conversationId, messageId, bookmarked) => invoke('zsense:conversations:bookmark-message', { conversationId, messageId, bookmarked }),
+    forkMessage: (conversationId, messageId) => invoke('zsense:conversations:fork-message', { conversationId, messageId }),
     delete: (conversationId) => invoke('zsense:conversations:delete', conversationId),
     moveGroup: (conversationId, groupId) => invoke('zsense:conversations:move-group', { conversationId, groupId }),
     reorder: (botId, orderedIds) => invoke('zsense:conversations:reorder', { botId, orderedIds }),
@@ -313,7 +327,7 @@ contextBridge.exposeInMainWorld('zsenseDesktop', Object.freeze({
   voice: Object.freeze({
     transcribeLocal: (request) => invoke('zsense:voice:transcribe-local', request),
     listVoices: () => invoke('zsense:voice:list-voices'),
-    ttsConfig: () => invoke('zsense:voice:tts-config'),
+    synthesizeLocal: (request) => invoke('zsense:voice:synthesize-local', request),
     stopSpeaking: () => invoke('zsense:voice:stop-speaking'),
   }),
   models: Object.freeze({
