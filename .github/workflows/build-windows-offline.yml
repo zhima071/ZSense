@@ -7,6 +7,11 @@ on:
         description: Optional draft release with hash-verified build input
         required: false
         type: string
+      verifiedResourceBundle:
+        description: Use the fixed hash-verified complete offline build inputs
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -22,28 +27,37 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Fetch pinned official kdocs archive
+      - name: Fetch pinned official build input
         env:
           GH_TOKEN: ${{ github.token }}
           ZSENSE_BUILD_RESOURCE_TAG: ${{ inputs.resourceDraftTag }}
+          ZSENSE_COMPLETE_RESOURCE_BUNDLE: ${{ inputs.verifiedResourceBundle }}
         run: |
           if [[ ! "$ZSENSE_BUILD_RESOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             printf '%s\n' 'Invalid build draft tag.' >&2
             exit 1
           fi
           mkdir -p build-inputs
-          gh release download "$ZSENSE_BUILD_RESOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'kdocs-cli-2.5.7-windows-amd64.zip' --dir build-inputs
-          actual="$(sha256sum build-inputs/kdocs-cli-2.5.7-windows-amd64.zip | cut -d ' ' -f 1)"
-          if [[ "$actual" != 'e9a7e152d38db9766a60cc207e9d79d8d9c449c4e38ec8c2b19ed10765780b81' ]]; then
-            printf '%s\n' 'Official kdocs archive hash mismatch.' >&2
+          if [[ "$ZSENSE_COMPLETE_RESOURCE_BUNDLE" == 'true' ]]; then
+            name='ZSense-Windows-pinned-build-inputs.zip'
+            expected='6054a7167e6b33c4d4c5f90c2a92c737552ed7c118cfc4bdf1c1bec770144ec8'
+          else
+            name='kdocs-cli-2.5.7-windows-amd64.zip'
+            expected='e9a7e152d38db9766a60cc207e9d79d8d9c449c4e38ec8c2b19ed10765780b81'
+          fi
+          gh release download "$ZSENSE_BUILD_RESOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir build-inputs
+          actual="$(sha256sum "build-inputs/$name" | cut -d ' ' -f 1)"
+          if [[ "$actual" != "$expected" ]]; then
+            printf '%s\n' 'Official build input hash mismatch.' >&2
             exit 1
           fi
       - name: Hand verified archive to read-only build job
         uses: actions/upload-artifact@v4
         with:
           name: verified-windows-build-input
-          path: build-inputs/kdocs-cli-2.5.7-windows-amd64.zip
+          path: build-inputs/*.zip
           if-no-files-found: error
+          compression-level: 0
           retention-days: 1
 
   windows-x64:
@@ -82,19 +96,31 @@ jobs:
           path: .cache/voice-assets
           key: zsense-voice-v1-${{ hashFiles('scripts/voice-assets.mjs') }}
 
-      - name: Receive optional verified official kdocs archive
+      - name: Receive optional verified official build input
         if: ${{ inputs.resourceDraftTag != '' }}
         uses: actions/download-artifact@v4
         with:
           name: verified-windows-build-input
-          path: .cache/windows-offline-assets
+          path: ${{ inputs.verifiedResourceBundle && '.cache/build-inputs' || '.cache/windows-offline-assets' }}
 
-      - name: Verify seeded official kdocs archive
+      - name: Verify and restore seeded official build input
         if: ${{ inputs.resourceDraftTag != '' }}
         shell: pwsh
+        env:
+          ZSENSE_COMPLETE_RESOURCE_BUNDLE: ${{ inputs.verifiedResourceBundle }}
         run: |
-          $hash = (Get-FileHash '.cache/windows-offline-assets/kdocs-cli-2.5.7-windows-amd64.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne 'e9a7e152d38db9766a60cc207e9d79d8d9c449c4e38ec8c2b19ed10765780b81') { throw 'Official kdocs archive hash mismatch.' }
+          if ($env:ZSENSE_COMPLETE_RESOURCE_BUNDLE -eq 'true') {
+            $archive = '.cache/build-inputs/ZSense-Windows-pinned-build-inputs.zip'
+            $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne '6054a7167e6b33c4d4c5f90c2a92c737552ed7c118cfc4bdf1c1bec770144ec8') { throw 'Official build input hash mismatch.' }
+            # The pinned ZIP was checked to contain only 35 catalog files under
+            # these two cache folders. Normal preparation verifies each again.
+            tar -xf $archive -C '.cache'
+            if ($LASTEXITCODE -ne 0) { throw 'Verified build input extraction failed.' }
+          } else {
+            $hash = (Get-FileHash '.cache/windows-offline-assets/kdocs-cli-2.5.7-windows-amd64.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne 'e9a7e152d38db9766a60cc207e9d79d8d9c449c4e38ec8c2b19ed10765780b81') { throw 'Official kdocs archive hash mismatch.' }
+          }
 
       - name: Prepare pinned Windows offline tools
         shell: pwsh
