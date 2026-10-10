@@ -5,9 +5,12 @@
 - `MemoryUpgradeService` 在 SQLite 初始化之后、LocalMemoryService/SecretsVault 初始化之前运行；schema 44 新增召回准入列，`local-memory-quality-v1` 完成标记和整理同事务。新设备零扫描写 `new-device`，失败回滚且下次启动重试，不阻断启动、不新增弹窗、不调用模型或联网。
 - 只暂停明确旧自动噪声的上下文注入，不删除/改写旧原文、证据、归属、保护或修订历史；人工/未知/疑似人工策展来源保守保留，敏感自动内容优先排除。管理与显式搜索仍可见，详情说明原因，手动保存可恢复当前归属内召回。
 - 补充审查修复：可信新原话纠正未保护旧事实后重新判断准入（无原话不能自动恢复）；schema 44 补齐 schema 43 漏掉的历史 Hermes 自动来源，未证明用户的外部渠道旧 local 项隔离为 `legacy-unattributed`，不改已绑定归属。
-- 新增 `test:memory-upgrade`，包验收检查升级服务及标记，原生 Windows workflow 增加记忆回归但本轮不触发远端 CI。所有迁移测试只用临时库，不读取真实用户数据。
+- 新增 `test:memory-upgrade`，包验收检查升级服务及标记。所有迁移测试只用临时库，不读取真实用户数据。用户追加发行授权后，原生 Windows workflow 加入记忆回归、包内真实 Electron 迁移与静默安装验收并触发远端 CI。
 - 用户追加明确要求发布 Mac/Windows 新版，版本提升至 `0.26.11`，允许同步源码与原生 Windows CI 构建。工作流外部存储上传已禁用；安装包验证后才发布到 GitHub。本轮使用独立 staging 构建，不覆盖正在运行的本机 `.app`。固定本机签名不等于 Apple Developer ID 或公证；Windows 仍需原生构建与实际安装验收。
-- 安装包与最终测试结果将在完成验证后补入本节。
+- 最终源码全套 **96/96 通过**（并行度 3，169.0 秒，日志 `/var/folders/kz/_gqp13jj7zlfz29pkc2tk3w40000gn/T/zsense-tests-Ujd5gP`）；typecheck、syntax 和 diff-check 通过。需要真实屏幕/辅助权限的 computer-use 不在默认验收中。
+- Mac 独立 staging `/Volumes/out1/ZSense-package-02611-EYv92j/mac-arm64/ZSense.app`：194 个前端/Electron 文件逐字节匹配，包内真实 Electron 迁移通过；32 个代码对象固定证书签名及指定要求校验通过。ASAR SHA-256 `a1bb1a63f785fdef693b3185ad28ba4b1f03c9f5f9ffe3b1745c15fbf111d9b2`。DMG 为 432,673,941 B，SHA-256 `2eb808d3fbe3fe8bbdab25f216934dcc3503c9e24ce7223836c6cb4609b4a07c`；DMG 校验及真实挂载后 ASAR/签名复核通过。本轮未替换或重开用户正在运行的本机应用，未改动钥匙串 ACL 或录屏权限。
+- Windows 资源准备先遇官方 kdocs 端点连接失败，再发现只读 workflow token 无法读取草稿 Release。修复为独立短 seed job 使用 `contents:write` 仅认证下载固定官方 ZIP、核验 SHA 并交接 artifact；应用构建 job 保持 `contents:read`，再次核验 SHA，未传本机 token，未启用对象存储上传。原生 CI `38022971006` 的草稿读取/交接已通过；安装包最终结果待完成后补入。
+- 公开分发通用 TTS CLI 的 GPLv3 第 6(d) 条源码指引见 `docs/voice-source-distribution.md`；同 Release 附固定源码下载指引、许可证及构建/平台补丁 ZIP，不冒称完整离线 CCS 或二进制复现。精确第三方源码链持续可用是发布者责任。
 
 ## 2026-10-10 自动记忆流程优化（0.26.10，本机固定签名更新）
 
